@@ -8,6 +8,7 @@ import { useAppContext } from "../context/AppContext";
 import { Search as SearchIcon, Mic, ChevronLeft, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
+// --- API CONSTANTS ---
 const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
 
 const SECTION_CONFIGS =[
@@ -35,11 +36,23 @@ const getImageUrl = (item: any) => {
 
 const decodeEntities = (text: string) => text ? text.replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">") : "";
 
+// Intelligently parse Gaana's nested arrays for artists (for Trending & New Releases)
 const getSubtitle = (item: any) => {
   let names: string[] =[];
-  if (Array.isArray(item.artist)) names = item.artist.map((a: any) => a.name);
-  else if (Array.isArray(item.singers)) names = item.singers.map((a: any) => a.name);
-  else if (Array.isArray(item.artists)) names = item.artists.map((a: any) => a.name);
+  
+  if (item.entity_info) {
+     const artistInfo = item.entity_info.find((info: any) => info.key === 'artist' || info.key === 'singers');
+     if (artistInfo && Array.isArray(artistInfo.value)) {
+        names = artistInfo.value.map((a: any) => a.name);
+     }
+  }
+  
+  if (names.length === 0) {
+     if (Array.isArray(item.artist)) names = item.artist.map((a: any) => a.name);
+     else if (Array.isArray(item.singers)) names = item.singers.map((a: any) => a.name);
+     else if (Array.isArray(item.artists)) names = item.artists.map((a: any) => a.name);
+  }
+  
   return Array.from(new Set(names)).join(", ");
 };
 
@@ -49,17 +62,17 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
   const isLongTitle = title.length > 13;
 
   return (
-    // w-[28vw] forces exactly 3 cards plus gaps on mobile screens. 1.5x the original size.
-    <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[28vw] sm:w-[150px] md:w-[210px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
-      <div className="relative overflow-hidden bg-[#131D30] border border-[#1e293b] rounded-xl aspect-[1/1] mb-2 transition-transform duration-200 active:scale-95 shadow-md">
+    // Scaled exactly by 1.5x, fitting 3 cards automatically on mobile screens with nice spacing.
+    <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[38vw] sm:w-[180px] md:w-[210px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
+      <div className="relative overflow-hidden bg-[#131D30] border border-[#1e293b] rounded-2xl aspect-[1/1] mb-2 transition-transform duration-200 active:scale-95 shadow-md">
         <img src={getImageUrl(item)} alt={title} loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out" />
       </div>
       <div className="w-full overflow-hidden whitespace-nowrap text-center px-1">
-        <span className={`inline-block text-[13px] md:text-[15px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
+        <span className={`inline-block text-[14px] md:text-[16px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
       </div>
       {showSubtitle && subtitle && (
         <div className="w-full overflow-hidden whitespace-nowrap text-center mt-0.5 px-1">
-          <span className="inline-block text-[11px] md:text-[13px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
+          <span className="inline-block text-[12px] md:text-[14px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
         </div>
       )}
     </div>
@@ -78,10 +91,100 @@ export default function Home() {
   const[viewAllData, setViewAllData] = useState<any[]>([]);
   const [viewAllOffset, setViewAllOffset] = useState(0);
   const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const[hasMoreViewAll, setHasMoreViewAll] = useState(true);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
+
+  // Clear Session storage specifically tied to home cache safely
+  const clearHomeState = () => {
+     Object.keys(sessionStorage).forEach(k => {
+        if(k.startsWith('homeState_') || k === 'homeScrollY' || k === 'viewAllScrollY') sessionStorage.removeItem(k);
+     });
+  };
+
+  // --- PROGRESSIVE SCROLL FETCHER (Loads 3 sections simultaneously to prevent blanking) ---
+  const fetchNextChunk = async (chunkSize = 3) => {
+    if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
+    isLoadingRef.current = true;
+    
+    try {
+      const newSections: any[] =[];
+      const promises = [];
+      const configs =[];
+
+      for (let i = 0; i < chunkSize; i++) {
+        const idx = nextIndexRef.current + i;
+        if (idx >= SECTION_CONFIGS.length) break;
+        
+        const conf = SECTION_CONFIGS[idx];
+        let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
+        if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
+
+        promises.push(fetch(url).then(res => res.json()).catch(() => null));
+        configs.push(conf);
+      }
+
+      const results = await Promise.all(promises);
+      
+      results.forEach((json, i) => {
+         if(json) {
+            const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
+            if (data.length > 0) newSections.push({ ...configs[i], data });
+         }
+      });
+
+      setSections(prev => {
+          const updated = [...prev, ...newSections];
+          sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
+          return updated;
+      });
+
+      nextIndexRef.current += chunkSize;
+      sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
+    } catch (e) { console.error(e); }
+    
+    isLoadingRef.current = false;
+  };
+
+  // --- INITIAL MOUNT & STATE RESTORATION ---
+  useEffect(() => {
+    const initLoad = async () => {
+      const savedLang = sessionStorage.getItem('homeState_lang');
+      
+      // If language matches, strictly restore position perfectly from Session
+      if (savedLang === language) {
+         const savedSections = sessionStorage.getItem('homeState_sections');
+         if (savedSections && JSON.parse(savedSections).length > 0) {
+            setSections(JSON.parse(savedSections));
+            nextIndexRef.current = parseInt(sessionStorage.getItem('homeState_nextIndex') || '0');
+            
+            const savedViewAll = sessionStorage.getItem('homeState_viewAll');
+            if (savedViewAll && savedViewAll !== 'null') {
+               setViewAll(JSON.parse(savedViewAll));
+               setViewAllData(JSON.parse(sessionStorage.getItem('homeState_viewAllData') || '[]'));
+               setViewAllOffset(parseInt(sessionStorage.getItem('homeState_viewAllOffset') || '0'));
+               setHasMoreViewAll(sessionStorage.getItem('homeState_hasMore') === 'true');
+               setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('viewAllScrollY') || '0')), 50);
+            } else {
+               setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('homeScrollY') || '0')), 50);
+            }
+            return; 
+         }
+      }
+
+      // If language changed or cache is empty, fresh fast-paint load
+      clearHomeState();
+      sessionStorage.setItem('homeState_lang', language);
+      setSections([]);
+      setViewAll(null);
+      nextIndexRef.current = 0;
+      await fetchNextChunk(3); 
+    };
+
+    initLoad();
+  }, [language]);
 
   // Auto-Sliding Showcase
   useEffect(() => {
@@ -94,79 +197,66 @@ export default function Home() {
       }
     }, 4000);
     return () => clearInterval(interval);
-  },[sections, viewAll]);
-
-  // Progressive Safe Fetcher Engine
-  const fetchNextSection = async () => {
-    if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
-    isLoadingRef.current = true;
-    
-    try {
-      const conf = SECTION_CONFIGS[nextIndexRef.current];
-      let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
-      if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
-
-      const res = await fetch(url);
-      const json = await res.json();
-      const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
-      
-      if (data.length > 0) {
-        setSections(prev =>[...prev, { ...conf, data }]);
-      }
-    } catch (e) { console.error("Error fetching section", e); }
-    
-    nextIndexRef.current += 1;
-    isLoadingRef.current = false;
-  };
-
-  // Pre-load first 2 sections on mount instantly
-  useEffect(() => {
-    setSections([]);
-    nextIndexRef.current = 0;
-    
-    const initialLoad = async () => {
-       await fetchNextSection(); // Showcase
-       await fetchNextSection(); // Trending
-    };
-    initialLoad();
-  }, [language]);
+  }, [sections, viewAll]);
 
   // Lazy Load Remaining Sections on Scroll
   useEffect(() => {
     if (viewAll) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) {
-         fetchNextSection();
+         fetchNextChunk(3);
       }
-    }, { rootMargin: "600px" }); // Aggressive prefetch margin
+    }, { rootMargin: "800px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  },[sections, viewAll, language]);
+  }, [sections, viewAll, language]);
 
-  // Infinite Scroll for "View All"
+  // Infinite Scroll for "View All" (Stops fetching if blank data triggers end)
   useEffect(() => {
-    if (!viewAll || viewAll.noPagination) return;
+    if (!viewAll || viewAll.noPagination || !hasMoreViewAll) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
         const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAllOffset},40`;
         fetch(url).then(res => res.json()).then(json => {
-           const newItems = json?.data?.entities || json?.data?.tracks || json?.data || [];
+           const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
+           
            if (newItems.length > 0) {
-             setViewAllData(prev =>[...prev, ...newItems]);
-             setViewAllOffset(prev => prev + 40);
+             setViewAllData(prev => {
+                const updated =[...prev, ...newItems];
+                sessionStorage.setItem('homeState_viewAllData', JSON.stringify(updated));
+                return updated;
+             });
+             setViewAllOffset(prev => {
+                const nextOff = prev + 40;
+                sessionStorage.setItem('homeState_viewAllOffset', nextOff.toString());
+                return nextOff;
+             });
+           } else {
+             // Reached the end of content
+             setHasMoreViewAll(false);
+             sessionStorage.setItem('homeState_hasMore', 'false');
            }
            setIsFetchingViewAll(false);
-        }).catch(() => setIsFetchingViewAll(false));
+        }).catch(() => {
+           setIsFetchingViewAll(false);
+           setHasMoreViewAll(false);
+        });
       }
-    }, { rootMargin: "300px" });
+    }, { rootMargin: "400px" });
 
     if (viewAllObserverRef.current) observer.observe(viewAllObserverRef.current);
     return () => observer.disconnect();
-  },[viewAll, viewAllOffset, isFetchingViewAll, language]);
+  },[viewAll, viewAllOffset, isFetchingViewAll, hasMoreViewAll, language]);
 
   const handleItemClick = (item: any) => {
+    if (viewAll) {
+       sessionStorage.setItem('viewAllScrollY', window.scrollY.toString());
+    } else {
+       sessionStorage.setItem('homeScrollY', window.scrollY.toString());
+    }
+
     const type = item.entity_type || item.type;
     const isSong = type === "TR" || type === "song" || item.track_id;
 
@@ -183,21 +273,41 @@ export default function Home() {
   };
 
   const openViewAll = (section: any) => {
-    setViewAll({ 
+    sessionStorage.setItem('homeScrollY', window.scrollY.toString());
+    const vAll = { 
         title: section.title, 
         endpoint: section.url.split('&limit')[0].split('?limit')[0],
         noPagination: section.noPagination,
         showSubtitle: section.showSubtitle
-    });
+    };
+    setViewAll(vAll);
     setViewAllData(section.data);
     setViewAllOffset(section.data.length);
+    setHasMoreViewAll(true);
+    
+    sessionStorage.setItem('homeState_viewAll', JSON.stringify(vAll));
+    sessionStorage.setItem('homeState_viewAllData', JSON.stringify(section.data));
+    sessionStorage.setItem('homeState_viewAllOffset', section.data.length.toString());
+    sessionStorage.setItem('homeState_hasMore', 'true');
+    
+    window.scrollTo(0, 0);
+  };
+
+  const closeViewAll = () => {
+    setViewAll(null);
+    sessionStorage.removeItem('homeState_viewAll');
+    setTimeout(() => {
+        window.scrollTo(0, parseInt(sessionStorage.getItem('homeScrollY') || '0'));
+    }, 50);
   };
 
   // Immediate Initial Loader
   if (sections.length === 0) {
     return (
       <div className="flex h-screen flex-col items-center justify-center bg-[#0B1320] text-white">
-        <Loader2 size={40} className="animate-spin text-[#1db954]" />
+        <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4 animate-pulse opacity-40 px-4 w-full">
+           {[...Array(12)].map((_, i) => <div key={i} className="w-full aspect-[1/1] bg-[#131D30] rounded-2xl" />)}
+        </div>
       </div>
     );
   }
@@ -207,12 +317,12 @@ export default function Home() {
     return (
       <main className="min-h-screen bg-[#0B1320] pt-10 pb-28 text-white">
         <div className="flex items-center px-4 mb-6 sticky top-0 bg-[#0B1320]/90 backdrop-blur-md z-10 py-3 border-b border-[#131D30]">
-           <button onClick={() => setViewAll(null)} className="p-2 bg-[#131D30] border border-[#1e293b] rounded-full active:scale-95"><ChevronLeft size={24} /></button>
+           <button onClick={closeViewAll} className="p-2 bg-[#131D30] border border-[#1e293b] rounded-full active:scale-95"><ChevronLeft size={24} /></button>
            <h1 className="text-2xl font-extrabold ml-4 tracking-tight">{viewAll.title}</h1>
         </div>
         
-        {/* Dynamic perfect grid filling area evenly - strictly 3 columns on mobile */}
-        <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-y-8 gap-x-3 px-4 w-full">
+        {/* Dynamic perfect grid filling area evenly */}
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 gap-y-8 gap-x-3 px-4 w-full justify-items-center">
            {viewAllData.map((item, i) => (
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
            ))}
@@ -220,7 +330,8 @@ export default function Home() {
         
         {!viewAll.noPagination && (
            <div ref={viewAllObserverRef} className="w-full flex justify-center py-8 mt-4">
-              {isFetchingViewAll && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
+              {isFetchingViewAll && hasMoreViewAll && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
+              {!hasMoreViewAll && <p className="text-blue-200/50 text-sm font-medium">You have reached the end.</p>}
            </div>
         )}
       </main>
@@ -253,18 +364,18 @@ export default function Home() {
          </button>
       </div>
 
-      {/* Showcase / Top Picks (Uncropped native ratio without Text) */}
+      {/* Showcase / Top Picks (Uncropped native ratio prioritizing artwork_alt) */}
       {sections.length > 0 && sections[0].key === "showcase" && (
         <div className="mb-10">
           <h2 className="text-[22px] font-black mb-4 px-4 text-white tracking-tight">Top Picks</h2>
           <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1 items-center">
             {sections[0].data.map((item: any, i: number) => {
-               // Prioritizing Gaana's uncropped wide banner formats
-               let imgUrl = item.atw_alt || item.artwork_alt || item.atw || item.artwork_web || item.artwork_large || item.artwork;
-               imgUrl = imgUrl.replace('size_m', 'size_l');
+               // Safely extract the original showcase wide image
+               let imgUrl = item.artwork_alt || item.atw_alt || item.artwork_web || item.artwork_large || item.artwork || item.atw;
+               if (imgUrl) imgUrl = imgUrl.replace('size_m', 'size_l').replace('150x150', '500x500');
 
                return (
-                  <div key={i} onClick={() => handleItemClick(item)} className="w-[85vw] md:w-[500px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] border border-[#1e293b] active:scale-95 transition-transform duration-300">
+                  <div key={i} onClick={() => handleItemClick(item)} className="w-[90vw] md:w-[600px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] active:scale-95 transition-transform duration-300">
                     <img src={imgUrl} alt="Showcase" className="w-full h-auto block object-contain" />
                   </div>
                );
@@ -283,8 +394,7 @@ export default function Home() {
                <h2 className="text-[22px] font-black tracking-tight text-white">{section.title}</h2>
                <button onClick={() => openViewAll(section)} className="text-[12px] font-bold text-blue-400 bg-blue-400/10 px-3 py-1.5 rounded-full hover:bg-blue-400/20 active:scale-95 transition-all">View All</button>
             </div>
-            {/* 1.5x Increased Card horizontal scroll (Fits 3 per mobile screen gap-adjusted) */}
-            <div className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
+            <div className="flex gap-4 md:gap-5 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
               {section.data.map((item: any, i: number) => (
                   <PremiumCard key={i} item={item} showSubtitle={section.showSubtitle} onClick={handleItemClick} />
               ))}
