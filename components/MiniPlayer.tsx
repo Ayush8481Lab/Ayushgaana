@@ -324,8 +324,8 @@ export default function MiniPlayer() {
   const[loading, setLoading] = useState(false);
   const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
-  const[volume, setVolume] = useState(100);
+  const[duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(100);
   
   // MODAL/UI STATES
   const[isExpanded, setIsExpanded] = useState(false);
@@ -341,10 +341,10 @@ export default function MiniPlayer() {
   const [isShuffle, setIsShuffle] = useState(false);
   const [repeatMode, setRepeatMode] = useState(0); 
   
-  const[dragActiveIndex, setDragActiveIndex] = useState<number | null>(null);
+  const [dragActiveIndex, setDragActiveIndex] = useState<number | null>(null);
   const dragRef = useRef({ activeIndex: -1, startY: 0, currentY: 0, startScrollTop: 0, scrollSpeed: 0, rafId: 0, targetIndex: -1 });
-  const[isQueueEditMode, setIsQueueEditMode] = useState(false);
-  const [selectedQueueItems, setSelectedQueueItems] = useState<number[]>([]); 
+  const [isQueueEditMode, setIsQueueEditMode] = useState(false);
+  const[selectedQueueItems, setSelectedQueueItems] = useState<number[]>([]); 
 
   const [sleepTimer, setSleepTimer] = useState<number | 'end' | null>(null);
   const [timerRemaining, setTimerRemaining] = useState<number | null>(null);
@@ -356,11 +356,11 @@ export default function MiniPlayer() {
   
   const rapidKeyIdxRef = useRef(0);
   const [spotifyId, setSpotifyId] = useState<string | null>(null);
-  const [spotifyUrl, setSpotifyUrl] = useState<string | null>(null);
+  const[spotifyUrl, setSpotifyUrl] = useState<string | null>(null);
   const [lyrics, setLyrics] = useState<any[]>([]);
   const[syncType, setSyncType] = useState<string | null>(null);
   const[activeLyricIndex, setActiveLyricIndex] = useState(-1);
-  const [isLyricsFullScreen, setIsLyricsFullScreen] = useState(false);
+  const[isLyricsFullScreen, setIsLyricsFullScreen] = useState(false);
   const[canvasData, setCanvasData] = useState<any>(null);
   const[isCanvasLoaded, setIsCanvasLoaded] = useState(false);
   
@@ -380,8 +380,8 @@ export default function MiniPlayer() {
   const [songDetails, setSongDetails] = useState<any>(null);
 
   // Video State Maintained (Original Feature intact)
-  const[isVideoMode, setIsVideoMode] = useState(false);
-  const [ytVideoId, setYtVideoId] = useState<string | null>(null);
+  const [isVideoMode, setIsVideoMode] = useState(false);
+  const[ytVideoId, setYtVideoId] = useState<string | null>(null);
   const prefetchedYtIdRef = useRef<string | null>(null); 
   const iframeInitialTimeRef = useRef<number>(0); 
   const videoStartTimeRef = useRef<number>(0);    
@@ -389,13 +389,13 @@ export default function MiniPlayer() {
   const videoIframeRef = useRef<HTMLIFrameElement>(null);
 
   const [selectedQuality, setSelectedQuality] = useState("320");
-  const [lineFontSize, setLineFontSize] = useState("Medium");
+  const[lineFontSize, setLineFontSize] = useState("Medium");
   const[cardFontSize, setCardFontSize] = useState("Medium");
   const[isCanvasEnabled, setIsCanvasEnabled] = useState(true);
-  const [isLyricsEnabled, setIsLyricsEnabled] = useState(true);
+  const[isLyricsEnabled, setIsLyricsEnabled] = useState(true);
   const[isWordSyncEnabled, setIsWordSyncEnabled] = useState(true);
   const[isMiniWordSyncEnabled, setIsMiniWordSyncEnabled] = useState(true);
-  const [swipeX, setSwipeX] = useState(0);
+  const[swipeX, setSwipeX] = useState(0);
   const touchStartX = useRef(0);
   const restoreTimeRef = useRef<number | null>(null);
 
@@ -403,7 +403,7 @@ export default function MiniPlayer() {
   const isLyricsEnabledRef = useRef(true);
 
   // BACKGROUND AUDIO EQ STATE
-  const [isAudioEnhanced, setIsAudioEnhanced] = useState(true);
+  const[isAudioEnhanced, setIsAudioEnhanced] = useState(true);
   const audioCtxRef = useRef<any>(null);
   const isAudioPremiumSetupRef = useRef(false);
   const eqBandsRef = useRef<any[]>([]);
@@ -500,7 +500,7 @@ export default function MiniPlayer() {
           if (audioCtxRef.current.state === 'suspended') audioCtxRef.current.resume();
       }
       localStorage.setItem('audio_enhanced', isAudioEnhanced.toString());
-  }, [isAudioEnhanced]);
+  },[isAudioEnhanced]);
 
   // SLEEP TIMER
   useEffect(() => {
@@ -1078,7 +1078,6 @@ export default function MiniPlayer() {
       let combinedBuffer = new Uint8Array(0);
       for (let i = 0; i < segments.length; i++) {
           let segUrl = segments[i].url;
-          // Replace quality if required (e.g. 128 to user selected)
           if(quality !== "128") segUrl = segUrl.replace(/\/128\//g, `/${quality}/`);
           
           const res = await fetch(segUrl);
@@ -1106,7 +1105,7 @@ export default function MiniPlayer() {
       const buffer = new Int16Array(samples.length);
       for (let i = 0; i < samples.length; i++) buffer[i] = samples[i] < 0 ? samples[i] * 32768 : samples[i] * 32767;
 
-      const mp3Data: Int8Array[] =[];
+      const mp3Data: any[] =[]; // Fully fixes type errors
       const blockSize = 1152 * 500; 
       let lastYield = Date.now();
       
@@ -1122,7 +1121,7 @@ export default function MiniPlayer() {
       const endBuf = mp3encoder.flush();
       if (endBuf.length > 0) mp3Data.push(endBuf);
 
-      const mp3Blob = new Blob(mp3Data, { type: 'audio/mp3' });
+      const mp3Blob = new Blob(mp3Data as BlobPart[], { type: 'audio/mp3' });
       setDlState(prev => ({...prev, progress: 95, packStep: "Injecting Metadata..."}));
       
       const imgResp = await fetch(displayImage || "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg");
