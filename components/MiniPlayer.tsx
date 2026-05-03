@@ -1,3 +1,5 @@
+
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -686,7 +688,7 @@ export default function MiniPlayer() {
             } catch(e) {}
 
             if (cachedAuth && sDetails?.album_id) {
-                const builtUrl = buildGaanaUrl(sDetails.album_id, trackId.toString(), targetQ, cachedAuth);
+                const builtUrl = buildGaanaUrl(sDetails.album_id.toString(), trackId.toString(), targetQ, cachedAuth);
                 if (builtUrl) {
                     setAudioUrl(builtUrl);
                     streamSuccess = true;
@@ -703,7 +705,7 @@ export default function MiniPlayer() {
                 if (streamJson.data?.url) {
                     const authMatch = streamJson.data.url.match(/(hdntl=exp=\d+~acl=(?:%2f|\/)\*~data=hdntl~hmac=[a-f0-9]+)/i);
                     if (authMatch) {
-                        extractedAuth = authMatch[1];
+                        extractedAuth = authMatch[1].replace(/%2f/gi, '/');
                         const expMatch = extractedAuth.match(/exp=(\d+)/);
                         if (expMatch) {
                             localStorage.setItem('gaana_hls_auth', JSON.stringify({ auth: extractedAuth, exp: parseInt(expMatch[1]) * 1000 }));
@@ -711,20 +713,14 @@ export default function MiniPlayer() {
                     }
                 }
 
-                // If we successfully extracted the global auth, build the fast URL natively.
-                if (extractedAuth && sDetails?.album_id) {
-                     const builtUrl = buildGaanaUrl(sDetails.album_id.toString(), trackId.toString(), targetQ, extractedAuth);
-                     if (builtUrl && isCurrent) setAudioUrl(builtUrl);
-                } else {
-                     // Failsafe raw hlsUrl
-                     let finalUrl = "";
-                     if (streamJson.data?.hlsUrl) {
-                         finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
-                     } else if (streamJson.data?.url) {
-                         finalUrl = streamJson.data.url;
-                     }
-                     if (finalUrl && isCurrent) setAudioUrl(finalUrl);
+                // First play MUST use the explicitly returned valid link so we don't mismatch if album_id is missing or weird
+                let finalUrl = "";
+                if (streamJson.data?.hlsUrl) {
+                    finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
+                } else if (streamJson.data?.url) {
+                    finalUrl = streamJson.data.url;
                 }
+                if (finalUrl && isCurrent) setAudioUrl(finalUrl);
             }
             
             triggerLyricsAndSpotifyMatch(sDetails || currentSong);
@@ -833,7 +829,7 @@ export default function MiniPlayer() {
 
     loadTimer = setTimeout(() => { fetchGaanaData(); }, 150);
     return () => { isCurrent = false; clearTimeout(loadTimer); };
-  },[currentSong, selectedQuality, lyricsServer, retryCount]); // retryCount triggers re-fetch on error!
+  },[currentSong, selectedQuality, lyricsServer, retryCount]);
 
   useEffect(() => {
     if (queue && queue.length > 0) {
@@ -1734,8 +1730,14 @@ export default function MiniPlayer() {
         input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; border-radius: 4px; }
         input[type=range]:focus { outline: none; }
         
-        .mobile-slider::-webkit-slider-runnable-track { background: transparent; }
-        .mobile-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #fff; margin-top: -4px; box-shadow: 0 2px 4px rgba(0,0,0,0.4); border: 0; }
+        .mobile-slider { -webkit-appearance: none; appearance: none; height: 20px; background: transparent !important; cursor: pointer; outline: none; margin: 0; padding: 0; }
+        .mobile-slider::-webkit-slider-runnable-track { height: 100%; background: transparent; }
+        .mobile-slider::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            height: 12px; width: 12px; border-radius: 50%;
+            background: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.4); border: 0;
+            position: relative; top: 50%; transform: translateY(-50%);
+        }
         
         .no-select { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; pointer-events: none; }
         .no-select-text { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
@@ -1863,14 +1865,19 @@ export default function MiniPlayer() {
                 {!isLyricsFullScreen && <button onClick={handleLikeClick} className="flex-shrink-0 ml-2 active:scale-75 transition-transform pointer-events-auto"><Heart size={26} fill={isSongLiked ? "#1db954" : "none"} color={isSongLiked ? "#1db954" : "white"} /></button>}
               </div>
 
-              {/* Advanced 3-Tier Preloaded Progress Bar */}
+              {/* Advanced 3-Tier Preloaded Progress Bar (Glitter Centered Perfectly) */}
               <div className={`w-full flex flex-col gap-1 relative drop-shadow-md ${isLyricsFullScreen ? 'mb-2 scale-[0.95] origin-bottom' : 'mb-5'}`}>
-                <div className="w-full relative h-[4px] flex items-center group">
-                    <div className="absolute top-[0px] left-0 right-0 h-[4px] bg-white/20 rounded-full pointer-events-none" />
-                    <div className="absolute top-[0px] left-0 h-[4px] bg-white/40 rounded-full pointer-events-none transition-all duration-300" style={{ width: `${bufferedProgress}%` }} />
-                    <input type="range" min="0" max="100" value={duration > 0 ? progress : 0} onChange={handleSeekChange} onPointerDown={handleSeekStart} onPointerUp={handleSeekEnd} onTouchStart={handleSeekStart} onTouchEnd={handleSeekEnd} className="w-full mobile-slider relative z-10 pointer-events-auto" style={{ background: `linear-gradient(to right, #fff ${progress}%, transparent ${progress}%)` }} />
+                <div className="w-full relative h-[20px] flex items-center group">
+                    {/* Background Low White */}
+                    <div className="absolute left-0 right-0 h-[4px] bg-white/20 rounded-full pointer-events-none top-1/2 -translate-y-1/2" />
+                    {/* Buffered Medium White */}
+                    <div className="absolute left-0 h-[4px] bg-white/40 rounded-full pointer-events-none transition-all duration-300 top-1/2 -translate-y-1/2" style={{ width: `${bufferedProgress}%` }} />
+                    {/* Active Progress Solid White */}
+                    <div className="absolute left-0 h-[4px] bg-white rounded-full pointer-events-none top-1/2 -translate-y-1/2" style={{ width: `${progress}%` }} />
+                    {/* Range Input for Thumb (Mathematically Centered) */}
+                    <input type="range" min="0" max="100" value={duration > 0 ? progress : 0} onChange={handleSeekChange} onPointerDown={handleSeekStart} onPointerUp={handleSeekEnd} onTouchStart={handleSeekStart} onTouchEnd={handleSeekEnd} className="w-full mobile-slider absolute inset-0 z-10 pointer-events-auto" style={{ background: 'transparent' }} />
                 </div>
-                <div className="flex items-center justify-between text-[11px] font-medium text-[#a7a7a7] mt-1 w-full pointer-events-none no-select-text"><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
+                <div className="flex items-center justify-between text-[11px] font-medium text-[#a7a7a7] mt-[-2px] w-full pointer-events-none no-select-text"><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
               </div>
 
               <div className={`flex flex-col w-full transition-all duration-[450ms] ease-[cubic-bezier(0.32,0.72,0,1)] overflow-hidden ${isUiHidden && !isVideoMode ? 'max-h-0 opacity-0 translate-y-6 pointer-events-none' : (isLyricsFullScreen ? 'max-h-[64px] opacity-100 translate-y-0 pointer-events-auto scale-[0.85] origin-bottom' : 'max-h-[140px] opacity-100 translate-y-0 pointer-events-auto')}`}>
@@ -2030,6 +2037,7 @@ export default function MiniPlayer() {
                    </div>
                 </div>
 
+                {/* Lyrics Server Selection */}
                 <div className="flex flex-col gap-3 mt-2">
                    <span className="text-white/60 text-[11px] font-bold uppercase tracking-wider pl-1">Lyrics Server Preference</span>
                    <div className="flex bg-[#1e1e1e] rounded-[16px] overflow-hidden p-2 gap-2">
