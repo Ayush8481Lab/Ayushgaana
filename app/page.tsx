@@ -63,16 +63,16 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
 
   return (
     // Scaled exactly by 1.5x, fitting 3 cards automatically on mobile screens with nice spacing.
-    <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[38vw] sm:w-[180px] md:w-[210px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
+    <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[29vw] sm:w-[180px] md:w-[210px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
       <div className="relative overflow-hidden bg-[#131D30] border border-[#1e293b] rounded-2xl aspect-[1/1] mb-2 transition-transform duration-200 active:scale-95 shadow-md">
         <img src={getImageUrl(item)} alt={title} loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out" />
       </div>
       <div className="w-full overflow-hidden whitespace-nowrap text-center px-1">
-        <span className={`inline-block text-[14px] md:text-[16px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
+        <span className={`inline-block text-[13px] md:text-[15px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
       </div>
       {showSubtitle && subtitle && (
         <div className="w-full overflow-hidden whitespace-nowrap text-center mt-0.5 px-1">
-          <span className="inline-block text-[12px] md:text-[14px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
+          <span className="inline-block text-[11px] md:text-[13px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
         </div>
       )}
     </div>
@@ -83,26 +83,17 @@ export default function Home() {
   const { language, setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   const router = useRouter();
   
+  const [isInitializing, setIsInitializing] = useState(true);
   const [sections, setSections] = useState<any[]>([]);
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
 
   const[viewAll, setViewAll] = useState<any | null>(null);
-  const[viewAllData, setViewAllData] = useState<any[]>([]);
-  const [viewAllOffset, setViewAllOffset] = useState(0);
-  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
-  const[hasMoreViewAll, setHasMoreViewAll] = useState(true);
+  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
-
-  // Clear Session storage specifically tied to home cache safely
-  const clearHomeState = () => {
-     Object.keys(sessionStorage).forEach(k => {
-        if(k.startsWith('homeState_') || k === 'homeScrollY' || k === 'viewAllScrollY') sessionStorage.removeItem(k);
-     });
-  };
 
   // --- PROGRESSIVE SCROLL FETCHER (Loads 3 sections simultaneously to prevent blanking) ---
   const fetchNextChunk = async (chunkSize = 3) => {
@@ -137,12 +128,12 @@ export default function Home() {
 
       setSections(prev => {
           const updated = [...prev, ...newSections];
-          sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
+          if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
           return updated;
       });
 
       nextIndexRef.current += chunkSize;
-      sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
+      if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
     } catch (e) { console.error(e); }
     
     isLoadingRef.current = false;
@@ -150,6 +141,8 @@ export default function Home() {
 
   // --- INITIAL MOUNT & STATE RESTORATION ---
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+
     const initLoad = async () => {
       const savedLang = sessionStorage.getItem('homeState_lang');
       
@@ -163,24 +156,26 @@ export default function Home() {
             const savedViewAll = sessionStorage.getItem('homeState_viewAll');
             if (savedViewAll && savedViewAll !== 'null') {
                setViewAll(JSON.parse(savedViewAll));
-               setViewAllData(JSON.parse(sessionStorage.getItem('homeState_viewAllData') || '[]'));
-               setViewAllOffset(parseInt(sessionStorage.getItem('homeState_viewAllOffset') || '0'));
-               setHasMoreViewAll(sessionStorage.getItem('homeState_hasMore') === 'true');
-               setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('viewAllScrollY') || '0')), 50);
+               // Wait for DOM to render grid before scrolling
+               setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('viewAllScrollY') || '0')), 100);
             } else {
-               setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('homeScrollY') || '0')), 50);
+               setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('homeScrollY') || '0')), 100);
             }
+            setIsInitializing(false);
             return; 
          }
       }
 
       // If language changed or cache is empty, fresh fast-paint load
-      clearHomeState();
+      sessionStorage.removeItem('homeState_viewAll');
+      sessionStorage.removeItem('homeScrollY');
+      sessionStorage.removeItem('viewAllScrollY');
       sessionStorage.setItem('homeState_lang', language);
       setSections([]);
       setViewAll(null);
       nextIndexRef.current = 0;
       await fetchNextChunk(3); 
+      setIsInitializing(false);
     };
 
     initLoad();
@@ -201,60 +196,57 @@ export default function Home() {
 
   // Lazy Load Remaining Sections on Scroll
   useEffect(() => {
-    if (viewAll) return;
+    if (viewAll || isInitializing || sections.length === 0) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting) {
          fetchNextChunk(3);
       }
-    }, { rootMargin: "800px" });
+    }, { rootMargin: "600px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  }, [sections, viewAll, language]);
+  }, [sections, viewAll, isInitializing, language]);
 
   // Infinite Scroll for "View All" (Stops fetching if blank data triggers end)
   useEffect(() => {
-    if (!viewAll || viewAll.noPagination || !hasMoreViewAll) return;
+    if (!viewAll || viewAll.noPagination || !viewAll.hasMore) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
-        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAllOffset},40`;
+        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAll.offset},40`;
         fetch(url).then(res => res.json()).then(json => {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
            
            if (newItems.length > 0) {
-             setViewAllData(prev => {
-                const updated =[...prev, ...newItems];
-                sessionStorage.setItem('homeState_viewAllData', JSON.stringify(updated));
+             setViewAll((prev: any) => {
+                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
+                sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
-             });
-             setViewAllOffset(prev => {
-                const nextOff = prev + 40;
-                sessionStorage.setItem('homeState_viewAllOffset', nextOff.toString());
-                return nextOff;
              });
            } else {
              // Reached the end of content
-             setHasMoreViewAll(false);
-             sessionStorage.setItem('homeState_hasMore', 'false');
+             setViewAll((prev: any) => {
+                const updated = { ...prev, hasMore: false };
+                sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
+                return updated;
+             });
            }
            setIsFetchingViewAll(false);
         }).catch(() => {
            setIsFetchingViewAll(false);
-           setHasMoreViewAll(false);
+           setViewAll((prev: any) => ({ ...prev, hasMore: false }));
         });
       }
     }, { rootMargin: "400px" });
 
     if (viewAllObserverRef.current) observer.observe(viewAllObserverRef.current);
     return () => observer.disconnect();
-  },[viewAll, viewAllOffset, isFetchingViewAll, hasMoreViewAll, language]);
+  }, [viewAll, isFetchingViewAll, language]);
 
   const handleItemClick = (item: any) => {
-    if (viewAll) {
-       sessionStorage.setItem('viewAllScrollY', window.scrollY.toString());
-    } else {
-       sessionStorage.setItem('homeScrollY', window.scrollY.toString());
+    if (typeof window !== 'undefined') {
+       if (viewAll) sessionStorage.setItem('viewAllScrollY', window.scrollY.toString());
+       else sessionStorage.setItem('homeScrollY', window.scrollY.toString());
     }
 
     const type = item.entity_type || item.type;
@@ -273,36 +265,33 @@ export default function Home() {
   };
 
   const openViewAll = (section: any) => {
-    sessionStorage.setItem('homeScrollY', window.scrollY.toString());
+    if (typeof window !== 'undefined') sessionStorage.setItem('homeScrollY', window.scrollY.toString());
     const vAll = { 
         title: section.title, 
         endpoint: section.url.split('&limit')[0].split('?limit')[0],
         noPagination: section.noPagination,
-        showSubtitle: section.showSubtitle
+        showSubtitle: section.showSubtitle,
+        data: section.data,
+        offset: section.data.length,
+        hasMore: true
     };
     setViewAll(vAll);
-    setViewAllData(section.data);
-    setViewAllOffset(section.data.length);
-    setHasMoreViewAll(true);
-    
-    sessionStorage.setItem('homeState_viewAll', JSON.stringify(vAll));
-    sessionStorage.setItem('homeState_viewAllData', JSON.stringify(section.data));
-    sessionStorage.setItem('homeState_viewAllOffset', section.data.length.toString());
-    sessionStorage.setItem('homeState_hasMore', 'true');
-    
+    if (typeof window !== 'undefined') sessionStorage.setItem('homeState_viewAll', JSON.stringify(vAll));
     window.scrollTo(0, 0);
   };
 
   const closeViewAll = () => {
     setViewAll(null);
-    sessionStorage.removeItem('homeState_viewAll');
-    setTimeout(() => {
-        window.scrollTo(0, parseInt(sessionStorage.getItem('homeScrollY') || '0'));
-    }, 50);
+    if (typeof window !== 'undefined') {
+        sessionStorage.removeItem('homeState_viewAll');
+        sessionStorage.removeItem('viewAllScrollY');
+    }
+    // Per request: "in home page also if opened view all and closed it reload at top"
+    window.scrollTo(0, 0);
   };
 
   // Immediate Initial Loader
-  if (sections.length === 0) {
+  if (isInitializing || sections.length === 0) {
     return (
       <div className="flex h-screen flex-col items-center justify-center bg-[#0B1320] text-white">
         <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4 animate-pulse opacity-40 px-4 w-full">
@@ -321,17 +310,17 @@ export default function Home() {
            <h1 className="text-2xl font-extrabold ml-4 tracking-tight">{viewAll.title}</h1>
         </div>
         
-        {/* Dynamic perfect grid filling area evenly */}
+        {/* Dynamic perfect grid filling area evenly - strictly 3 columns on mobile */}
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 gap-y-8 gap-x-3 px-4 w-full justify-items-center">
-           {viewAllData.map((item, i) => (
+           {viewAll.data.map((item: any, i: number) => (
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
            ))}
         </div>
         
         {!viewAll.noPagination && (
            <div ref={viewAllObserverRef} className="w-full flex justify-center py-8 mt-4">
-              {isFetchingViewAll && hasMoreViewAll && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
-              {!hasMoreViewAll && <p className="text-blue-200/50 text-sm font-medium">You have reached the end.</p>}
+              {isFetchingViewAll && viewAll.hasMore && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
+              {!viewAll.hasMore && <p className="text-blue-200/50 text-sm font-medium">You have reached the end.</p>}
            </div>
         )}
       </main>
@@ -364,18 +353,18 @@ export default function Home() {
          </button>
       </div>
 
-      {/* Showcase / Top Picks (Uncropped native ratio prioritizing artwork_alt) */}
+      {/* Showcase / Top Picks (Uncropped native ratio without Text) */}
       {sections.length > 0 && sections[0].key === "showcase" && (
         <div className="mb-10">
           <h2 className="text-[22px] font-black mb-4 px-4 text-white tracking-tight">Top Picks</h2>
           <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1 items-center">
             {sections[0].data.map((item: any, i: number) => {
-               // Safely extract the original showcase wide image
+               // Prioritizing Gaana's uncropped wide banner formats
                let imgUrl = item.artwork_alt || item.atw_alt || item.artwork_web || item.artwork_large || item.artwork || item.atw;
                if (imgUrl) imgUrl = imgUrl.replace('size_m', 'size_l').replace('150x150', '500x500');
 
                return (
-                  <div key={i} onClick={() => handleItemClick(item)} className="w-[90vw] md:w-[600px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] active:scale-95 transition-transform duration-300">
+                  <div key={i} onClick={() => handleItemClick(item)} className="w-[88vw] md:w-[600px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] border border-[#1e293b] active:scale-95 transition-transform duration-300">
                     <img src={imgUrl} alt="Showcase" className="w-full h-auto block object-contain" />
                   </div>
                );
@@ -394,7 +383,8 @@ export default function Home() {
                <h2 className="text-[22px] font-black tracking-tight text-white">{section.title}</h2>
                <button onClick={() => openViewAll(section)} className="text-[12px] font-bold text-blue-400 bg-blue-400/10 px-3 py-1.5 rounded-full hover:bg-blue-400/20 active:scale-95 transition-all">View All</button>
             </div>
-            <div className="flex gap-4 md:gap-5 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
+            {/* 1.5x Increased Card horizontal scroll (Fits 3 per mobile screen exactly) */}
+            <div className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
               {section.data.map((item: any, i: number) => (
                   <PremiumCard key={i} item={item} showSubtitle={section.showSubtitle} onClick={handleItemClick} />
               ))}
