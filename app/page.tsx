@@ -9,18 +9,18 @@ const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
 
 const SECTION_CONFIGS =[
   { key: "showcase", title: "Top Picks", url: "/home/showcase?userlanguage={lang}" },
-  { key: "trending", title: "Trending", url: "/home/trending/songs/v1?trending_section=1&pkc=true&userlanguage={lang}" },
+  { key: "trending", title: "Trending Songs", url: "/home/trending/songs/v1?trending_section=1&pkc=true&userlanguage={lang}", showSubtitle: true, noPagination: true },
   { key: "top_charts", title: "Top Charts", url: "/home/playlist/top-charts?userlanguage={lang}" },
   { key: "top_playlists", title: "Top Playlists", url: "/home/section-data?seokey=top-playlists-1&view=all&userlanguage={lang}" },
-  { key: "new_releases", title: "New Releases", url: "/home/album/featured/more?userlanguage={lang}" },
+  { key: "new_releases", title: "New Releases", url: "/home/album/featured/more?userlanguage={lang}", showSubtitle: true },
   { key: "90s", title: "Back to 90s", url: "/home/section-data?seokey=90s-2000s&view=all&userlanguage={lang}" },
   { key: "bhakti", title: "Bhakti", url: "/home/section-data?seokey=bhakti&view=all&userlanguage={lang}" },
   { key: "lohri", title: "Shades of Love", url: "/home/section-data?seokey=lohri&view=all&userlanguage={lang}" },
-  { key: "mid_year", title: "Top Streamed Artists", url: "/home/section-data?seokey=mid-year-recap-2024&view=all&userlanguage={lang}" },
+  { key: "mid_year", title: "Top Streamed Artists", url: "/home/section-data?seokey=mid-year-recap-2024&view=all&userlanguage={lang}", isCircular: true },
   { key: "romance", title: "Romance", url: "/home/section-data?seokey=romance&view=all&userlanguage={lang}" },
-  { key: "star_gallery", title: "Star Gallery", url: "/home/section-data?seokey=star-gallery&view=all&userlanguage={lang}" },
+  { key: "star_gallery", title: "Star Gallery", url: "/home/section-data?seokey=star-gallery&view=all&userlanguage={lang}", isCircular: true },
   { key: "city_charts", title: "City Top Charts", url: "/home/section-data?seokey=city-top-charts&view=all&userlanguage={lang}" },
-  { key: "top_search", title: "Top Searched Artists", url: "/home/section-data?seokey=top-searched-artists&view=all&userlanguage={lang}" },
+  { key: "top_search", title: "Top Searched Artists", url: "/home/section-data?seokey=top-searched-artists&view=all&userlanguage={lang}", isCircular: true },
   { key: "just_arrived", title: "Just Arrived", url: "/home/section-data?seokey=just-arrived&view=all&userlanguage={lang}" },
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
@@ -37,26 +37,25 @@ const getSubtitle = (item: any) => {
   if (Array.isArray(item.artist)) names = item.artist.map((a: any) => a.name);
   else if (Array.isArray(item.singers)) names = item.singers.map((a: any) => a.name);
   else if (Array.isArray(item.artists)) names = item.artists.map((a: any) => a.name);
-  else if (item.language) return item.language;
   return Array.from(new Set(names)).join(", ");
 };
 
-const PremiumCard = ({ item, isCircular, onClick }: any) => {
+const PremiumCard = ({ item, isCircular, onClick, showSubtitle, fullWidth = false }: any) => {
   const title = decodeEntities(item.track_title || item.name || item.title || "Unknown");
   const subtitle = decodeEntities(getSubtitle(item));
-  const isLongTitle = title.length > 15;
+  const isLongTitle = title.length > 13;
 
   return (
-    <div onClick={() => onClick(item)} className="w-[30vw] md:w-[150px] max-w-[140px] flex-shrink-0 snap-start cursor-pointer group pb-1">
-      <div className={`relative overflow-hidden bg-[#0A192F] border border-[#112240] mb-2 transition-transform duration-200 active:scale-95 shadow-md ${isCircular ? "rounded-full aspect-square" : "rounded-xl aspect-[1/1]"}`}>
+    <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[30vw] sm:w-[180px] md:w-[200px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
+      <div className={`relative overflow-hidden bg-[#131D30] border border-[#1e293b] mb-2 transition-transform duration-200 active:scale-95 shadow-md ${isCircular ? "rounded-full aspect-square" : "rounded-xl aspect-[1/1]"}`}>
         <img src={getImageUrl(item)} alt={title} loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out" />
       </div>
-      <div className="w-full overflow-hidden whitespace-nowrap text-center">
-        <span className={`inline-block text-[13px] md:text-[14px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
+      <div className="w-full overflow-hidden whitespace-nowrap text-center px-1">
+        <span className={`inline-block text-[13px] md:text-[15px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
       </div>
-      {subtitle && (
-        <div className="w-full overflow-hidden whitespace-nowrap text-center mt-0.5">
-          <span className="inline-block text-[11px] md:text-[12px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
+      {showSubtitle && subtitle && (
+        <div className="w-full overflow-hidden whitespace-nowrap text-center mt-0.5 px-1">
+          <span className="inline-block text-[11px] md:text-[13px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
         </div>
       )}
     </div>
@@ -67,15 +66,15 @@ export default function Home() {
   const { language, setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   const router = useRouter();
   
-  const [sections, setSections] = useState<any[]>([]);
-  const[visibleCount, setVisibleCount] = useState(5); // Load 5 initially
+  const[sections, setSections] = useState<any[]>([]);
+  const [visibleCount, setVisibleCount] = useState(5); // Load 5 initially
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
 
-  const [viewAll, setViewAll] = useState<{ title: string; endpoint: string } | null>(null);
-  const[viewAllData, setViewAllData] = useState<any[]>([]);
-  const[viewAllOffset, setViewAllOffset] = useState(0);
-  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const [viewAll, setViewAll] = useState<any | null>(null);
+  const [viewAllData, setViewAllData] = useState<any[]>([]);
+  const [viewAllOffset, setViewAllOffset] = useState(0);
+  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
@@ -92,7 +91,7 @@ export default function Home() {
       }
     }, 4000);
     return () => clearInterval(interval);
-  },[sections, viewAll]);
+  }, [sections, viewAll]);
 
   // Initial Data Load (First 5 sections)
   useEffect(() => {
@@ -100,11 +99,13 @@ export default function Home() {
       setLoading(true);
       try {
         const initialConfigs = SECTION_CONFIGS.slice(0, 5);
-        const promises = initialConfigs.map(conf => 
-          fetch(`${API_BASE}${conf.url.replace('{lang}', language)}&limit=0,15`).then(res => res.json())
-        );
+        const promises = initialConfigs.map(conf => {
+           let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
+           if(!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
+           return fetch(url).then(res => res.json());
+        });
+        
         const results = await Promise.all(promises);
-
         const mapped = initialConfigs.map((conf, i) => {
           const json = results[i];
           const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
@@ -112,6 +113,7 @@ export default function Home() {
         });
 
         setSections(mapped);
+        setVisibleCount(5);
       } catch (e) {}
       setLoading(false);
     };
@@ -125,7 +127,11 @@ export default function Home() {
       if (entries[0].isIntersecting && !loadingMore) {
         setLoadingMore(true);
         const nextConf = SECTION_CONFIGS[visibleCount];
-        fetch(`${API_BASE}${nextConf.url.replace('{lang}', language)}&limit=0,15`)
+        
+        let url = `${API_BASE}${nextConf.url.replace('{lang}', language)}`;
+        if(!nextConf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
+
+        fetch(url)
           .then(res => res.json())
           .then(json => {
             const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
@@ -134,15 +140,15 @@ export default function Home() {
             setLoadingMore(false);
           }).catch(() => setLoadingMore(false));
       }
-    }, { rootMargin: "200px" });
+    }, { rootMargin: "300px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  },[loading, visibleCount, viewAll, loadingMore, language]);
+  }, [loading, visibleCount, viewAll, loadingMore, language]);
 
   // Infinite Scroll for "View All"
   useEffect(() => {
-    if (!viewAll) return;
+    if (!viewAll || viewAll.noPagination) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
@@ -160,7 +166,7 @@ export default function Home() {
 
     if (viewAllObserverRef.current) observer.observe(viewAllObserverRef.current);
     return () => observer.disconnect();
-  },[viewAll, viewAllOffset, isFetchingViewAll, language]);
+  }, [viewAll, viewAllOffset, isFetchingViewAll, language]);
 
   const handleItemClick = (item: any) => {
     const type = item.entity_type || item.type;
@@ -179,40 +185,51 @@ export default function Home() {
   };
 
   const openViewAll = (section: any) => {
-    setViewAll({ title: section.title, endpoint: section.url.split('&limit')[0].split('?limit')[0] });
+    setViewAll({ 
+        title: section.title, 
+        endpoint: section.url.split('&limit')[0].split('?limit')[0],
+        noPagination: section.noPagination,
+        showSubtitle: section.showSubtitle,
+        isCircular: section.isCircular
+    });
     setViewAllData(section.data);
-    setViewAllOffset(15);
+    setViewAllOffset(section.data.length);
   };
 
   if (loading) {
     return (
-      <div className="flex h-screen flex-col items-center justify-center bg-[#020813] text-white">
+      <div className="flex h-screen flex-col items-center justify-center bg-[#0B1320] text-white">
         <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4 animate-pulse opacity-40 px-4 w-full">
-           {[...Array(12)].map((_, i) => <div key={i} className="w-full aspect-[1/1] bg-[#0A192F] rounded-2xl" />)}
+           {[...Array(12)].map((_, i) => <div key={i} className="w-full aspect-[1/1] bg-[#131D30] rounded-2xl" />)}
         </div>
       </div>
     );
   }
 
+  // --- VIEW ALL PAGE ---
   if (viewAll) {
     return (
-      <main className="min-h-screen bg-[#020813] pt-10 pb-28 text-white">
-        <div className="flex items-center px-4 mb-6 sticky top-0 bg-[#020813]/90 backdrop-blur-md z-10 py-3">
-           <button onClick={() => setViewAll(null)} className="p-2 bg-[#0A192F] border border-[#112240] rounded-full active:scale-95"><ChevronLeft size={24} /></button>
+      <main className="min-h-screen bg-[#0B1320] pt-10 pb-28 text-white">
+        <div className="flex items-center px-4 mb-6 sticky top-0 bg-[#0B1320]/90 backdrop-blur-md z-10 py-3 border-b border-[#131D30]">
+           <button onClick={() => setViewAll(null)} className="p-2 bg-[#131D30] border border-[#1e293b] rounded-full active:scale-95"><ChevronLeft size={24} /></button>
            <h1 className="text-2xl font-extrabold ml-4 tracking-tight">{viewAll.title}</h1>
         </div>
-        <div className="grid grid-cols-3 md:grid-cols-5 lg:grid-cols-7 gap-y-6 gap-x-2 px-4 justify-items-center">
-           {viewAllData.map((item, i) => <PremiumCard key={i} item={item} onClick={handleItemClick} />)}
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 gap-y-6 gap-x-3 px-4 justify-items-center">
+           {viewAllData.map((item, i) => (
+               <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} isCircular={viewAll.isCircular} fullWidth={true} onClick={handleItemClick} />
+           ))}
         </div>
-        <div ref={viewAllObserverRef} className="w-full flex justify-center py-6">
-           {isFetchingViewAll && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
-        </div>
+        {!viewAll.noPagination && (
+           <div ref={viewAllObserverRef} className="w-full flex justify-center py-8 mt-4">
+              {isFetchingViewAll && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
+           </div>
+        )}
       </main>
     );
   }
 
   return (
-    <main className="pt-10 pb-28 min-h-screen bg-[#020813] selection:bg-[#1db954] selection:text-black" style={{ touchAction: 'pan-y' }}>
+    <main className="pt-10 pb-28 min-h-screen bg-[#0B1320] selection:bg-[#1db954] selection:text-black" style={{ touchAction: 'pan-y' }}>
       <style dangerouslySetInnerHTML={{__html:`
         .hide-scrollbar::-webkit-scrollbar { display: none; }
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -223,33 +240,35 @@ export default function Home() {
       {/* Header */}
       <div className="px-4 mb-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <img src="https://raw.githubusercontent.com/Ayush8481Lab/musicayush/refs/heads/main/app/android-chrome-192x192.png" alt="Logo" className="w-9 h-9 rounded-full shadow-[0_0_20px_rgba(29,185,84,0.4)]" />
+          <img src="https://raw.githubusercontent.com/Ayush8481Lab/musicayush/refs/heads/main/app/android-chrome-192x192.png" alt="Logo" className="w-9 h-9 rounded-full shadow-[0_0_20px_rgba(29,185,84,0.3)]" />
           <h1 className="text-[28px] font-black tracking-tighter text-white drop-shadow-md">Music@8481</h1>
         </div>
       </div>
 
-      <div onClick={() => router.push('/search?action=focus')} className="mx-4 mb-8 flex items-center bg-[#0A192F] border border-[#112240] rounded-full h-[54px] px-5 cursor-pointer hover:bg-[#112240] active:scale-[0.98] transition-all shadow-xl">
+      <div onClick={() => router.push('/search?action=focus')} className="mx-4 mb-8 flex items-center bg-[#131D30] border border-[#1e293b] rounded-full h-[54px] px-5 cursor-pointer hover:bg-[#1a263d] active:scale-[0.98] transition-all shadow-lg">
          <SearchIcon size={22} className="text-blue-200/50" />
          <span className="text-blue-200/50 ml-3 text-[15px] font-medium tracking-wide">Search songs, artists, podcasts...</span>
-         <button onClick={(e) => { e.stopPropagation(); router.push('/search?action=mic'); }} className="ml-auto p-2.5 text-blue-200/50 hover:text-white active:scale-90 transition-all rounded-full bg-[#020813] border border-[#112240]">
+         <button onClick={(e) => { e.stopPropagation(); router.push('/search?action=mic'); }} className="ml-auto p-2.5 text-blue-200/50 hover:text-white active:scale-90 transition-all rounded-full bg-[#0B1320] border border-[#1e293b]">
            <Mic size={18} />
          </button>
       </div>
 
-      {/* Showcase / Top Picks */}
+      {/* Showcase / Top Picks without Text Overlay and exact ratio */}
       {sections[0] && sections[0].key === "showcase" && sections[0].data.length > 0 && (
         <div className="mb-10">
           <h2 className="text-[22px] font-black mb-4 px-4 text-white tracking-tight">Top Picks</h2>
           <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
-            {sections[0].data.map((item: any, i: number) => (
-              <div key={i} onClick={() => handleItemClick(item)} className="w-[85vw] md:w-[400px] h-[45vw] md:h-[220px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden relative shadow-[0_10px_30px_rgba(0,0,0,0.5)] active:scale-95 transition-transform duration-300 border border-[#112240]">
-                <img src={getImageUrl(item)} alt="Showcase" className="w-full h-full object-cover" />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent" />
-                <div className="absolute bottom-4 left-4 right-4">
-                  <h3 className="text-white font-bold text-lg drop-shadow-md truncate">{item.track_title || item.name || item.title}</h3>
-                </div>
-              </div>
-            ))}
+            {sections[0].data.map((item: any, i: number) => {
+               // Prioritizing Gaana's uncropped banner formats
+               let imgUrl = item.atw_alt || item.artwork_alt || item.atw || item.artwork_web || item.artwork_large || item.artwork;
+               imgUrl = imgUrl.replace('size_m', 'size_l').replace('150x150', '500x500');
+
+               return (
+                  <div key={i} onClick={() => handleItemClick(item)} className="w-[90vw] md:w-[500px] lg:w-[600px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] border border-[#1e293b] active:scale-95 transition-transform duration-300">
+                    <img src={imgUrl} alt="Showcase" className="w-full h-auto block object-cover aspect-[21/9] sm:aspect-auto" />
+                  </div>
+               );
+            })}
           </div>
         </div>
       )}
@@ -257,7 +276,6 @@ export default function Home() {
       {/* Dynamic Render of All Other Sections */}
       {sections.slice(1).map((section, idx) => {
         if (!section.data || section.data.length === 0) return null;
-        const isArtists = section.key === "mid_year" || section.key === "top_search" || section.key === "star_gallery";
         
         return (
           <div key={idx} className="mb-10">
@@ -266,7 +284,9 @@ export default function Home() {
                <button onClick={() => openViewAll(section)} className="text-[12px] font-bold text-blue-400 bg-blue-400/10 px-3 py-1.5 rounded-full hover:bg-blue-400/20 active:scale-95 transition-all">View All</button>
             </div>
             <div className="flex gap-3 md:gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
-              {section.data.map((item: any, i: number) => <PremiumCard key={i} item={item} isCircular={isArtists} onClick={handleItemClick} />)}
+              {section.data.map((item: any, i: number) => (
+                  <PremiumCard key={i} item={item} showSubtitle={section.showSubtitle} isCircular={section.isCircular} onClick={handleItemClick} />
+              ))}
             </div>
           </div>
         );
@@ -274,7 +294,7 @@ export default function Home() {
 
       {/* Bottom Loader Anchor */}
       {visibleCount < SECTION_CONFIGS.length && (
-         <div ref={observerRef} className="w-full flex justify-center py-6">
+         <div ref={observerRef} className="w-full flex justify-center py-6 mt-4">
             <Loader2 className="animate-spin text-[#1db954]" size={30} />
          </div>
       )}
