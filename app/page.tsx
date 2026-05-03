@@ -30,30 +30,56 @@ const SECTION_CONFIGS =[
 ];
 
 const getImageUrl = (item: any) => {
-  let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || "https://via.placeholder.com/500x500?text=Music";
-  return img.replace("150x150", "500x500").replace("50x50", "500x500");
+  let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
+  return img.replace(/size_[ms]/g, "size_l").replace("150x150", "500x500").replace("50x50", "500x500");
+};
+
+const getShowcaseImageUrl = (item: any) => {
+  if (item.entity_info && Array.isArray(item.entity_info)) {
+     const artworkAlt = item.entity_info.find((i: any) => i.key === "artwork_alt");
+     if (artworkAlt && artworkAlt.value) return artworkAlt.value.replace(/size_[ms]/g, "size_l");
+     
+     const atwAlt = item.entity_info.find((i: any) => i.key === "atw_alt");
+     if (atwAlt && atwAlt.value) return atwAlt.value.replace(/size_[ms]/g, "size_l");
+  }
+  let imgUrl = item.artwork_alt || item.atw_alt || item.artwork_web || item.artwork_large || item.artwork || item.atw;
+  if (imgUrl) return imgUrl.replace(/size_[ms]/g, "size_l").replace("150x150", "500x500");
+  return "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
 };
 
 const decodeEntities = (text: string) => text ? text.replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">") : "";
 
-// Intelligently parse Gaana's nested arrays for artists (for Trending & New Releases)
 const getSubtitle = (item: any) => {
   let names: string[] =[];
-  
   if (item.entity_info) {
      const artistInfo = item.entity_info.find((info: any) => info.key === 'artist' || info.key === 'singers');
-     if (artistInfo && Array.isArray(artistInfo.value)) {
-        names = artistInfo.value.map((a: any) => a.name);
-     }
+     if (artistInfo && Array.isArray(artistInfo.value)) names = artistInfo.value.map((a: any) => a.name);
   }
-  
   if (names.length === 0) {
      if (Array.isArray(item.artist)) names = item.artist.map((a: any) => a.name);
      else if (Array.isArray(item.singers)) names = item.singers.map((a: any) => a.name);
      else if (Array.isArray(item.artists)) names = item.artists.map((a: any) => a.name);
   }
-  
   return Array.from(new Set(names)).join(", ");
+};
+
+// --- LAZY IMAGE COMPONENT (With Background Placeholder) ---
+const LazyImage = ({ src, alt, className, objectFit = "object-cover" }: any) => {
+  const[loaded, setLoaded] = useState(false);
+  const placeholder = "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
+  
+  return (
+    <div className={`relative overflow-hidden ${className}`} style={{ backgroundImage: `url(${placeholder})`, backgroundSize: 'cover', backgroundPosition: 'center' }}>
+      <img 
+        src={src || placeholder} 
+        alt={alt} 
+        loading="lazy" 
+        decoding="async" 
+        onLoad={(e) => { if (e.currentTarget.src !== placeholder) setLoaded(true); }} 
+        className={`w-full h-full ${objectFit} transition-opacity duration-500 ${loaded ? 'opacity-100' : 'opacity-0'}`} 
+      />
+    </div>
+  );
 };
 
 const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) => {
@@ -62,10 +88,9 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
   const isLongTitle = title.length > 13;
 
   return (
-    // Scaled exactly by 1.5x, fitting 3 cards automatically on mobile screens with nice spacing.
     <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[29vw] sm:w-[180px] md:w-[210px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
-      <div className="relative overflow-hidden bg-[#131D30] border border-[#1e293b] rounded-2xl aspect-[1/1] mb-2 transition-transform duration-200 active:scale-95 shadow-md">
-        <img src={getImageUrl(item)} alt={title} loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out" />
+      <div className="relative overflow-hidden bg-[#131D30] border border-[#1e293b] rounded-2xl mb-2 transition-transform duration-200 active:scale-95 shadow-md">
+        <LazyImage src={getImageUrl(item)} alt={title} className="w-full aspect-[1/1] group-hover:scale-105 transition-transform duration-500 ease-out" />
       </div>
       <div className="w-full overflow-hidden whitespace-nowrap text-center px-1">
         <span className={`inline-block text-[13px] md:text-[15px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
@@ -101,8 +126,8 @@ export default function Home() {
     isLoadingRef.current = true;
     
     try {
-      const newSections: any[] = [];
-      const promises: Promise<any>[] =[];
+      const newSections: any[] =[];
+      const promises: Promise<any>[] = [];
       const configs: any[] =[];
 
       for (let i = 0; i < chunkSize; i++) {
@@ -127,7 +152,7 @@ export default function Home() {
       });
 
       setSections(prev => {
-          const updated =[...prev, ...newSections];
+          const updated = [...prev, ...newSections];
           if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
           return updated;
       });
@@ -146,7 +171,6 @@ export default function Home() {
     const initLoad = async () => {
       const savedLang = sessionStorage.getItem('homeState_lang');
       
-      // If language matches, strictly restore position perfectly from Session
       if (savedLang === language) {
          const savedSections = sessionStorage.getItem('homeState_sections');
          if (savedSections && JSON.parse(savedSections).length > 0) {
@@ -156,7 +180,6 @@ export default function Home() {
             const savedViewAll = sessionStorage.getItem('homeState_viewAll');
             if (savedViewAll && savedViewAll !== 'null') {
                setViewAll(JSON.parse(savedViewAll));
-               // Wait for DOM to render grid before scrolling
                setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('viewAllScrollY') || '0')), 100);
             } else {
                setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('homeScrollY') || '0')), 100);
@@ -192,20 +215,18 @@ export default function Home() {
       }
     }, 4000);
     return () => clearInterval(interval);
-  },[sections, viewAll]);
+  }, [sections, viewAll]);
 
   // Lazy Load Remaining Sections on Scroll
   useEffect(() => {
     if (viewAll || isInitializing || sections.length === 0) return;
     const observer = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) {
-         fetchNextChunk(3);
-      }
+      if (entries[0].isIntersecting) fetchNextChunk(3);
     }, { rootMargin: "600px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  },[sections, viewAll, isInitializing, language]);
+  }, [sections, viewAll, isInitializing, language]);
 
   // Infinite Scroll for "View All" (Stops fetching if blank data triggers end)
   useEffect(() => {
@@ -219,12 +240,11 @@ export default function Home() {
            
            if (newItems.length > 0) {
              setViewAll((prev: any) => {
-                const updated = { ...prev, data: [...prev.data, ...newItems], offset: prev.offset + 40 };
+                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
              });
            } else {
-             // Reached the end of content
              setViewAll((prev: any) => {
                 const updated = { ...prev, hasMore: false };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
@@ -241,7 +261,7 @@ export default function Home() {
 
     if (viewAllObserverRef.current) observer.observe(viewAllObserverRef.current);
     return () => observer.disconnect();
-  }, [viewAll, isFetchingViewAll, language]);
+  },[viewAll, isFetchingViewAll, language]);
 
   const handleItemClick = (item: any) => {
     if (typeof window !== 'undefined') {
@@ -285,9 +305,12 @@ export default function Home() {
     if (typeof window !== 'undefined') {
         sessionStorage.removeItem('homeState_viewAll');
         sessionStorage.removeItem('viewAllScrollY');
+        const savedHomeScroll = sessionStorage.getItem('homeScrollY');
+        // Restores to exactly where you were (e.g. Romance) before opening View All
+        setTimeout(() => {
+            window.scrollTo(0, savedHomeScroll ? parseInt(savedHomeScroll) : 0);
+        }, 50);
     }
-    // Reloads back at the top of the home page per request
-    window.scrollTo(0, 0);
   };
 
   // Immediate Initial Loader
@@ -310,7 +333,7 @@ export default function Home() {
            <h1 className="text-2xl font-extrabold ml-4 tracking-tight">{viewAll.title}</h1>
         </div>
         
-        {/* Dynamic perfect grid filling area evenly - strictly 3 columns on mobile */}
+        {/* Dynamic perfect grid filling area evenly - exactly 3 columns on mobile */}
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 gap-y-8 gap-x-3 px-4 w-full justify-items-center">
            {viewAll.data.map((item: any, i: number) => (
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
@@ -355,17 +378,12 @@ export default function Home() {
 
       {/* Showcase / Top Picks (Uncropped native ratio prioritizing artwork_alt) */}
       {sections.length > 0 && sections[0].key === "showcase" && (
-        <div className="mb-10">
-          <h2 className="text-[22px] font-black mb-4 px-4 text-white tracking-tight">Top Picks</h2>
-          <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1 items-center">
+        <div className="mb-10 mt-2">
+          <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 items-center">
             {sections[0].data.map((item: any, i: number) => {
-               // Safely extract the original showcase wide image
-               let imgUrl = item.artwork_alt || item.atw_alt || item.artwork_web || item.artwork_large || item.artwork || item.atw;
-               if (imgUrl) imgUrl = imgUrl.replace('size_m', 'size_l').replace('150x150', '500x500');
-
                return (
-                  <div key={i} onClick={() => handleItemClick(item)} className="w-[88vw] md:w-[600px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] border border-[#1e293b] active:scale-95 transition-transform duration-300">
-                    <img src={imgUrl} alt="Showcase" className="w-full h-auto block object-contain" />
+                  <div key={i} onClick={() => handleItemClick(item)} className="w-[90vw] md:w-[600px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] border border-[#1e293b] active:scale-95 transition-transform duration-300">
+                    <LazyImage src={getShowcaseImageUrl(item)} alt="Showcase" objectFit="object-contain" className="w-full aspect-[720/375]" />
                   </div>
                );
             })}
