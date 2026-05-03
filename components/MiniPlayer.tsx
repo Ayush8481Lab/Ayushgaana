@@ -14,10 +14,10 @@ import {
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles
 } from "lucide-react";
 
-// --- 5-HOUR INDEXEDDB CACHE ENGINE (Audio & APIs) ---
+// --- 5-HOUR INDEXEDDB CACHE ENGINE ---
 const DB_NAME = "GrooveCacheDB";
 const STORE_NAME = "caches";
-const CACHE_EXPIRY_MS = 5 * 60 * 60 * 1000; // 5 hours
+const CACHE_EXPIRY_MS = 5 * 60 * 60 * 1000; 
 
 const initDB = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
   if (typeof window === 'undefined' || !window.indexedDB) return reject();
@@ -69,14 +69,10 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
   } catch(e) {}
 };
 
-// --- PRO AUTH ENGINE ---
-const AUTH_STORAGE_KEY = 'spotify_app_auth';
-let ongoingAuthPromise: Promise<any> | null = null;
-
 const getCachedAuth = () => {
   if (typeof window === "undefined") return null;
   try {
-    const cached = localStorage.getItem(AUTH_STORAGE_KEY);
+    const cached = localStorage.getItem('spotify_app_auth');
     if (cached) {
       const authData = JSON.parse(cached);
       if (Date.now() < (authData.accessTokenExpirationTimestampMs - 10000)) return authData;
@@ -85,26 +81,22 @@ const getCachedAuth = () => {
   return null;
 };
 
-const fetchNewAuthToken = async () => {
+let ongoingAuthPromise: Promise<any> | null = null;
+const getAuthData = async () => {
+  const cachedAuth = getCachedAuth();
+  if (cachedAuth) return cachedAuth;
   if (ongoingAuthPromise) return ongoingAuthPromise;
   ongoingAuthPromise = (async () => {
     try {
       const response = await fetch('https://serverayush.vercel.app/api/auth');
       const data = await response.json();
-      if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
+      if (typeof window !== "undefined") localStorage.setItem('spotify_app_auth', JSON.stringify(data));
       return data;
     } catch (error) { return null; } finally { ongoingAuthPromise = null; }
   })();
   return ongoingAuthPromise;
 };
 
-const getAuthData = async () => {
-  const cachedAuth = getCachedAuth();
-  if (cachedAuth) return cachedAuth;
-  return await fetchNewAuthToken();
-};
-
-// --- ADVANCED HTML ENTITY DECODER ---
 const decodeEntities = (text: string) => {
   if (!text) return "";
   let decoded = text;
@@ -134,16 +126,13 @@ const getArtistsText = (data: any) => {
   return names.length > 0 ? Array.from(new Set(names)).join(", ") : "Unknown Artist";
 };
 
-// --- FIXED ROBUST IMAGE EXTRACTOR ---
 const getImageUrl = (item: any) => {
   if (!item) return null;
   let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || item;
   if (typeof img === "string" && img.trim() !== "") {
      return img.replace(/size_[ms]/gi, "size_l").replace("150x150", "500x500").replace("50x50", "500x500").split('?')[0];
   }
-  if (Array.isArray(img) && img[0]?.url) {
-     return (img[img.length - 1]?.url || img[0]?.url).split('?')[0];
-  }
+  if (Array.isArray(img) && img[0]?.url) return (img[img.length - 1]?.url || img[0]?.url).split('?')[0];
   return null;
 };
 
@@ -170,12 +159,6 @@ const parseTimeTag = (tag: string) => {
 const RAPID_KEYS =["d1edce158amshec139440d20658ap1f2545jsnbb7da9add82f", "6cf7f03014msh787c51a713c0264p15c20djsna1f9a9f6a378", "13d48f6bb8msh459c11b91bdcc44p110f4ejsn099443894115", "03fc23317fmsh0535ef9ec8c6f5bp1db59bjsn545991df9343", "e54e3fbc4dmshfc16d4417b618fdp1a2fafjsn30c72d8cf3ab"];
 const RAPID_API_HOST = "spotify81.p.rapidapi.com";
 
-// --- AUDIO EQ PRESETS (BACKGROUND ENGINE) ---
-const EQ_FREQUENCIES =[32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
-const ENHANCED_EQ =[-2, 2, -1, -5, -7, -3, 0, 0, -4, -1];
-const ORIGINAL_EQ =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-// --- AK47 SPECIFIC MATCHER ---
 const performAK47Matching = (results: any[], targetTrack: string, targetArtist: string): any => {
     if (!results || results.length === 0) return null;
     const clean = (s: string) => decodeEntities(s || "").toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ").trim();
@@ -210,7 +193,6 @@ const performAK47Matching = (results: any[], targetTrack: string, targetArtist: 
     return results[0];
 };
 
-// --- RAPIDAPI FALLBACK MATCHER ---
 const performMatching = (apiData: any, targetTrack: string, targetArtist: string): any => {
   if (!apiData.tracks || apiData.tracks.length === 0) return null;
   const clean = (s: string) => decodeEntities(s || "").toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ").trim();
@@ -290,7 +272,6 @@ const loadLameJS = () => new Promise((resolve, reject) => {
   document.head.appendChild(script);
 });
 
-// --- FLICKER-FREE MEMOIZED MARQUEE ---
 const MarqueeText = React.memo(({ text, className = "" }: { text: string, className?: string }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
@@ -329,14 +310,13 @@ export default function MiniPlayer() {
   } = useAppContext();
   
   const[audioUrl, setAudioUrl] = useState("");
-  const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
   const[loading, setLoading] = useState(false);
   const[progress, setProgress] = useState(0);
+  const[bufferedProgress, setBufferedProgress] = useState(0);
   const[currentTime, setCurrentTime] = useState(0);
   const[duration, setDuration] = useState(0);
   const[volume, setVolume] = useState(100);
   
-  // MODAL/UI STATES
   const[isExpanded, setIsExpanded] = useState(false);
   const[showQueue, setShowQueue] = useState(false);
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
@@ -362,7 +342,6 @@ export default function MiniPlayer() {
   const maxListenRef = useRef<number>(0);
   const lastTimeUpdateRef = useRef<number>(0); 
   const isNavigatingBackRef = useRef(false);
-  const mediaMetadataSetRef = useRef(false);
   const hasCachedCurrentSongRef = useRef(false);
   
   const rapidKeyIdxRef = useRef(0);
@@ -411,6 +390,7 @@ export default function MiniPlayer() {
   const[cardFontSize, setCardFontSize] = useState("Medium");
   const[isCanvasEnabled, setIsCanvasEnabled] = useState(true);
   const[isLyricsEnabled, setIsLyricsEnabled] = useState(true);
+  const[lyricsServer, setLyricsServer] = useState("spotify");
   const[isWordSyncEnabled, setIsWordSyncEnabled] = useState(true);
   const[isMiniWordSyncEnabled, setIsMiniWordSyncEnabled] = useState(true);
   const restoreTimeRef = useRef<number | null>(null);
@@ -418,18 +398,11 @@ export default function MiniPlayer() {
   const isCanvasEnabledRef = useRef(true);
   const isLyricsEnabledRef = useRef(true);
 
-  // BACKGROUND AUDIO EQ STATE
-  const[isAudioEnhanced, setIsAudioEnhanced] = useState(true);
-  const audioCtxRef = useRef<any>(null);
-  const isAudioPremiumSetupRef = useRef(false);
-  const eqBandsRef = useRef<any[]>([]);
-
   const[dlState, setDlState] = useState<{type: "music" | "video" | null, status: string, options?: any[], progress?: number, packStep?: string, server?: number}>({type: null, status: "idle", progress: 0, server: 1});
 
   const isSongLiked = likedSongs.some((s: any) => s && (s.id || s.track_id) === (currentSong?.id || currentSong?.track_id));
   const handleLikeClick = (e: any) => { e.stopPropagation(); toggleLikeSong(currentSong); };
 
-  // --- CUSTOM BUTTERY AUTO-SCROLL FOR LYRICS ENGINE ---
   const customSmoothScroll = useCallback((container: HTMLElement, targetPos: number, duration: number) => {
       if ((container as any)._scrollRaf) cancelAnimationFrame((container as any)._scrollRaf);
       const startPos = container.scrollTop;
@@ -442,9 +415,7 @@ export default function MiniPlayer() {
           if (startTime === null) startTime = currentTime;
           const elapsed = currentTime - startTime;
           const progress = Math.min(elapsed / duration, 1);
-          
           container.scrollTop = startPos + distance * easeInOutCubic(progress);
-          
           if (elapsed < duration) {
               (container as any)._scrollRaf = requestAnimationFrame(animation);
           }
@@ -452,7 +423,6 @@ export default function MiniPlayer() {
       (container as any)._scrollRaf = requestAnimationFrame(animation);
   },[]);
 
-  // --- ROBUST MODAL HISTORY ROUTING ---
   const pushModalState = (modalName: ModalState) => {
       window.history.pushState({ modal: modalName }, '');
       activeOverlayRef.current = modalName;
@@ -485,88 +455,12 @@ export default function MiniPlayer() {
       return () => window.removeEventListener('popstate', handlePopState);
   },[]);
 
-
-  // --- DEEP AUDIO EQ ENGINE ---
-  const ensureAudioActive = useCallback(() => {
-      if (!audioRef.current) return;
-      
-      if (!isAudioPremiumSetupRef.current) {
-          try {
-              const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-              if (!AudioContextClass) return;
-              const ctx = new AudioContextClass();
-              audioCtxRef.current = ctx;
-              
-              const source = ctx.createMediaElementSource(audioRef.current);
-              
-              let previousNode: AudioNode = source;
-              const bands: any[] =[];
-              
-              const savedAe = localStorage.getItem('audio_enhanced');
-              const isEnh = savedAe !== null ? savedAe === 'true' : isAudioEnhanced;
-              const currentEQ = isEnh ? ENHANCED_EQ : ORIGINAL_EQ;
-
-              EQ_FREQUENCIES.forEach((freq, i) => {
-                  let filter = ctx.createBiquadFilter();
-                  filter.type = "peaking";
-                  filter.frequency.value = freq;
-                  filter.Q.value = 1.41;
-                  filter.gain.value = currentEQ[i];
-                  previousNode.connect(filter);
-                  previousNode = filter;
-                  bands.push(filter);
-              });
-              eqBandsRef.current = bands;
-
-              // Studio Limiter (prevents distortion natively)
-              const limiter = ctx.createDynamicsCompressor();
-              limiter.threshold.value = -1.0; 
-              limiter.knee.value = 0.0;       
-              limiter.ratio.value = 20.0;      
-              limiter.attack.value = 0.005;  
-              limiter.release.value = 0.050;  
-              
-              previousNode.connect(limiter); 
-              limiter.connect(ctx.destination);
-              
-              isAudioPremiumSetupRef.current = true;
-          } catch(e) {
-              console.warn("Premium Audio Config Error (CORS block):", e);
-              isAudioPremiumSetupRef.current = true;
-          }
-      }
-      
-      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-          audioCtxRef.current.resume();
-      }
-  },[isAudioEnhanced]);
-
-  // Handle setting updates efficiently
-  useEffect(() => {
-      if (eqBandsRef.current.length > 0 && audioCtxRef.current) {
-          const targetEQ = isAudioEnhanced ? ENHANCED_EQ : ORIGINAL_EQ;
-          targetEQ.forEach((val, i) => {
-              if (eqBandsRef.current[i]) {
-                  eqBandsRef.current[i].gain.setTargetAtTime(val, audioCtxRef.current.currentTime, 0.1);
-                  eqBandsRef.current[i].gain.value = val;
-              }
-          });
-          if (audioCtxRef.current.state === 'suspended') {
-              audioCtxRef.current.resume();
-          }
-      }
-      localStorage.setItem('audio_enhanced', isAudioEnhanced.toString());
-  },[isAudioEnhanced]);
-
-
-  // --- CLEAN RAW LINK SHARE ---
   const handleShareSong = async () => {
     try {
       let path = currentSong.perma_url || currentSong.url || "";
       if (path && path.includes('jiosaavn.com')) path = new URL(path).pathname;
       const vId = ytVideoId || currentSong.prefetchedYtId || '';
       const sId = spotifyId || currentSong.spotifyId || '';
-      
       const shareUrl = `${window.location.origin}/play${path}?token=${vId}&signature=${sId}`;
 
       if (navigator.share) {
@@ -579,22 +473,34 @@ export default function MiniPlayer() {
     window.history.back(); 
   };
 
+  // ADVANCED AUTO-RESUME NETWORK HANDLER
   useEffect(() => {
+    const handleOnline = () => {
+        if (isPlaying && audioRef.current && audioRef.current.readyState < 3) {
+            setLoading(true);
+            const cTime = audioRef.current.currentTime;
+            audioRef.current.load();
+            audioRef.current.currentTime = cTime;
+            audioRef.current.play().catch(()=>{});
+        }
+    };
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden' && isVideoModeRef.current) {
         setIsVideoMode(false);
         if (audioRef.current) {
            audioRef.current.currentTime = videoStartTimeRef.current; 
-           const playPromise = audioRef.current.play();
-           if (playPromise !== undefined) playPromise.catch(()=>{});
+           audioRef.current.play().catch(()=>{});
         }
       }
     };
+    window.addEventListener('online', handleOnline);
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
-  },[]);
+    return () => {
+        window.removeEventListener('online', handleOnline);
+        document.removeEventListener("visibilitychange", handleVisibilityChange);
+    }
+  },[isPlaying]);
 
-  // SLEEP TIMER ENGINE
   useEffect(() => {
     let interval: any;
     if (typeof sleepTimer === 'number' && sleepTimer > 0) {
@@ -623,10 +529,9 @@ export default function MiniPlayer() {
        const cf = localStorage.getItem('card_font_size'); if (cf) setCardFontSize(cf);
        const c = localStorage.getItem('canvas_enabled'); if (c !== null) { setIsCanvasEnabled(c === 'true'); isCanvasEnabledRef.current = c === 'true'; }
        const l = localStorage.getItem('lyrics_enabled'); if (l !== null) { setIsLyricsEnabled(l === 'true'); isLyricsEnabledRef.current = l === 'true'; }
+       const ls = localStorage.getItem('lyrics_server'); if (ls !== null) setLyricsServer(ls);
        const ws = localStorage.getItem('word_sync_enabled'); if (ws !== null) setIsWordSyncEnabled(ws === 'true');
        const mws = localStorage.getItem('mini_word_sync_enabled'); if (mws !== null) setIsMiniWordSyncEnabled(mws === 'true');
-       
-       const ae = localStorage.getItem('audio_enhanced'); if (ae !== null) setIsAudioEnhanced(ae === 'true');
 
        const storedSong = localStorage.getItem('last_session_song');
        if (storedSong && !currentSong && !isSessionRestored) {
@@ -669,7 +574,6 @@ export default function MiniPlayer() {
     } catch (e) {}
   },[]);
 
-  // VIDEO PREFETCH LOGIC
   const prefetchVideoId = async (songTitle: string, songArtists: string) => {
     try {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
@@ -687,10 +591,26 @@ export default function MiniPlayer() {
     return null;
   };
 
+  const buildGaanaUrl = (albumId: string, trackId: string, quality: string, authString: string) => {
+     if (!albumId) return null;
+     const paddedAlbumId = albumId.padStart(2, '0');
+     const last2 = paddedAlbumId.slice(-2);
+     return `https://vodhlsgaana-ebw.akamaized.net/hls/${last2}/${albumId}/${trackId}/${quality}/${authString}/index.m3u8`;
+  };
+
+  const parseGaanaLyrics = (lrcString: string) => {
+      const parsed: any[] =[];
+      lrcString.split('\n').forEach((line: string) => {
+          const match = line.match(/\[(\d+):(\d+\.\d+)\](.*)/);
+          if (match && match[3].trim()) parsed.push({ time: parseInt(match[1]) * 60 + parseFloat(match[2]), words: match[3].trim() });
+      });
+      return parsed;
+  };
+
   // MAIN TRACK CHANGE HOOK
   useEffect(() => {
     if (!currentSong) return;
-    let isCurrent = true; let spotifyTimer: any;
+    let isCurrent = true; let loadTimer: any;
     fetchingRecsRef.current = false;
     mediaMetadataSetRef.current = false;
     hasCachedCurrentSongRef.current = false;
@@ -715,7 +635,6 @@ export default function MiniPlayer() {
     setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
     setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
     iframeInitialTimeRef.current = 0;
-    setStreamBaseUrl(null);
 
     const instantTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
     const instantArtists = decodeEntities(getArtistsText(currentSong));
@@ -733,56 +652,75 @@ export default function MiniPlayer() {
       });
     }
 
-    // --- GAANA FETCH LOGIC ---
+    // --- INTELLIGENT GAANA FETCH LOGIC ---
     const fetchGaanaData = async () => {
         setLoading(true);
         const targetQ = selectedQuality || "128";
 
         try {
-            // 1. Info
+            // 1. Info Fetch (Super fast)
             let sDetails = null;
             const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`);
             const infoJson = await infoRes.json();
             if (infoJson.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
 
-            // 2. Stream
-            const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`);
-            const streamJson = await streamRes.json();
-            let finalUrl = "";
-            
-            if (streamJson.data?.hlsUrl) {
-                setStreamBaseUrl(streamJson.data.hlsUrl);
-                // PRESERVES EXACTLY 128.mp4.master.m3u8 Structure for true native HLS.
-                finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
-            } else if (streamJson.data?.url) {
-                finalUrl = streamJson.data.url;
-            }
-            if (finalUrl && isCurrent) setAudioUrl(finalUrl);
+            // 2. Intelligent HLS Pre-Construct
+            let streamSuccess = false;
+            let cachedAuth = null;
+            try {
+                const storedAuth = localStorage.getItem('gaana_hls_auth');
+                if (storedAuth) {
+                    const parsed = JSON.parse(storedAuth);
+                    if (parsed.exp > Date.now() + 60000) cachedAuth = parsed.auth; 
+                }
+            } catch(e) {}
 
-            // 3. Lyrics
-            if (isLyricsEnabledRef.current) {
-                const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`);
-                const lrcJson = await lrcRes.json();
-                if (lrcJson.data?.lyrics && isCurrent) {
-                    const parsed: any[] =[];
-                    lrcJson.data.lyrics.split('\n').forEach((line: string) => {
-                        const match = line.match(/\[(\d+):(\d+\.\d+)\](.*)/);
-                        if (match && match[3].trim()) parsed.push({ time: parseInt(match[1]) * 60 + parseFloat(match[2]), words: match[3].trim() });
-                    });
-                    if (parsed.length > 0) { setLyrics(parsed); setSyncType("LINE_SYNCED"); }
-                    else triggerSpotifyFallback(sDetails || currentSong);
-                } else triggerSpotifyFallback(sDetails || currentSong);
-            } else triggerSpotifyFallback(sDetails || currentSong);
+            if (cachedAuth && sDetails?.album_id) {
+                const builtUrl = buildGaanaUrl(sDetails.album_id.toString(), trackId.toString(), targetQ, cachedAuth);
+                if (builtUrl) {
+                    setAudioUrl(builtUrl);
+                    streamSuccess = true;
+                }
+            }
+
+            // 3. Fallback Stream API (Extracts Auth token for caching)
+            if (!streamSuccess) {
+                const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`);
+                const streamJson = await streamRes.json();
+                
+                if (streamJson.data?.url) {
+                    const authMatch = streamJson.data.url.match(/hdntl=exp=\d+~acl=[^/]+~data=hdntl~hmac=[a-f0-9]+/);
+                    if (authMatch) {
+                        const authStr = authMatch[0];
+                        const expMatch = authStr.match(/exp=(\d+)/);
+                        if (expMatch) {
+                            localStorage.setItem('gaana_hls_auth', JSON.stringify({ auth: authStr, exp: parseInt(expMatch[1]) * 1000 }));
+                        }
+                    }
+                }
+
+                let finalUrl = "";
+                if (streamJson.data?.hlsUrl) {
+                    finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
+                } else if (streamJson.data?.url) {
+                    finalUrl = streamJson.data.url;
+                }
+                if (finalUrl && isCurrent) setAudioUrl(finalUrl);
+            }
             
-        } catch(e) { triggerSpotifyFallback(currentSong); }
+            triggerLyricsAndSpotifyMatch(sDetails || currentSong);
+        } catch(e) { triggerLyricsAndSpotifyMatch(currentSong); }
         if (isCurrent) setLoading(false);
     };
 
-    const triggerSpotifyFallback = async (songData: any) => {
+    // COMBINED LYRICS AND SPOTIFY MATCH ENGINE
+    const triggerLyricsAndSpotifyMatch = async (songData: any) => {
        const searchArtist = instantArtists ? instantArtists.split(',').slice(0, 3).join(' ') : "";
        const query = `${instantTitle} ${searchArtist}`.trim();
        
-       // FIRST TRY: AK47 API Matcher
+       let matchedSpotifyId = null; let matchedSpotifyUrl = null;
+
+       // Attempt Spotify Matching first (AK47 then RapidAPI)
        try {
          const akRes = await fetch(`https://ak47-gamma.vercel.app/api/search?q=${encodeURIComponent(query)}`);
          if (akRes.ok && isCurrent) {
@@ -795,43 +733,85 @@ export default function MiniPlayer() {
                if (match) {
                   const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
                   const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
-                  if (sId) {
-                     setSpotifyId(sId); setSpotifyUrl(sUrl);
-                     if (isCanvasEnabledRef.current) {
-                        const canvasRes = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`);
-                        if (canvasRes.ok) { const canvasJson = await canvasRes.json(); if (canvasJson?.canvasesList?.length > 0) setCanvasData(canvasJson.canvasesList[0]); }
-                     }
-                     return; // IF AK47 SUCCEEDS, EXIT EARLY
-                  }
+                  if (sId) { matchedSpotifyId = sId; matchedSpotifyUrl = sUrl; }
                }
             }
          }
        } catch (e) {}
 
-       // SECOND TRY: RapidAPI Fallback
-       try {
-         const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&limit=1`;
-         const response = await fetch(searchUrl, { headers: { 'x-rapidapi-key': RAPID_KEYS[0], 'x-rapidapi-host': RAPID_API_HOST } });
-         if (response.ok && isCurrent) { 
-            const data = await response.json(); 
-            const match = performMatching(data, instantTitle, searchArtist);
-            if (match) {
-               setSpotifyId(match.id); setSpotifyUrl(`https://open.spotify.com/track/${match.id}`);
-               if (isCanvasEnabledRef.current) {
-                  const canvasRes = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${match.id}`);
-                  if (canvasRes.ok) {
-                     const canvasJson = await canvasRes.json();
-                     if (canvasJson?.canvasesList?.length > 0) setCanvasData(canvasJson.canvasesList[0]);
-                  }
+       if (!matchedSpotifyId) {
+         try {
+           const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&limit=1`;
+           const response = await fetch(searchUrl, { headers: { 'x-rapidapi-key': RAPID_KEYS[0], 'x-rapidapi-host': RAPID_API_HOST } });
+           if (response.ok && isCurrent) { 
+              const data = await response.json(); 
+              const match = performMatching(data, instantTitle, searchArtist);
+              if (match) {
+                 matchedSpotifyId = match.id; matchedSpotifyUrl = `https://open.spotify.com/track/${match.id}`;
+              }
+           }
+         } catch (e) {}
+       }
+
+       if (matchedSpotifyId && isCurrent) {
+           setSpotifyId(matchedSpotifyId); setSpotifyUrl(matchedSpotifyUrl);
+           if (isCanvasEnabledRef.current) {
+              const canvasRes = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${matchedSpotifyId}`);
+              if (canvasRes.ok) { const canvasJson = await canvasRes.json(); if (canvasJson?.canvasesList?.length > 0) setCanvasData(canvasJson.canvasesList[0]); }
+           }
+       }
+
+       // Smart Lyrics Fetcher (Respects Server Priority)
+       if (!isCurrent || !isLyricsEnabledRef.current) return;
+       let lrcFound = false;
+
+       if (lyricsServer === "spotify" && matchedSpotifyUrl) {
+           try {
+               const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(matchedSpotifyUrl)}&format=lrc`);
+               if (lyricsRes.ok) {
+                   const lyricsJson = await lyricsRes.json();
+                   if (lyricsJson.lines && lyricsJson.lines.length > 0) {
+                       setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
+                       setSyncType(lyricsJson.syncType);
+                       lrcFound = true;
+                   }
                }
-            }
-         }
-       } catch (e) {}
+           } catch(e) {}
+       }
+
+       if (!lrcFound || lyricsServer === "gaana") {
+           try {
+               const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`);
+               if (lrcRes.ok) {
+                   const lrcJson = await lrcRes.json();
+                   if (lrcJson.data?.lyrics) {
+                       const parsed = parseGaanaLyrics(lrcJson.data.lyrics);
+                       if (parsed.length > 0) {
+                           setLyrics(parsed); setSyncType("LINE_SYNCED"); lrcFound = true;
+                       }
+                   }
+               }
+           } catch(e) {}
+       }
+
+       // Final Fallback if Gaana was priority but failed
+       if (!lrcFound && lyricsServer === "gaana" && matchedSpotifyUrl) {
+           try {
+               const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(matchedSpotifyUrl)}&format=lrc`);
+               if (lyricsRes.ok) {
+                   const lyricsJson = await lyricsRes.json();
+                   if (lyricsJson.lines && lyricsJson.lines.length > 0) {
+                       setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
+                       setSyncType(lyricsJson.syncType);
+                   }
+               }
+           } catch(e) {}
+       }
     };
 
-    spotifyTimer = setTimeout(() => { fetchGaanaData(); }, 300);
-    return () => { isCurrent = false; clearTimeout(spotifyTimer); };
-  },[currentSong, selectedQuality]);
+    loadTimer = setTimeout(() => { fetchGaanaData(); }, 150);
+    return () => { isCurrent = false; clearTimeout(loadTimer); };
+  },[currentSong, selectedQuality, lyricsServer]);
 
   useEffect(() => {
     if (queue && queue.length > 0) {
@@ -843,36 +823,6 @@ export default function MiniPlayer() {
     }
   },[queue]); 
 
-  // ROBUST VIDEO AUTO-NEXT CLICKER
-  useEffect(() => {
-    const handleMsg = (e: MessageEvent) => {
-      if (e.data?.type === 'YTP_TIME' && isVideoMode) {
-        videoStartTimeRef.current = e.data.time; 
-        if (!isSeekingRef.current && isExpanded) setCurrentTime(e.data.time);
-        if (e.data.duration) {
-          if (duration !== e.data.duration) setDuration(e.data.duration);
-          if (!isSeekingRef.current && isExpanded) setProgress((e.data.time / e.data.duration) * 100);
-        } else if (duration > 0 && !isSeekingRef.current && isExpanded) {
-           setProgress((e.data.time / duration) * 100);
-        }
-      } else {
-        let stateCode = null;
-        if (e.data?.type === 'YTP_STATE') stateCode = e.data.state;
-        else if (e.data?.event === 'onStateChange') stateCode = e.data.info;
-        
-        if (stateCode !== null) {
-            if (stateCode === 1 || String(stateCode) === '1') { audioRef.current?.pause(); setIsPlaying(true); } 
-            else if (stateCode === 2 || String(stateCode) === '2') { setIsPlaying(false); } 
-            else if (stateCode === 0 || String(stateCode) === '0') { setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100); }
-        } else if (e.data === 'ended' || e.data?.event === 'ended' || e.data?.type === 'ENDED') {
-            setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100);
-        }
-      }
-    };
-    window.addEventListener('message', handleMsg);
-    return () => window.removeEventListener('message', handleMsg);
-  },[isVideoMode, duration, upcomingQueue, isExpanded]);
-
   const handlePlayPauseToggle = (e?: any) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     const newState = !isPlaying;
@@ -883,7 +833,6 @@ export default function MiniPlayer() {
       videoIframeRef.current.contentWindow.postMessage({ type: newState ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
     } else {
       if (newState) {
-        ensureAudioActive();
         const playPromise = audioRef.current?.play();
         if (playPromise !== undefined) playPromise.catch(()=>{});
       } else audioRef.current?.pause();
@@ -898,7 +847,6 @@ export default function MiniPlayer() {
         const audioDur = audioRef.current.duration || 0; setDuration(audioDur);
         const safeTime = (audioDur > 0 && currentTime > audioDur) ? audioDur - 2 : currentTime;
         audioRef.current.currentTime = safeTime; setCurrentTime(safeTime);
-        ensureAudioActive();
         const playPromise = audioRef.current.play();
         if (playPromise !== undefined) playPromise.catch(()=>{});
         setIsPlaying(true);
@@ -916,41 +864,15 @@ export default function MiniPlayer() {
     const newVid = await prefetchVideoId(displayTitle, displayArtists);
     if (newVid) { setYtVideoId(newVid); setIsVideoMode(true); } 
     else if (audioRef.current) { 
-        ensureAudioActive();
         const p = audioRef.current.play(); if(p!==undefined) p.catch(()=>{}); setIsPlaying(true); 
     }
     setIsVideoLoading(false);
   };
 
-  useEffect(() => {
-    if (!spotifyId || !spotifyUrl) return;
-    let isCurrent = true;
-    const fetchExtras = async () => {
-      try {
-        if (isLyricsEnabledRef.current) {
-          let lyricsJson = await getCache(`lyrics_${spotifyId}`);
-          if (!lyricsJson) {
-              const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(spotifyUrl)}&format=lrc`);
-              if (lyricsRes.ok) {
-                 lyricsJson = await lyricsRes.json();
-                 await setCache(`lyrics_${spotifyId}`, lyricsJson);
-              }
-          }
-          if (isCurrent && lyricsJson && lyricsJson.lines && lyrics.length === 0) { 
-              setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
-              setSyncType(lyricsJson.syncType);
-          }
-        }
-      } catch (e) {}
-    };
-    fetchExtras();
-    return () => { isCurrent = false; };
-  },[spotifyId, spotifyUrl]);
-
+  // --- VIBRANT SAAVN COLOR EXTRACTOR ---
   useEffect(() => {
     if (!displayImage) return;
     const img = new Image(); img.crossOrigin = "Anonymous"; 
-    // Using Wsrv.nl Proxy bypasses ALL tainted canvas CORS restrictions effortlessly!
     img.src = `https://wsrv.nl/?url=${encodeURIComponent(displayImage)}&w=50&h=50&output=jpg`;
     
     img.onload = () => {
@@ -959,22 +881,36 @@ export default function MiniPlayer() {
       ctx.drawImage(img, 0, 0, 50, 50);
       try {
         const data = ctx.getImageData(0, 0, 50, 50).data;
-        let r = 0, g = 0, b = 0, count = 0;
+        let rSum = 0, gSum = 0, bSum = 0, count = 0;
+        
         for (let i = 0; i < data.length; i += 16) {
-          const brightness = (data[i] + data[i+1] + data[i+2]) / 3;
-          if (brightness > 30 && brightness < 210) { r += data[i]; g += data[i+1]; b += data[i+2]; count++; }
+           const r = data[i], g = data[i+1], b = data[i+2];
+           const max = Math.max(r, g, b), min = Math.min(r, g, b);
+           const sat = max === 0 ? 0 : (max - min) / max;
+           if (sat > 0.35 && max > 60 && max < 240) { 
+               rSum += r; gSum += g; bSum += b; count++;
+           }
         }
-        setDominantColor(count > 0 ? `rgb(${Math.floor(r/count)}, ${Math.floor(g/count)}, ${Math.floor(b/count)})` : "rgb(83, 83, 83)");
+        
+        if (count > 5) {
+            setDominantColor(`rgb(${Math.floor(rSum/count)}, ${Math.floor(gSum/count)}, ${Math.floor(bSum/count)})`);
+        } else {
+            let tr=0, tg=0, tb=0, tc=0;
+            for(let i=0; i<data.length; i+=16){
+                const r = data[i], g = data[i+1], b = data[i+2];
+                if(r>20 && g>20 && b>20){ tr+=r; tg+=g; tb+=b; tc++; }
+            }
+            setDominantColor(tc > 0 ? `rgb(${Math.floor(tr/tc)}, ${Math.floor(tg/tc)}, ${Math.floor(tb/tc)})` : "rgb(40, 40, 40)");
+        }
       } catch (e) { setDominantColor("rgb(30, 30, 30)"); }
     };
-    img.onerror = () => { setDominantColor("rgb(83, 83, 83)"); }
+    img.onerror = () => { setDominantColor("rgb(40, 40, 40)"); }
   },[displayImage]);
 
   useEffect(() => {
     if (audioRef.current && audioUrl) {
       audioRef.current.volume = volume / 100;
       if (isPlaying && !isVideoMode) { 
-          ensureAudioActive();
           const p = audioRef.current.play(); if (p !== undefined) p.catch(() => {}); 
       }
       else if (!isPlaying) audioRef.current.pause();
@@ -1011,7 +947,6 @@ export default function MiniPlayer() {
     if (repeatMode === 2 && audioRef.current) { 
       audioRef.current.currentTime = 0; 
       setRepeatMode(0); 
-      ensureAudioActive();
       const p = audioRef.current.play(); 
       if (p!==undefined) p.catch(()=>{}); 
       return; 
@@ -1060,13 +995,7 @@ export default function MiniPlayer() {
       const d = audioRef.current.duration;
       const c = audioRef.current.currentTime;
       if (d > 0 && c >= 0 && c <= d && !isNaN(d) && !isNaN(c)) {
-        try { 
-           navigator.mediaSession.setPositionState({ 
-             duration: d, 
-             playbackRate: audioRef.current.playbackRate || 1, 
-             position: c 
-           }); 
-        } catch(e) {}
+        try { navigator.mediaSession.setPositionState({ duration: d, playbackRate: audioRef.current.playbackRate || 1, position: c }); } catch(e) {}
       }
     }
   },[]);
@@ -1085,7 +1014,6 @@ export default function MiniPlayer() {
           setIsPlaying(true); navigator.mediaSession.playbackState = 'playing';
           if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
           else if (audioRef.current) { 
-              ensureAudioActive();
               const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); 
           }
        });
@@ -1114,6 +1042,12 @@ export default function MiniPlayer() {
     if (audioRef.current && !isVideoMode) {
       const c = audioRef.current.currentTime; const d = audioRef.current.duration;
       
+      // Update Buffer Progress efficiently
+      if (audioRef.current.buffered.length > 0) {
+          const bEnd = audioRef.current.buffered.end(audioRef.current.buffered.length - 1);
+          if (d > 0) setBufferedProgress((bEnd / d) * 100);
+      }
+
       const now = Date.now();
       if (!isSeekingRef.current && now - lastTimeUpdateRef.current < 250) {
          if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0 && isExpanded) {
@@ -1287,7 +1221,6 @@ export default function MiniPlayer() {
     } else if (audioRef.current && duration > 0) {
       audioRef.current.currentTime = newTime; syncPosition();
       if (isPlaying) { 
-          ensureAudioActive();
           const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); 
       }
     }
@@ -1406,7 +1339,6 @@ export default function MiniPlayer() {
      if (diff > 0 && !showQueue) setSwipeX(diff); 
   };
   const handleTouchEnd = () => { 
-     // 30% of screen width to successfully swipe close
      if (swipeX > window.innerWidth * 0.3 && !showQueue) { 
         setCurrentSong(null); setIsPlaying(false); setIsExpanded(false); 
         setShowQueue(false); setShowSettingsMenu(false); setShowTimerMenu(false);
@@ -1774,8 +1706,10 @@ export default function MiniPlayer() {
         .scrollbar-hide::-webkit-scrollbar { display: none; }
         input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; cursor: pointer; border-radius: 4px; }
         input[type=range]:focus { outline: none; }
-        .mobile-slider::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,0.2); }
+        
+        .mobile-slider::-webkit-slider-runnable-track { background: transparent; }
         .mobile-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; height: 12px; width: 12px; border-radius: 50%; background: #fff; margin-top: -4px; box-shadow: 0 2px 4px rgba(0,0,0,0.4); border: 0; }
+        
         .no-select { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; pointer-events: none; }
         .no-select-text { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
         .queue-item { transform-origin: center; will-change: transform; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); }
@@ -1788,16 +1722,30 @@ export default function MiniPlayer() {
         }
       `}} />
 
-      {/* AUDIO ELEMENT WITH NATIVE ONPLAY HOOKS FOR EQ ACTIVATION */}
+      {/* AUDIO ELEMENT WITH NATIVE NETWORK RESILIENCE */}
       <audio 
         ref={audioRef} 
         src={audioUrl} 
         autoPlay={isPlaying && !isVideoMode} 
         onEnded={playNext} 
-        onTimeUpdate={handleTimeUpdate} 
+        onTimeUpdate={handleTimeUpdate}
+        onWaiting={() => setLoading(true)}
+        onPlaying={() => setLoading(false)}
+        onStalled={() => { if(isPlaying) setLoading(true); }}
+        onError={() => {
+           if (isPlaying && audioUrl) {
+               setLoading(true);
+               setTimeout(() => {
+                   if (audioRef.current) {
+                       const cTime = audioRef.current.currentTime;
+                       audioRef.current.load();
+                       audioRef.current.currentTime = cTime;
+                       audioRef.current.play().catch(()=>{});
+                   }
+               }, 2000);
+           }
+        }}
         crossOrigin="anonymous"
-        onPlay={ensureAudioActive}
-        onPlaying={ensureAudioActive}
         onLoadedMetadata={() => { 
            const dur = audioRef.current?.duration || 0;
            setDuration(dur); 
@@ -1815,7 +1763,7 @@ export default function MiniPlayer() {
         
         <div className="absolute inset-0 z-0 pointer-events-none transition-all duration-700" style={{ backgroundColor: dominantColor }}>
           {displayImage && !isLyricsFullScreen && (
-             <div className="absolute inset-0 bg-cover bg-center opacity-60 blur-[80px] scale-[1.5] transition-all duration-700" style={{ backgroundImage: `url(${displayImage})` }} />
+             <div className="absolute inset-0 bg-cover bg-center opacity-70 blur-[80px] scale-[1.5] transition-all duration-700" style={{ backgroundImage: `url(${displayImage})` }} />
           )}
           <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/50 to-[#121212] opacity-95" />
         </div>
@@ -1892,8 +1840,13 @@ export default function MiniPlayer() {
                 {!isLyricsFullScreen && <button onClick={handleLikeClick} className="flex-shrink-0 ml-2 active:scale-75 transition-transform pointer-events-auto"><Heart size={26} fill={isSongLiked ? "#1db954" : "none"} color={isSongLiked ? "#1db954" : "white"} /></button>}
               </div>
 
+              {/* Advanced 3-Tier Preloaded Progress Bar */}
               <div className={`w-full flex flex-col gap-1 relative drop-shadow-md ${isLyricsFullScreen ? 'mb-2 scale-[0.95] origin-bottom' : 'mb-5'}`}>
-                <input type="range" min="0" max="100" value={duration > 0 ? progress : 0} onChange={handleSeekChange} onPointerDown={handleSeekStart} onPointerUp={handleSeekEnd} onTouchStart={handleSeekStart} onTouchEnd={handleSeekEnd} className="w-full mobile-slider relative z-10 pointer-events-auto" style={{ background: `linear-gradient(to right, #fff ${progress}%, rgba(255,255,255,0.2) ${progress}%)` }} />
+                <div className="w-full relative h-[4px] flex items-center group">
+                    <div className="absolute top-[0px] left-0 right-0 h-[4px] bg-white/20 rounded-full pointer-events-none" />
+                    <div className="absolute top-[0px] left-0 h-[4px] bg-white/40 rounded-full pointer-events-none transition-all duration-300" style={{ width: `${bufferedProgress}%` }} />
+                    <input type="range" min="0" max="100" value={duration > 0 ? progress : 0} onChange={handleSeekChange} onPointerDown={handleSeekStart} onPointerUp={handleSeekEnd} onTouchStart={handleSeekStart} onTouchEnd={handleSeekEnd} className="w-full mobile-slider relative z-10 pointer-events-auto" style={{ background: `linear-gradient(to right, #fff ${progress}%, transparent ${progress}%)` }} />
+                </div>
                 <div className="flex items-center justify-between text-[11px] font-medium text-[#a7a7a7] mt-1 w-full pointer-events-none no-select-text"><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
               </div>
 
@@ -1939,6 +1892,7 @@ export default function MiniPlayer() {
             {/* ALBUM CARD */}
             {songDetails?.album_title && (
               <Link href={albumRoute} onClick={closePlayerForNavigation} className="w-full bg-[#1e1e1e]/60 backdrop-blur-md rounded-2xl p-4 flex items-center gap-4 hover:bg-[#2a2a2a]/80 transition-colors border border-white/10 shadow-xl relative overflow-hidden group no-select-text pointer-events-auto">
+                <div className="absolute inset-0 z-0 pointer-events-none opacity-30" style={{ backgroundColor: dominantColor }} />
                 {displayImage && <img draggable={false} src={displayImage} className="w-[64px] h-[64px] rounded-md object-cover relative z-10 shadow-md border border-white/5 group-hover:scale-105 transition-transform no-select pointer-events-none" alt="Album Cover" />}
                 <div className="flex flex-col relative z-10 flex-1 pr-2"><span className="text-white/60 text-[11px] uppercase tracking-widest font-bold mb-1 drop-shadow-sm">Album</span><span className="text-white font-bold text-[16px] line-clamp-1 drop-shadow-md">{decodeEntities(songDetails.album_title)}</span></div><div className="relative z-10 text-white/50 group-hover:text-white transition-colors pl-2"><ChevronDown size={20} className="-rotate-90" /></div>
               </Link>
@@ -2053,22 +2007,11 @@ export default function MiniPlayer() {
                    </div>
                 </div>
 
-                {/* Audio Profile Setting - Placed at the very bottom */}
                 <div className="flex flex-col gap-3 mt-2">
-                   <span className="text-white/60 text-[11px] font-bold uppercase tracking-wider pl-1">Audio Profile</span>
+                   <span className="text-white/60 text-[11px] font-bold uppercase tracking-wider pl-1">Lyrics Server Preference</span>
                    <div className="flex bg-[#1e1e1e] rounded-[16px] overflow-hidden p-2 gap-2">
-                      <button onClick={() => {
-                          setIsAudioEnhanced(false);
-                          ensureAudioActive();
-                      }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${!isAudioEnhanced ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>
-                         Original
-                      </button>
-                      <button onClick={() => {
-                          setIsAudioEnhanced(true);
-                          ensureAudioActive();
-                      }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${isAudioEnhanced ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>
-                         Enhanced
-                      </button>
+                      <button onClick={() => { setLyricsServer("spotify"); localStorage.setItem('lyrics_server', "spotify"); }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${lyricsServer === "spotify" ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>Spotify</button>
+                      <button onClick={() => { setLyricsServer("gaana"); localStorage.setItem('lyrics_server', "gaana"); }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${lyricsServer === "gaana" ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>Gaana</button>
                    </div>
                 </div>
 
