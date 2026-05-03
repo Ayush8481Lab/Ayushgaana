@@ -1,3 +1,6 @@
+/* eslint-disable @next/next/no-img-element */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
@@ -64,6 +67,7 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
   } catch(e) {}
 };
 
+// --- AUTH ENGINE FOR AK47 API ---
 const getCachedAuth = () => {
   if (typeof window === "undefined") return null;
   try {
@@ -92,6 +96,7 @@ const getAuthData = async () => {
   return ongoingAuthPromise;
 };
 
+// --- UTILS ---
 const decodeEntities = (text: string) => {
   if (!text) return "";
   let decoded = text;
@@ -121,7 +126,6 @@ const getArtistsText = (data: any) => {
   return names.length > 0 ? Array.from(new Set(names)).join(", ") : "Unknown Artist";
 };
 
-// --- FIXED ROBUST IMAGE EXTRACTOR ---
 const getImageUrl = (item: any) => {
   if (!item) return null;
   let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || item;
@@ -156,11 +160,6 @@ const parseTimeTag = (tag: string) => {
 
 const RAPID_KEYS =["d1edce158amshec139440d20658ap1f2545jsnbb7da9add82f", "6cf7f03014msh787c51a713c0264p15c20djsna1f9a9f6a378", "13d48f6bb8msh459c11b91bdcc44p110f4ejsn099443894115", "03fc23317fmsh0535ef9ec8c6f5bp1db59bjsn545991df9343", "e54e3fbc4dmshfc16d4417b618fdp1a2fafjsn30c72d8cf3ab"];
 const RAPID_API_HOST = "spotify81.p.rapidapi.com";
-
-// --- AUDIO EQ PRESETS (BACKGROUND ENGINE) ---
-const EQ_FREQUENCIES =[32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
-const ENHANCED_EQ =[-2, 2, -1, -5, -7, -3, 0, 0, -4, -1];
-const ORIGINAL_EQ =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 // --- AK47 SPECIFIC MATCHER ---
 const performAK47Matching = (results: any[], targetTrack: string, targetArtist: string): any => {
@@ -322,6 +321,7 @@ export default function MiniPlayer() {
   const[currentTime, setCurrentTime] = useState(0);
   const[duration, setDuration] = useState(0);
   const[volume, setVolume] = useState(100);
+  const[retryCount, setRetryCount] = useState(0);
   
   // MODAL/UI STATES
   const[isExpanded, setIsExpanded] = useState(false);
@@ -406,12 +406,6 @@ export default function MiniPlayer() {
   const isCanvasEnabledRef = useRef(true);
   const isLyricsEnabledRef = useRef(true);
 
-  // BACKGROUND AUDIO EQ STATE
-  const[isAudioEnhanced, setIsAudioEnhanced] = useState(true);
-  const audioCtxRef = useRef<any>(null);
-  const isAudioPremiumSetupRef = useRef(false);
-  const eqBandsRef = useRef<any[]>([]);
-
   const[dlState, setDlState] = useState<{type: "music" | "video" | null, status: string, options?: any[], progress?: number, packStep?: string, server?: number}>({type: null, status: "idle", progress: 0, server: 1});
 
   const isSongLiked = likedSongs.some((s: any) => s && (s.id || s.track_id) === (currentSong?.id || currentSong?.track_id));
@@ -487,7 +481,7 @@ export default function MiniPlayer() {
     window.history.back(); 
   };
 
-  // ADVANCED AUTO-RESUME NETWORK HANDLER
+  // ADVANCED AUTO-RESUME NETWORK HANDLER (Recovers elegantly from network drops)
   useEffect(() => {
     const handleOnline = () => {
         if (isPlaying && audioRef.current && audioRef.current.readyState < 3) {
@@ -606,8 +600,8 @@ export default function MiniPlayer() {
   };
 
   const buildGaanaUrl = (albumId: string, trackId: string, quality: string, authString: string) => {
-     if (!albumId) return null;
-     const paddedAlbumId = albumId.padStart(2, '0');
+     if (!albumId || !trackId || !authString) return null;
+     const paddedAlbumId = albumId.toString().padStart(2, '0');
      const last2 = paddedAlbumId.slice(-2);
      return `https://vodhlsgaana-ebw.akamaized.net/hls/${last2}/${albumId}/${trackId}/${quality}/${authString}/index.m3u8`;
   };
@@ -621,7 +615,7 @@ export default function MiniPlayer() {
       return parsed;
   };
 
-  // MAIN TRACK CHANGE HOOK
+  // MAIN TRACK CHANGE & HLS URL ENGINE
   useEffect(() => {
     if (!currentSong) return;
     let isCurrent = true; let loadTimer: any;
@@ -650,6 +644,7 @@ export default function MiniPlayer() {
     setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
     iframeInitialTimeRef.current = 0;
     setStreamBaseUrl(null);
+    setBufferedProgress(0);
 
     const instantTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
     const instantArtists = decodeEntities(getArtistsText(currentSong));
@@ -679,7 +674,7 @@ export default function MiniPlayer() {
             const infoJson = await infoRes.json();
             if (infoJson.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
 
-            // 2. Intelligent HLS Pre-Construct
+            // 2. Intelligent HLS Pre-Construct (Saves an API Call!)
             let streamSuccess = false;
             let cachedAuth = null;
             try {
@@ -691,36 +686,45 @@ export default function MiniPlayer() {
             } catch(e) {}
 
             if (cachedAuth && sDetails?.album_id) {
-                const builtUrl = buildGaanaUrl(sDetails.album_id.toString(), trackId.toString(), targetQ, cachedAuth);
+                const builtUrl = buildGaanaUrl(sDetails.album_id, trackId.toString(), targetQ, cachedAuth);
                 if (builtUrl) {
                     setAudioUrl(builtUrl);
                     streamSuccess = true;
                 }
             }
 
-            // 3. Fallback Stream API (Extracts Auth token for caching)
+            // 3. Fallback Stream API (Extracts Auth token with global acl=/* for caching)
             if (!streamSuccess) {
                 const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`);
                 const streamJson = await streamRes.json();
                 
+                let extractedAuth = null;
+                // Look for the auth token in the direct URL that uses global acl=/* (usually encoded as %2f*)
                 if (streamJson.data?.url) {
-                    const authMatch = streamJson.data.url.match(/hdntl=exp=\d+~acl=[^/]+~data=hdntl~hmac=[a-f0-9]+/);
+                    const authMatch = streamJson.data.url.match(/(hdntl=exp=\d+~acl=(?:%2f|\/)\*~data=hdntl~hmac=[a-f0-9]+)/i);
                     if (authMatch) {
-                        const authStr = authMatch[0];
-                        const expMatch = authStr.match(/exp=(\d+)/);
+                        extractedAuth = authMatch[1];
+                        const expMatch = extractedAuth.match(/exp=(\d+)/);
                         if (expMatch) {
-                            localStorage.setItem('gaana_hls_auth', JSON.stringify({ auth: authStr, exp: parseInt(expMatch[1]) * 1000 }));
+                            localStorage.setItem('gaana_hls_auth', JSON.stringify({ auth: extractedAuth, exp: parseInt(expMatch[1]) * 1000 }));
                         }
                     }
                 }
 
-                let finalUrl = "";
-                if (streamJson.data?.hlsUrl) {
-                    finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
-                } else if (streamJson.data?.url) {
-                    finalUrl = streamJson.data.url;
+                // If we successfully extracted the global auth, build the fast URL natively.
+                if (extractedAuth && sDetails?.album_id) {
+                     const builtUrl = buildGaanaUrl(sDetails.album_id.toString(), trackId.toString(), targetQ, extractedAuth);
+                     if (builtUrl && isCurrent) setAudioUrl(builtUrl);
+                } else {
+                     // Failsafe raw hlsUrl
+                     let finalUrl = "";
+                     if (streamJson.data?.hlsUrl) {
+                         finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
+                     } else if (streamJson.data?.url) {
+                         finalUrl = streamJson.data.url;
+                     }
+                     if (finalUrl && isCurrent) setAudioUrl(finalUrl);
                 }
-                if (finalUrl && isCurrent) setAudioUrl(finalUrl);
             }
             
             triggerLyricsAndSpotifyMatch(sDetails || currentSong);
@@ -728,7 +732,7 @@ export default function MiniPlayer() {
         if (isCurrent) setLoading(false);
     };
 
-    // COMBINED LYRICS AND SPOTIFY MATCH ENGINE
+    // COMBINED LYRICS AND SPOTIFY MATCH ENGINE (AK47 Integrated Properly)
     const triggerLyricsAndSpotifyMatch = async (songData: any) => {
        const searchArtist = instantArtists ? instantArtists.split(',').slice(0, 3).join(' ') : "";
        const query = `${instantTitle} ${searchArtist}`.trim();
@@ -737,20 +741,23 @@ export default function MiniPlayer() {
 
        // Attempt Spotify Matching first (AK47 then RapidAPI)
        try {
-         const akRes = await fetch(`https://ak47-gamma.vercel.app/api/search?q=${encodeURIComponent(query)}`);
-         if (akRes.ok && isCurrent) {
-            const akData = await akRes.json();
-            const tracks = akData.data || akData.tracks || akData.results || akData;
-            const arr = Array.isArray(tracks) ? tracks : (tracks.items || [tracks]);
-            
-            if (arr.length > 0) {
-               const match = performAK47Matching(arr, instantTitle, searchArtist);
-               if (match) {
-                  const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
-                  const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
-                  if (sId) { matchedSpotifyId = sId; matchedSpotifyUrl = sUrl; }
-               }
-            }
+         const auth = await getAuthData();
+         if (auth && auth.clientId && auth.accessToken) {
+             const akRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`);
+             if (akRes.ok && isCurrent) {
+                const akData = await akRes.json();
+                const tracks = akData.data || akData.tracks || akData.results || akData;
+                const arr = Array.isArray(tracks) ? tracks : (tracks.items || [tracks]);
+                
+                if (arr && arr.length > 0) {
+                   const match = performAK47Matching(arr, instantTitle, searchArtist);
+                   if (match) {
+                      const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
+                      const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
+                      if (sId) { matchedSpotifyId = sId; matchedSpotifyUrl = sUrl; }
+                   }
+                }
+             }
          }
        } catch (e) {}
 
@@ -826,7 +833,7 @@ export default function MiniPlayer() {
 
     loadTimer = setTimeout(() => { fetchGaanaData(); }, 150);
     return () => { isCurrent = false; clearTimeout(loadTimer); };
-  },[currentSong, selectedQuality, lyricsServer]);
+  },[currentSong, selectedQuality, lyricsServer, retryCount]); // retryCount triggers re-fetch on error!
 
   useEffect(() => {
     if (queue && queue.length > 0) {
@@ -1057,12 +1064,6 @@ export default function MiniPlayer() {
     if (audioRef.current && !isVideoMode) {
       const c = audioRef.current.currentTime; const d = audioRef.current.duration;
       
-      // Update Buffer Progress efficiently
-      if (audioRef.current.buffered.length > 0) {
-          const bEnd = audioRef.current.buffered.end(audioRef.current.buffered.length - 1);
-          if (d > 0) setBufferedProgress((bEnd / d) * 100);
-      }
-
       const now = Date.now();
       if (!isSeekingRef.current && now - lastTimeUpdateRef.current < 250) {
          if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0 && isExpanded) {
@@ -1105,6 +1106,17 @@ export default function MiniPlayer() {
         if (activeIdx !== activeLyricIndex) setActiveLyricIndex(activeIdx);
       }
     }
+  };
+
+  // NATIVE AUDIO PROGRESS LISTENER FOR SAAVN-STYLE PRELOAD BAR
+  const handleProgress = () => {
+     if (audioRef.current && audioRef.current.duration > 0) {
+         const buffered = audioRef.current.buffered;
+         if (buffered.length > 0) {
+             const bEnd = buffered.end(buffered.length - 1);
+             setBufferedProgress((bEnd / audioRef.current.duration) * 100);
+         }
+     }
   };
 
   // HIGHLY OPTIMIZED APPLE-MUSIC STYLE WORD SYNC ENGINE
@@ -1645,7 +1657,7 @@ export default function MiniPlayer() {
           </div>
        </div>
     );
-  },[songDetails]);
+  }, [songDetails]);
 
   const RenderedQueue = useMemo(() => {
     return upcomingQueue.map((track: any, index: number) => {
@@ -1741,23 +1753,19 @@ export default function MiniPlayer() {
       <audio 
         ref={audioRef} 
         src={audioUrl} 
+        preload="auto"
         autoPlay={isPlaying && !isVideoMode} 
         onEnded={playNext} 
         onTimeUpdate={handleTimeUpdate}
+        onProgress={handleProgress}
         onWaiting={() => setLoading(true)}
         onPlaying={() => setLoading(false)}
         onStalled={() => { if(isPlaying) setLoading(true); }}
         onError={() => {
            if (isPlaying && audioUrl) {
                setLoading(true);
-               setTimeout(() => {
-                   if (audioRef.current) {
-                       const cTime = audioRef.current.currentTime;
-                       audioRef.current.load();
-                       audioRef.current.currentTime = cTime;
-                       audioRef.current.play().catch(()=>{});
-                   }
-               }, 2000);
+               localStorage.removeItem('gaana_hls_auth');
+               setTimeout(() => { setRetryCount(c => c + 1); }, 1500); // Forces auto-retry!
            }
         }}
         crossOrigin="anonymous"
