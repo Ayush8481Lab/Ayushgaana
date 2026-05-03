@@ -10,7 +10,7 @@ const extractArtistsText = (data: any) => {
   if (Array.isArray(data.artist)) names = data.artist.map((a: any) => a.name || a);
   else if (Array.isArray(data.singers)) names = data.singers.map((a: any) => a.name || a);
   else if (Array.isArray(data.artists)) names = data.artists.map((a: any) => a.name || a);
-  else if (data?.primaryArtists) names = typeof data.primaryArtists === 'string' ? data.primaryArtists.split(',') : data.primaryArtists.map((a:any)=>a.name);
+  else if (data?.primaryArtists) names = typeof data.primaryArtists === 'string' ? data.primaryArtists.split(',') : data.primaryArtists.map((a: any) => a.name);
   else return "Unknown Artist";
   
   return Array.from(new Set(names)).join(", ");
@@ -40,18 +40,18 @@ type AppContextType = {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [language, setLanguage] = useState("Bhojpuri");
+  const[language, setLanguage] = useState("Bhojpuri");
   const [currentSong, setCurrentSong] = useState<any>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   
-  const [queue, setQueue] = useState<any[]>([]);
+  const[queue, setQueue] = useState<any[]>([]);
   const [upcomingQueue, setUpcomingQueue] = useState<any[]>([]);
   const [historyQueue, setHistoryQueue] = useState<any[]>([]);
   
   const[playContext, setPlayContext] = useState({ type: "Home", name: "Gaana Selection" });
 
   const[likedSongs, setLikedSongs] = useState<any[]>([]);
-  const[likedPlaylists, setLikedPlaylists] = useState<any[]>([]);
+  const [likedPlaylists, setLikedPlaylists] = useState<any[]>([]);
 
   useEffect(() => {
     try {
@@ -71,7 +71,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setUpcomingQueue(prev => prev.filter((v, i, a) => 
       a.findIndex(t => (t.track_id || t.id || t.entity_id) === (v.track_id || v.id || v.entity_id)) === i
     ));
-  }, [upcomingQueue.length]);
+  },[upcomingQueue.length]);
 
   const toggleLikeSong = (song: any) => {
     if (!song || (!song.id && !song.track_id && !song.entity_id)) return;
@@ -90,7 +90,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!playlist || (!playlist.id && !playlist.entity_id)) return;
     setLikedPlaylists(prev => {
       const exists = prev.find(p => p && (p.id || p.entity_id) === (playlist.id || playlist.entity_id));
-      const newList = exists ? prev.filter(p => p && (p.id || p.entity_id) !== (playlist.id || playlist.entity_id)) : [playlist, ...prev];
+      const newList = exists ? prev.filter(p => p && (p.id || p.entity_id) !== (playlist.id || playlist.entity_id)) :[playlist, ...prev];
       localStorage.setItem('liked_playlists', JSON.stringify(newList));
       return newList;
     });
