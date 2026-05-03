@@ -134,10 +134,16 @@ const getArtistsText = (data: any) => {
   return names.length > 0 ? Array.from(new Set(names)).join(", ") : "Unknown Artist";
 };
 
-const getImageUrl = (img: any) => {
-  if (!img || (Array.isArray(img) && img.length === 0)) return null;
-  if (typeof img === "string" && img.trim() !== "") return img.replace("size_s", "size_l").replace("size_m", "size_l").replace("50x50", "500x500").replace("150x150", "500x500").split('?')[0];
-  if (Array.isArray(img) && img[0]?.url) return (img[img.length - 1]?.url || img[0]?.url).split('?')[0];
+// --- FIXED ROBUST IMAGE EXTRACTOR ---
+const getImageUrl = (item: any) => {
+  if (!item) return null;
+  let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || item;
+  if (typeof img === "string" && img.trim() !== "") {
+     return img.replace(/size_[ms]/gi, "size_l").replace("150x150", "500x500").replace("50x50", "500x500").split('?')[0];
+  }
+  if (Array.isArray(img) && img[0]?.url) {
+     return (img[img.length - 1]?.url || img[0]?.url).split('?')[0];
+  }
   return null;
 };
 
@@ -232,21 +238,6 @@ const performMatching = (apiData: any, targetTrack: string, targetArtist: string
   if (highestScore > 0) return bestMatch;
   if (apiData.tracks && apiData.tracks.length > 0) return apiData.tracks[0].data || apiData.tracks[0];
   return null;
-};
-
-// --- DYNAMIC QUALITY GENERATOR ---
-const generateAllQualities = (baseUrls: any[]) => {
-  if (!baseUrls || baseUrls.length === 0) return[];
-  const sampleUrl = baseUrls[0].url || "";
-  const match = sampleUrl.match(/_(\d+)\.(mp4|m4a|mp3|aac)/i);
-  if (match) {
-    return['16', '64', '128', '320'].map(q => ({
-      quality: `${q}kbps`,
-      url: sampleUrl.replace(match[0], `_${q}.${match[2]}`),
-      label: `${q}kbps`
-    }));
-  }
-  return baseUrls;
 };
 
 // --- NATIVE ID3 TAGGER ---
@@ -412,7 +403,6 @@ export default function MiniPlayer() {
   const videoIframeRef = useRef<HTMLIFrameElement>(null);
 
   const fetchingRecsRef = useRef(false);
-  const[isFetchingRecsUI, setIsFetchingRecsUI] = useState(false);
   const[isSessionRestored, setIsSessionRestored] = useState(false);
   
   const QUALITY_MAP: Record<string, string> = { "16": "Low", "64": "Medium", "128": "High", "320": "HD" };
@@ -549,7 +539,7 @@ export default function MiniPlayer() {
       if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
           audioCtxRef.current.resume();
       }
-  }, [isAudioEnhanced]);
+  },[isAudioEnhanced]);
 
   // Handle setting updates efficiently
   useEffect(() => {
@@ -659,11 +649,11 @@ export default function MiniPlayer() {
 
   const rawTitle = currentSong ? decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown") : "";
   const rawArtists = currentSong ? decodeEntities(getArtistsText(currentSong)) : "";
-  const rawImage = currentSong ? getImageUrl(currentSong) : "";
+  const rawImage = currentSong ? getImageUrl(currentSong) : null;
 
   const displayTitle = songDetails?.track_title ? decodeEntities(songDetails.track_title) : rawTitle;
   const displayArtists = songDetails ? decodeEntities(getArtistsText(songDetails)) : rawArtists;
-  const displayImage = songDetails?.artwork_large ? getImageUrl(songDetails) : rawImage;
+  const displayImage = songDetails ? getImageUrl(songDetails) || rawImage : rawImage;
   
   const updateTop30Cache = useCallback((song: any, maxPercent: number) => {
     if (!song) return;
@@ -841,7 +831,7 @@ export default function MiniPlayer() {
 
     spotifyTimer = setTimeout(() => { fetchGaanaData(); }, 300);
     return () => { isCurrent = false; clearTimeout(spotifyTimer); };
-  }, [currentSong, selectedQuality]);
+  },[currentSong, selectedQuality]);
 
   useEffect(() => {
     if (queue && queue.length > 0) {
@@ -1118,7 +1108,7 @@ export default function MiniPlayer() {
     if ('mediaSession' in navigator) {
        navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
     }
-  }, [isPlaying]);
+  },[isPlaying]);
 
   const handleTimeUpdate = () => {
     if (audioRef.current && !isVideoMode) {
@@ -1505,7 +1495,6 @@ export default function MiniPlayer() {
 
     } catch (e) {
       console.warn("Packer failed, using raw fallback", e);
-      // NOTE: You cannot download .m3u8 directly, fallback to .mp4
       const fallbackUrl = url.replace(".master.m3u8", "");
       const a = document.createElement("a"); a.href = fallbackUrl; a.target = "_blank"; a.download = `${decodeEntities(displayTitle)} - ${decodeEntities(displayArtists)}.mp4`; 
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
@@ -1681,8 +1670,7 @@ export default function MiniPlayer() {
     if (creditsGroups.length === 0) return null;
 
     return (
-       <div className="w-full mt-2 bg-[#1e1e1e] rounded-2xl p-5 shadow-2xl border border-white/10 relative overflow-hidden">
-          <div className="absolute inset-0 z-0 bg-black/10 pointer-events-none" />
+       <div className="w-full bg-[#1e1e1e] rounded-2xl p-5 shadow-2xl border border-white/5 relative overflow-hidden">
           <h3 className="text-white font-bold text-[18px] mb-6 drop-shadow-md relative z-10 no-select-text">Credits</h3>
           
           <div className="relative z-10 flex flex-col gap-6">
@@ -1695,7 +1683,7 @@ export default function MiniPlayer() {
                          const fallbackColor = getArtistColor(artist.name || "Unknown");
                          return (
                             <Link key={artist.artist_id || artist.e_id || i} href={`/artist/${artist.seokey}`} onClick={closePlayerForNavigation} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
-                              <div className="w-[110px] h-[110px] rounded-full overflow-hidden relative flex items-center justify-center shadow-lg border-2 border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: fallbackColor }}>
+                              <div className="w-[110px] h-[110px] rounded-full overflow-hidden relative flex items-center justify-center shadow-lg border-2 border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? 'transparent' : fallbackColor }}>
                                 {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
                               </div>
                               <div className="flex flex-col items-center w-full px-1 mt-2 no-select-text">
@@ -1820,11 +1808,17 @@ export default function MiniPlayer() {
 
       <div className={`player-root fixed inset-0 z-[99999] text-white transition-all duration-[450ms] ease-[cubic-bezier(0.32,0.72,0,1)] ${isExpanded ? "translate-y-0 opacity-100 overflow-hidden" : "translate-y-full opacity-0 pointer-events-none"}`}>
         
-        {/* Full Screen Background Layer */}
+        {/* Full Screen Background Layer (Saavn Beautiful Blur Engine) */}
         {isCanvasLoaded && !isScrolledPastMain && !showQueue && !isVideoMode && !isLyricsFullScreen && isCanvasEnabled && (
           <div className="absolute inset-0 z-10 cursor-pointer" onClick={() => setIsUiHidden(!isUiHidden)} />
         )}
-        <div className="absolute inset-0 z-0 pointer-events-none transition-all duration-700" style={{ backgroundColor: dominantColor, backgroundImage: isLyricsFullScreen ? 'none' : 'linear-gradient(to bottom, rgba(0,0,0,0.1) 0%, rgba(0,0,0,0.7) 100%)' }} />
+        
+        <div className="absolute inset-0 z-0 pointer-events-none transition-all duration-700" style={{ backgroundColor: dominantColor }}>
+          {displayImage && !isLyricsFullScreen && (
+             <div className="absolute inset-0 bg-cover bg-center opacity-60 blur-[80px] scale-[1.5] transition-all duration-700" style={{ backgroundImage: `url(${displayImage})` }} />
+          )}
+          <div className="absolute inset-0 bg-gradient-to-b from-black/20 via-black/50 to-[#121212] opacity-95" />
+        </div>
         
         {/* Full Screen Canvas Video */}
         {canvasData?.canvasUrl && !isVideoMode && isCanvasEnabled && (
@@ -1907,10 +1901,10 @@ export default function MiniPlayer() {
                 <div className={`flex items-center justify-between w-full px-1 drop-shadow-md no-select-text ${isLyricsFullScreen ? 'mb-0' : 'mb-5'}`}>
                   <button onClick={() => { setIsShuffle(!isShuffle); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 pointer-events-auto ${isShuffle ? 'text-[#1db954]' : 'text-white'}`}><Shuffle size={24} /></button>
                   <button onClick={playPrev} className="text-white active:opacity-50 pointer-events-auto"><SkipBack size={36} fill="white" stroke="white" /></button>
-                  <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className="w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg pointer-events-auto">
+                  <button onClick={handlePlayPauseToggle} className="w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg pointer-events-auto">
                      {(loading || isVideoLoading) ? <Loader2 size={26} className="animate-spin text-black" /> : (isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />)}
                   </button>
-                  <button id="next-song-btn" onClick={playNext} className="text-white active:opacity-50 pointer-events-auto"><SkipForward size={36} fill="white" stroke="white" /></button>
+                  <button ref={nextBtnRef} id="next-song-btn" onClick={playNext} className="text-white active:opacity-50 pointer-events-auto"><SkipForward size={36} fill="white" stroke="white" /></button>
                   <button onClick={() => { setRepeatMode((prev) => (prev + 1) % 3); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 relative pointer-events-auto ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}><Repeat size={24} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</button>
                 </div>
                 {!isLyricsFullScreen && (
@@ -1926,6 +1920,8 @@ export default function MiniPlayer() {
 
           {/* SCROLLABLE BOTTOM CONTENT CARDS */}
           <div className={`w-full px-5 pb-24 flex flex-col gap-6 pointer-events-auto transition-opacity duration-500 ${isUiHidden && !isVideoMode ? 'opacity-0 pointer-events-none' : 'opacity-100'} ${isLyricsFullScreen ? 'hidden' : 'block'}`}>
+            
+            {/* LYRICS CARD */}
             {isLyricsEnabled && lyrics.length > 0 && !isLyricsFullScreen && (
               <div className="rounded-2xl p-6 w-full mx-auto shadow-2xl relative overflow-hidden transition-colors duration-500 border border-white/10" style={{ backgroundColor: dominantColor }}>
                 <div className="absolute inset-0 bg-black/5 z-0 pointer-events-none" />
@@ -1940,20 +1936,17 @@ export default function MiniPlayer() {
               </div>
             )}
 
-            {/* UNIFIED CREDITS CARDS INSTEAD OF BASIC ARTIST ROW */}
-            {RenderedCredits}
-
+            {/* ALBUM CARD */}
             {songDetails?.album_title && (
               <Link href={albumRoute} onClick={closePlayerForNavigation} className="w-full bg-[#1e1e1e]/60 backdrop-blur-md rounded-2xl p-4 flex items-center gap-4 hover:bg-[#2a2a2a]/80 transition-colors border border-white/10 shadow-xl relative overflow-hidden group no-select-text pointer-events-auto">
-                <div className="absolute inset-0 z-0 pointer-events-none opacity-30" style={{ backgroundColor: dominantColor }} />
                 {displayImage && <img draggable={false} src={displayImage} className="w-[64px] h-[64px] rounded-md object-cover relative z-10 shadow-md border border-white/5 group-hover:scale-105 transition-transform no-select pointer-events-none" alt="Album Cover" />}
                 <div className="flex flex-col relative z-10 flex-1 pr-2"><span className="text-white/60 text-[11px] uppercase tracking-widest font-bold mb-1 drop-shadow-sm">Album</span><span className="text-white font-bold text-[16px] line-clamp-1 drop-shadow-md">{decodeEntities(songDetails.album_title)}</span></div><div className="relative z-10 text-white/50 group-hover:text-white transition-colors pl-2"><ChevronDown size={20} className="-rotate-90" /></div>
               </Link>
             )}
 
+            {/* ABOUT SONG CARD (Grey Color - Clean) */}
             {songDetails && (
-              <div className="w-full rounded-2xl p-5 flex flex-col gap-4 border border-white/10 shadow-2xl relative overflow-hidden no-select-text">
-                {displayImage && <div className="absolute inset-0 z-0 bg-cover bg-center opacity-30 blur-lg scale-110" style={{ backgroundImage: `url(${displayImage})` }} />}<div className="absolute inset-0 z-0 bg-gradient-to-t from-black/90 via-black/60 to-black/30 pointer-events-none" />
+              <div className="w-full bg-[#1e1e1e] rounded-2xl p-5 flex flex-col gap-4 border border-white/5 shadow-2xl relative overflow-hidden no-select-text">
                 <h3 className="text-white font-bold text-[18px] drop-shadow-md relative z-10 mb-2">About Song</h3>
                 <div className="relative z-10 grid grid-cols-2 gap-y-5 gap-x-4">
                   {songDetails.popularity && (<div className="flex flex-col gap-1"><div className="flex items-center gap-1.5 text-white/50"><Hash size={12} /><span className="font-semibold text-[10px] uppercase tracking-wider">Play Count</span></div><span className="text-white font-bold text-[15px]">{Number(songDetails.popularity).toLocaleString('en-US')}</span></div>)}
@@ -1964,6 +1957,10 @@ export default function MiniPlayer() {
                 </div>
               </div>
             )}
+
+            {/* CREDITS CARD (Moved after About Song, Grey Color) */}
+            {RenderedCredits}
+
           </div>
         </div>
 
