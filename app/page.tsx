@@ -88,8 +88,8 @@ export default function Home() {
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
 
-  const[viewAll, setViewAll] = useState<any | null>(null);
-  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const [viewAll, setViewAll] = useState<any | null>(null);
+  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
@@ -101,9 +101,9 @@ export default function Home() {
     isLoadingRef.current = true;
     
     try {
-      const newSections: any[] =[];
-      const promises = [];
-      const configs =[];
+      const newSections: any[] = [];
+      const promises: Promise<any>[] =[];
+      const configs: any[] =[];
 
       for (let i = 0; i < chunkSize; i++) {
         const idx = nextIndexRef.current + i;
@@ -127,7 +127,7 @@ export default function Home() {
       });
 
       setSections(prev => {
-          const updated = [...prev, ...newSections];
+          const updated =[...prev, ...newSections];
           if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
           return updated;
       });
@@ -192,7 +192,7 @@ export default function Home() {
       }
     }, 4000);
     return () => clearInterval(interval);
-  }, [sections, viewAll]);
+  },[sections, viewAll]);
 
   // Lazy Load Remaining Sections on Scroll
   useEffect(() => {
@@ -205,7 +205,7 @@ export default function Home() {
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  }, [sections, viewAll, isInitializing, language]);
+  },[sections, viewAll, isInitializing, language]);
 
   // Infinite Scroll for "View All" (Stops fetching if blank data triggers end)
   useEffect(() => {
@@ -219,7 +219,7 @@ export default function Home() {
            
            if (newItems.length > 0) {
              setViewAll((prev: any) => {
-                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
+                const updated = { ...prev, data: [...prev.data, ...newItems], offset: prev.offset + 40 };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
              });
@@ -286,7 +286,7 @@ export default function Home() {
         sessionStorage.removeItem('homeState_viewAll');
         sessionStorage.removeItem('viewAllScrollY');
     }
-    // Per request: "in home page also if opened view all and closed it reload at top"
+    // Reloads back at the top of the home page per request
     window.scrollTo(0, 0);
   };
 
@@ -353,13 +353,13 @@ export default function Home() {
          </button>
       </div>
 
-      {/* Showcase / Top Picks (Uncropped native ratio without Text) */}
+      {/* Showcase / Top Picks (Uncropped native ratio prioritizing artwork_alt) */}
       {sections.length > 0 && sections[0].key === "showcase" && (
         <div className="mb-10">
           <h2 className="text-[22px] font-black mb-4 px-4 text-white tracking-tight">Top Picks</h2>
           <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1 items-center">
             {sections[0].data.map((item: any, i: number) => {
-               // Prioritizing Gaana's uncropped wide banner formats
+               // Safely extract the original showcase wide image
                let imgUrl = item.artwork_alt || item.atw_alt || item.artwork_web || item.artwork_large || item.artwork || item.atw;
                if (imgUrl) imgUrl = imgUrl.replace('size_m', 'size_l').replace('150x150', '500x500');
 
