@@ -1,10 +1,13 @@
+/* eslint-disable @next/next/no-img-element */
+/* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
+
 import React, { useEffect, useState, useRef } from "react";
 import { useAppContext } from "../context/AppContext";
 import { Search as SearchIcon, Mic, ChevronLeft, Loader2 } from "lucide-react";
 import { useRouter } from "next/navigation";
 
-// --- API CONSTANTS ---
 const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
 
 const SECTION_CONFIGS =[
@@ -33,7 +36,7 @@ const getImageUrl = (item: any) => {
 const decodeEntities = (text: string) => text ? text.replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">") : "";
 
 const getSubtitle = (item: any) => {
-  let names =[];
+  let names: string[] =[];
   if (Array.isArray(item.artist)) names = item.artist.map((a: any) => a.name);
   else if (Array.isArray(item.singers)) names = item.singers.map((a: any) => a.name);
   else if (Array.isArray(item.artists)) names = item.artists.map((a: any) => a.name);
@@ -46,16 +49,17 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
   const isLongTitle = title.length > 13;
 
   return (
-    <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[38vw] sm:w-[180px] md:w-[210px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
-      <div className="relative overflow-hidden bg-[#131D30] border border-[#1e293b] rounded-2xl aspect-[1/1] mb-2 transition-transform duration-200 active:scale-95 shadow-md">
+    // w-[28vw] forces exactly 3 cards plus gaps on mobile screens. 1.5x the original size.
+    <div onClick={() => onClick(item)} className={`${fullWidth ? 'w-full' : 'w-[28vw] sm:w-[150px] md:w-[210px]'} flex-shrink-0 snap-start cursor-pointer group pb-1`}>
+      <div className="relative overflow-hidden bg-[#131D30] border border-[#1e293b] rounded-xl aspect-[1/1] mb-2 transition-transform duration-200 active:scale-95 shadow-md">
         <img src={getImageUrl(item)} alt={title} loading="lazy" decoding="async" className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500 ease-out" />
       </div>
       <div className="w-full overflow-hidden whitespace-nowrap text-center px-1">
-        <span className={`inline-block text-[14px] md:text-[16px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
+        <span className={`inline-block text-[13px] md:text-[15px] font-extrabold text-white tracking-wide ${isLongTitle ? "animate-ping-pong" : ""}`} style={isLongTitle ? { animationDuration: `${Math.max(4, title.length * 0.15)}s` } : {}}>{title}</span>
       </div>
       {showSubtitle && subtitle && (
         <div className="w-full overflow-hidden whitespace-nowrap text-center mt-0.5 px-1">
-          <span className="inline-block text-[12px] md:text-[14px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
+          <span className="inline-block text-[11px] md:text-[13px] font-medium text-blue-200/60 truncate w-full">{subtitle}</span>
         </div>
       )}
     </div>
@@ -67,13 +71,13 @@ export default function Home() {
   const router = useRouter();
   
   const [sections, setSections] = useState<any[]>([]);
-  const [nextIndex, setNextIndex] = useState(0);
-  const[loadingMore, setLoadingMore] = useState(false);
+  const nextIndexRef = useRef(0);
+  const isLoadingRef = useRef(false);
 
-  const [viewAll, setViewAll] = useState<any | null>(null);
-  const [viewAllData, setViewAllData] = useState<any[]>([]);
+  const[viewAll, setViewAll] = useState<any | null>(null);
+  const[viewAllData, setViewAllData] = useState<any[]>([]);
   const [viewAllOffset, setViewAllOffset] = useState(0);
-  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
@@ -90,54 +94,55 @@ export default function Home() {
       }
     }, 4000);
     return () => clearInterval(interval);
-  }, [sections, viewAll]);
+  },[sections, viewAll]);
 
-  // Progressive Lazy Loader Engine (Fixes blank buffering)
-  useEffect(() => {
-    if (nextIndex >= SECTION_CONFIGS.length || loadingMore || viewAll) return;
+  // Progressive Safe Fetcher Engine
+  const fetchNextSection = async () => {
+    if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
+    isLoadingRef.current = true;
+    
+    try {
+      const conf = SECTION_CONFIGS[nextIndexRef.current];
+      let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
+      if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-    const loadData = async () => {
-      setLoadingMore(true);
-      try {
-        // Fetch 2 sections initially for fast paint, then 1 by 1 on scroll
-        const countToFetch = nextIndex === 0 ? 2 : 1;
-        const newSections =[];
-
-        for (let i = 0; i < countToFetch; i++) {
-          const idx = nextIndex + i;
-          if (idx >= SECTION_CONFIGS.length) break;
-          
-          const conf = SECTION_CONFIGS[idx];
-          let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
-          if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
-
-          const res = await fetch(url);
-          const json = await res.json();
-          const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
-          
-          if (data.length > 0) newSections.push({ ...conf, data });
-        }
-
-        setSections(prev => [...prev, ...newSections]);
-        setNextIndex(prev => prev + countToFetch);
-      } catch (e) {
-        console.error("Failed fetching section:", e);
-      } finally {
-        setLoadingMore(false);
+      const res = await fetch(url);
+      const json = await res.json();
+      const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
+      
+      if (data.length > 0) {
+        setSections(prev =>[...prev, { ...conf, data }]);
       }
+    } catch (e) { console.error("Error fetching section", e); }
+    
+    nextIndexRef.current += 1;
+    isLoadingRef.current = false;
+  };
+
+  // Pre-load first 2 sections on mount instantly
+  useEffect(() => {
+    setSections([]);
+    nextIndexRef.current = 0;
+    
+    const initialLoad = async () => {
+       await fetchNextSection(); // Showcase
+       await fetchNextSection(); // Trending
     };
+    initialLoad();
+  }, [language]);
 
-    if (nextIndex === 0) {
-      loadData(); // Load first paint instantly
-    } else {
-      const observer = new IntersectionObserver((entries) => {
-        if (entries[0].isIntersecting) loadData();
-      }, { rootMargin: "600px" }); // Pre-fetch before user hits the bottom
+  // Lazy Load Remaining Sections on Scroll
+  useEffect(() => {
+    if (viewAll) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) {
+         fetchNextSection();
+      }
+    }, { rootMargin: "600px" }); // Aggressive prefetch margin
 
-      if (observerRef.current) observer.observe(observerRef.current);
-      return () => observer.disconnect();
-    }
-  },[nextIndex, loadingMore, language, viewAll]);
+    if (observerRef.current) observer.observe(observerRef.current);
+    return () => observer.disconnect();
+  },[sections, viewAll, language]);
 
   // Infinite Scroll for "View All"
   useEffect(() => {
@@ -147,9 +152,9 @@ export default function Home() {
         setIsFetchingViewAll(true);
         const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAllOffset},40`;
         fetch(url).then(res => res.json()).then(json => {
-           const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
+           const newItems = json?.data?.entities || json?.data?.tracks || json?.data || [];
            if (newItems.length > 0) {
-             setViewAllData(prev => [...prev, ...newItems]);
+             setViewAllData(prev =>[...prev, ...newItems]);
              setViewAllOffset(prev => prev + 40);
            }
            setIsFetchingViewAll(false);
@@ -160,13 +165,6 @@ export default function Home() {
     if (viewAllObserverRef.current) observer.observe(viewAllObserverRef.current);
     return () => observer.disconnect();
   },[viewAll, viewAllOffset, isFetchingViewAll, language]);
-
-  // Reset state heavily if language changes
-  useEffect(() => {
-    setSections([]);
-    setNextIndex(0);
-    setViewAll(null);
-  }, [language]);
 
   const handleItemClick = (item: any) => {
     const type = item.entity_type || item.type;
@@ -196,7 +194,7 @@ export default function Home() {
   };
 
   // Immediate Initial Loader
-  if (sections.length === 0 && nextIndex === 0) {
+  if (sections.length === 0) {
     return (
       <div className="flex h-screen flex-col items-center justify-center bg-[#0B1320] text-white">
         <Loader2 size={40} className="animate-spin text-[#1db954]" />
@@ -213,8 +211,8 @@ export default function Home() {
            <h1 className="text-2xl font-extrabold ml-4 tracking-tight">{viewAll.title}</h1>
         </div>
         
-        {/* Dynamic perfect grid filling area evenly */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-y-8 gap-x-4 px-4 w-full">
+        {/* Dynamic perfect grid filling area evenly - strictly 3 columns on mobile */}
+        <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-y-8 gap-x-3 px-4 w-full">
            {viewAllData.map((item, i) => (
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
            ))}
@@ -255,18 +253,19 @@ export default function Home() {
          </button>
       </div>
 
-      {/* Showcase / Top Picks (Uncropped native ratio) */}
-      {sections[0] && sections[0].key === "showcase" && sections[0].data.length > 0 && (
+      {/* Showcase / Top Picks (Uncropped native ratio without Text) */}
+      {sections.length > 0 && sections[0].key === "showcase" && (
         <div className="mb-10">
           <h2 className="text-[22px] font-black mb-4 px-4 text-white tracking-tight">Top Picks</h2>
-          <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
+          <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1 items-center">
             {sections[0].data.map((item: any, i: number) => {
+               // Prioritizing Gaana's uncropped wide banner formats
                let imgUrl = item.atw_alt || item.artwork_alt || item.atw || item.artwork_web || item.artwork_large || item.artwork;
-               imgUrl = imgUrl.replace('size_m', 'size_l').replace('150x150', '500x500');
+               imgUrl = imgUrl.replace('size_m', 'size_l');
 
                return (
-                  <div key={i} onClick={() => handleItemClick(item)} className="w-[85vw] md:w-[500px] lg:w-[600px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] border border-[#1e293b] active:scale-95 transition-transform duration-300">
-                    <img src={imgUrl} alt="Showcase" className="w-full h-auto block object-contain sm:object-cover" />
+                  <div key={i} onClick={() => handleItemClick(item)} className="w-[85vw] md:w-[500px] flex-shrink-0 snap-center cursor-pointer rounded-2xl overflow-hidden shadow-[0_10px_30px_rgba(0,0,0,0.4)] border border-[#1e293b] active:scale-95 transition-transform duration-300">
+                    <img src={imgUrl} alt="Showcase" className="w-full h-auto block object-contain" />
                   </div>
                );
             })}
@@ -284,8 +283,8 @@ export default function Home() {
                <h2 className="text-[22px] font-black tracking-tight text-white">{section.title}</h2>
                <button onClick={() => openViewAll(section)} className="text-[12px] font-bold text-blue-400 bg-blue-400/10 px-3 py-1.5 rounded-full hover:bg-blue-400/20 active:scale-95 transition-all">View All</button>
             </div>
-            {/* 1.5x Increased Card horizontal scroll */}
-            <div className="flex gap-4 md:gap-5 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
+            {/* 1.5x Increased Card horizontal scroll (Fits 3 per mobile screen gap-adjusted) */}
+            <div className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
               {section.data.map((item: any, i: number) => (
                   <PremiumCard key={i} item={item} showSubtitle={section.showSubtitle} onClick={handleItemClick} />
               ))}
@@ -295,7 +294,7 @@ export default function Home() {
       })}
 
       {/* Bottom Loader Anchor for Infinite Section Scroll */}
-      {nextIndex < SECTION_CONFIGS.length && (
+      {nextIndexRef.current < SECTION_CONFIGS.length && (
          <div ref={observerRef} className="w-full flex justify-center py-6 mt-4">
             <Loader2 className="animate-spin text-[#1db954]" size={30} />
          </div>
