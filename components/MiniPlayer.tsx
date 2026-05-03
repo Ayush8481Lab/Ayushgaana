@@ -1,8 +1,3 @@
-
-
-/* eslint-disable @next/next/no-img-element */
-/* eslint-disable @typescript-eslint/no-explicit-any */
-/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 import React, { useEffect, useState, useRef, useCallback, useMemo } from "react";
@@ -126,13 +121,16 @@ const getArtistsText = (data: any) => {
   return names.length > 0 ? Array.from(new Set(names)).join(", ") : "Unknown Artist";
 };
 
+// --- FIXED ROBUST IMAGE EXTRACTOR ---
 const getImageUrl = (item: any) => {
   if (!item) return null;
   let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || item;
   if (typeof img === "string" && img.trim() !== "") {
      return img.replace(/size_[ms]/gi, "size_l").replace("150x150", "500x500").replace("50x50", "500x500").split('?')[0];
   }
-  if (Array.isArray(img) && img[0]?.url) return (img[img.length - 1]?.url || img[0]?.url).split('?')[0];
+  if (Array.isArray(img) && img[0]?.url) {
+     return (img[img.length - 1]?.url || img[0]?.url).split('?')[0];
+  }
   return null;
 };
 
@@ -159,6 +157,12 @@ const parseTimeTag = (tag: string) => {
 const RAPID_KEYS =["d1edce158amshec139440d20658ap1f2545jsnbb7da9add82f", "6cf7f03014msh787c51a713c0264p15c20djsna1f9a9f6a378", "13d48f6bb8msh459c11b91bdcc44p110f4ejsn099443894115", "03fc23317fmsh0535ef9ec8c6f5bp1db59bjsn545991df9343", "e54e3fbc4dmshfc16d4417b618fdp1a2fafjsn30c72d8cf3ab"];
 const RAPID_API_HOST = "spotify81.p.rapidapi.com";
 
+// --- AUDIO EQ PRESETS (BACKGROUND ENGINE) ---
+const EQ_FREQUENCIES =[32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
+const ENHANCED_EQ =[-2, 2, -1, -5, -7, -3, 0, 0, -4, -1];
+const ORIGINAL_EQ =[0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+// --- AK47 SPECIFIC MATCHER ---
 const performAK47Matching = (results: any[], targetTrack: string, targetArtist: string): any => {
     if (!results || results.length === 0) return null;
     const clean = (s: string) => decodeEntities(s || "").toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ").trim();
@@ -193,6 +197,7 @@ const performAK47Matching = (results: any[], targetTrack: string, targetArtist: 
     return results[0];
 };
 
+// --- RAPIDAPI FALLBACK MATCHER ---
 const performMatching = (apiData: any, targetTrack: string, targetArtist: string): any => {
   if (!apiData.tracks || apiData.tracks.length === 0) return null;
   const clean = (s: string) => decodeEntities(s || "").toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ").trim();
@@ -310,6 +315,7 @@ export default function MiniPlayer() {
   } = useAppContext();
   
   const[audioUrl, setAudioUrl] = useState("");
+  const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
   const[loading, setLoading] = useState(false);
   const[progress, setProgress] = useState(0);
   const[bufferedProgress, setBufferedProgress] = useState(0);
@@ -317,6 +323,7 @@ export default function MiniPlayer() {
   const[duration, setDuration] = useState(0);
   const[volume, setVolume] = useState(100);
   
+  // MODAL/UI STATES
   const[isExpanded, setIsExpanded] = useState(false);
   const[showQueue, setShowQueue] = useState(false);
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
@@ -342,6 +349,7 @@ export default function MiniPlayer() {
   const maxListenRef = useRef<number>(0);
   const lastTimeUpdateRef = useRef<number>(0); 
   const isNavigatingBackRef = useRef(false);
+  const mediaMetadataSetRef = useRef(false);
   const hasCachedCurrentSongRef = useRef(false);
   
   const rapidKeyIdxRef = useRef(0);
@@ -397,6 +405,12 @@ export default function MiniPlayer() {
 
   const isCanvasEnabledRef = useRef(true);
   const isLyricsEnabledRef = useRef(true);
+
+  // BACKGROUND AUDIO EQ STATE
+  const[isAudioEnhanced, setIsAudioEnhanced] = useState(true);
+  const audioCtxRef = useRef<any>(null);
+  const isAudioPremiumSetupRef = useRef(false);
+  const eqBandsRef = useRef<any[]>([]);
 
   const[dlState, setDlState] = useState<{type: "music" | "video" | null, status: string, options?: any[], progress?: number, packStep?: string, server?: number}>({type: null, status: "idle", progress: 0, server: 1});
 
@@ -635,6 +649,7 @@ export default function MiniPlayer() {
     setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
     setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
     iframeInitialTimeRef.current = 0;
+    setStreamBaseUrl(null);
 
     const instantTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
     const instantArtists = decodeEntities(getArtistsText(currentSong));
@@ -1588,7 +1603,7 @@ export default function MiniPlayer() {
     });
   },[lyrics, activeLyricIndex, isLyricsFullScreen, isLyricsEnabled, cardFontSize, isWordSyncEnabled, syncType, isVideoMode]);
 
-  // UNIFIED & STRUCTURED CREDITS CARD (Singers, Composers, Lyricists, Cast)
+  // UNIFIED & STRUCTURED CREDITS CARD
   const RenderedCredits = useMemo(() => {
     if (!songDetails) return null;
     
@@ -1630,7 +1645,7 @@ export default function MiniPlayer() {
           </div>
        </div>
     );
-  }, [songDetails]);
+  },[songDetails]);
 
   const RenderedQueue = useMemo(() => {
     return upcomingQueue.map((track: any, index: number) => {
