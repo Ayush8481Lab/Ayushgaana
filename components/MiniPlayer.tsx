@@ -69,7 +69,7 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
   } catch(e) {}
 };
 
-// --- PRO AUTH ENGINE (Stores Token & Client locally till expiry) ---
+// --- PRO AUTH ENGINE ---
 const AUTH_STORAGE_KEY = 'spotify_app_auth';
 let ongoingAuthPromise: Promise<any> | null = null;
 
@@ -372,7 +372,8 @@ export default function MiniPlayer() {
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
   
-  const activeOverlayRef = useRef<'player' | 'settings' | 'queue' | 'timer' | 'none'>('none');
+  // Ref strictly to prevent API duplicate calls on re-renders
+  const lastFetchedTrackIdRef = useRef<string | null>(null);
 
   const[dominantColor, setDominantColor] = useState("rgb(83, 83, 83)");
   const[isScrolledPastMain, setIsScrolledPastMain] = useState(false);
@@ -475,25 +476,23 @@ export default function MiniPlayer() {
       (container as any)._scrollRaf = requestAnimationFrame(animation);
   },[]);
 
-  // --- FAST STATE-BASED ROUTING FOR MODALS (FIXED NEXT.JS RSC LOGS) ---
+  // --- PURE STATE-BASED ROUTING FOR MODALS (NO NEXT.JS ROUTER LAG/LOGS) ---
   const closeMainPlayer = useCallback(() => {
     setIsExpanded(false);
     setShowQueue(false);
     setShowSettingsMenu(false);
     setShowTimerMenu(false);
-    activeOverlayRef.current = 'none';
   },[]);
 
   const openMainPlayer = () => {
       if (!isExpanded) { 
           setIsExpanded(true); setShowQueue(false); setShowSettingsMenu(false); setShowTimerMenu(false);
-          activeOverlayRef.current = 'player'; 
       }
   };
   
-  const openSettings = (e: React.MouseEvent) => { e.stopPropagation(); setShowSettingsMenu(true); activeOverlayRef.current = 'settings'; };
-  const openQueue = () => { setShowQueue(true); activeOverlayRef.current = 'queue'; };
-  const openTimer = () => { setShowTimerMenu(true); activeOverlayRef.current = 'timer'; };
+  const openSettings = (e: React.MouseEvent) => { e.stopPropagation(); setShowSettingsMenu(true); };
+  const openQueue = () => { setShowQueue(true); };
+  const openTimer = () => { setShowTimerMenu(true); };
   const closePlayerForNavigation = () => { closeMainPlayer(); };
 
   // --- NATIVE M3U8 SUPPORT VIA HLS.JS ---
@@ -536,7 +535,7 @@ export default function MiniPlayer() {
 
   // --- CLEAN RAW LINK SHARE ---
   const handleShareSong = async () => {
-    setShowSettingsMenu(false); // Close modal instantly without history.back()
+    setShowSettingsMenu(false); 
     try {
       let path = currentSong.perma_url || currentSong.url || "";
       if (path && path.includes('jiosaavn.com')) path = new URL(path).pathname;
@@ -635,23 +634,21 @@ export default function MiniPlayer() {
     } catch (e) {}
   },[]);
 
-  // VIDEO PREFETCH LOGIC (NOW ONLY FIRES WHEN TV IS CLICKED)
-  const prefetchVideoId = async (songTitle: string, songArtists: string, abortSignal?: AbortSignal) => {
+  // VIDEO PREFETCH LOGIC (MANUAL ONLY)
+  const prefetchVideoId = async (songTitle: string, songArtists: string) => {
     try {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer", signal: abortSignal });
+      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       const data = await fallbackRes.json();
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
         await setCache(`vid_id_${query}`, data.top_result.videoId);
         return data.top_result.videoId; 
       }
-    } catch (err: any) {
-        if (err.name === 'AbortError') throw err; 
-    }
+    } catch (err: any) {}
     return null;
   };
 
@@ -668,21 +665,27 @@ export default function MiniPlayer() {
 
 
   // ----------------------------------------------------------------------
-  // --- STRICT ORDER API WORKFLOW (400ms DEBOUNCE TO PREVENT DDOS)
+  // --- STRICT ORDER API WORKFLOW (ABORTABLE & DDOS SAFE)
   // ----------------------------------------------------------------------
   useEffect(() => {
     if (!currentSong) return;
     let isCurrent = true;
     
-    // ABORT CONTROLLER TO PREVENT OVERLAPPING REQUESTS
+    const trackId = currentSong.track_id || currentSong.id || currentSong.entity_id;
+    
+    // GUARD: Prevent exact same song from triggering full API cycle on rapid re-renders
+    if (lastFetchedTrackIdRef.current === trackId) {
+        currentTrackRef.current = currentSong;
+        return;
+    }
+    lastFetchedTrackIdRef.current = trackId;
+
     const abortController = new AbortController();
     const signal = abortController.signal;
 
     fetchingRecsRef.current = false;
     mediaMetadataSetRef.current = false;
     hasCachedCurrentSongRef.current = false;
-    
-    const trackId = currentSong.track_id || currentSong.id || currentSong.entity_id;
 
     if (currentTrackRef.current && (currentTrackRef.current.id || currentTrackRef.current.track_id) !== trackId) {
       updateTop30Cache(currentTrackRef.current, maxListenRef.current);
@@ -706,50 +709,68 @@ export default function MiniPlayer() {
     setStreamBaseUrl(null);
     setBuffered(0);
 
-    const executeNetworkFetches = async () => {
-        if (!isCurrent) return;
-        setLoading(true);
-
-        // PRIORITY 1: START STREAM IMMEDIATELY (Async non-blocking)
-        (async () => {
-            try {
-                let streamJson = await getCache(`gaana_stream_${trackId}`);
-                if (!streamJson) {
-                    const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
+    // ==========================================
+    // PRIORITY 1: INSTANT STREAM (No Debounce)
+    // ==========================================
+    const fetchStream = async () => {
+        try {
+            let streamJson = await getCache(`gaana_stream_${trackId}`);
+            if (!streamJson) {
+                const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
+                if (streamRes.ok) {
                     streamJson = await streamRes.json();
                     if (streamJson?.data) await setCache(`gaana_stream_${trackId}`, streamJson);
+                    else await setCache(`gaana_stream_${trackId}`, { notFound: true });
                 }
-                if (streamJson?.data?.hlsUrl && isCurrent) setStreamBaseUrl(streamJson.data.hlsUrl);
-                else if (streamJson?.data?.url && isCurrent) setAudioUrl(streamJson.data.url);
-            } catch (e: any) { if (e.name !== 'AbortError') console.error(e); }
-        })();
+            }
+            if (!isCurrent || signal.aborted || streamJson?.notFound) return;
+            if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
+            else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
+        } catch (e: any) { /* Aborted */ }
+    };
+    fetchStream();
 
-        // PRIORITY 2: FETCH SONG INFO
+    // ==========================================
+    // PRIORITY 2: HEAVY DATA (Debounced 500ms)
+    // ==========================================
+    const executeHeavyFetches = async () => {
+        if (!isCurrent || signal.aborted) return;
+        setLoading(true);
+
         let sDetails = null;
         try {
             let infoJson = await getCache(`gaana_info_${trackId}`);
             if (!infoJson) {
                 const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
-                infoJson = await infoRes.json();
-                if (infoJson?.data) await setCache(`gaana_info_${trackId}`, infoJson);
+                if (infoRes.ok) {
+                    infoJson = await infoRes.json();
+                    if (infoJson?.data) await setCache(`gaana_info_${trackId}`, infoJson);
+                    else await setCache(`gaana_info_${trackId}`, { notFound: true });
+                }
             }
-            if (infoJson?.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
-        } catch (e: any) { if (e.name === 'AbortError') return; }
+            if (infoJson?.data && isCurrent && !signal.aborted) { 
+                sDetails = infoJson.data; 
+                setSongDetails(infoJson.data); 
+            }
+        } catch (e: any) { }
 
-        if (isCurrent) setLoading(false);
+        if (isCurrent && !signal.aborted) setLoading(false);
 
         // PRIORITY 3: LYRICS
         let skipSpotifyLyrics = false;
         const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
-        if (currentLyricsServer === "Gaana") {
+        if (currentLyricsServer === "Gaana" && !signal.aborted) {
             try {
                 let lrcJson = await getCache(`gaana_lrc_${trackId}`);
                 if (!lrcJson) {
                     const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
-                    lrcJson = await lrcRes.json();
-                    if (lrcJson?.data) await setCache(`gaana_lrc_${trackId}`, lrcJson);
+                    if (lrcRes.ok) {
+                        lrcJson = await lrcRes.json();
+                        if (lrcJson?.data) await setCache(`gaana_lrc_${trackId}`, lrcJson);
+                        else await setCache(`gaana_lrc_${trackId}`, { notFound: true });
+                    }
                 }
-                if (lrcJson?.data?.lyrics && isCurrent) {
+                if (lrcJson?.data?.lyrics && isCurrent && !signal.aborted) {
                     const parsed: any[] =[];
                     lrcJson.data.lyrics.split('\n').forEach((line: string) => {
                         const match = line.match(/\[(\d+):(\d+\.\d+)\](.*)/);
@@ -761,11 +782,13 @@ export default function MiniPlayer() {
                         skipSpotifyLyrics = true;
                     }
                 }
-            } catch(e: any) { if (e.name === 'AbortError') return; }
+            } catch(e: any) { }
         }
 
-        // Trigger Spotify Fallback (This will handle Lyrics fallback and Canvas internally)
-        triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
+        // TRIGGER SPOTIFY FALLBACK (Handles Match, Lyrics, Canvas)
+        if (!signal.aborted) {
+            triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
+        }
     };
 
     const triggerSpotifyFallback = async (songData: any, skipLyrics: boolean = false) => {
@@ -773,19 +796,24 @@ export default function MiniPlayer() {
        let cachedMatch = await getCache(cacheKey);
 
        const execExtras = async (sId: string, sUrl: string) => {
-           if (!isCurrent) return;
+           if (!isCurrent || signal.aborted) return;
            setSpotifyId(sId); setSpotifyUrl(sUrl);
            
            // FETCH LYRICS
-           if (isLyricsEnabledRef.current && !skipLyrics) {
+           if (isLyricsEnabledRef.current && !skipLyrics && !signal.aborted) {
               let lyricsJson = await getCache(`lyrics_${sId}`);
               if (!lyricsJson) {
                   try {
                       const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { referrerPolicy: "no-referrer", signal });
-                      if (lyricsRes.ok) { lyricsJson = await lyricsRes.json(); await setCache(`lyrics_${sId}`, lyricsJson); }
-                  } catch (e: any) { if (e.name === 'AbortError') return; }
+                      if (lyricsRes.ok) { 
+                          lyricsJson = await lyricsRes.json(); 
+                          await setCache(`lyrics_${sId}`, lyricsJson); 
+                      } else {
+                          await setCache(`lyrics_${sId}`, { notFound: true });
+                      }
+                  } catch (e: any) { }
               }
-              if (isCurrent && lyricsJson && lyricsJson.lines) { 
+              if (isCurrent && lyricsJson && !lyricsJson.notFound && lyricsJson.lines && !signal.aborted) { 
                   setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
                   setSyncType(lyricsJson.syncType);
               }
@@ -793,31 +821,43 @@ export default function MiniPlayer() {
 
            // PRIORITY 4: EXPLICIT 0.8 SECOND DELAY BEFORE CANVAS
            await new Promise(resolve => setTimeout(resolve, 800));
-           if (!isCurrent) return;
+           if (!isCurrent || signal.aborted) return;
 
            // FETCH CANVAS
-           if (isCanvasEnabledRef.current) {
+           if (isCanvasEnabledRef.current && !signal.aborted) {
               let canvasJson = await getCache(`canvas_${sId}`);
               if (!canvasJson) {
                  try {
                      const res = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
-                     if (res.ok) { canvasJson = await res.json(); await setCache(`canvas_${sId}`, canvasJson); }
-                 } catch (e: any) { if (e.name === 'AbortError') return; }
+                     if (res.ok) { 
+                         canvasJson = await res.json(); 
+                         await setCache(`canvas_${sId}`, canvasJson); 
+                     } else {
+                         await setCache(`canvas_${sId}`, { notFound: true });
+                     }
+                 } catch (e: any) { }
               }
-              if (isCurrent && canvasJson?.canvasesList?.length > 0) setCanvasData(canvasJson.canvasesList[0]);
+              if (isCurrent && canvasJson && !canvasJson.notFound && canvasJson.canvasesList?.length > 0 && !signal.aborted) {
+                  setCanvasData(canvasJson.canvasesList[0]);
+              }
            }
        };
 
-       if (cachedMatch) { await execExtras(cachedMatch.id, cachedMatch.url); return; }
+       if (cachedMatch) { 
+           if (!cachedMatch.notFound) await execExtras(cachedMatch.id, cachedMatch.url); 
+           return; 
+       }
 
        const searchTitle = decodeEntities(songData.track_title || songData.title || songData.name || "Unknown");
        const searchArtistsFull = decodeEntities(getArtistsText(songData));
        const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
        const query = `${searchTitle} ${searchArtist}`.trim();
 
+       let matchFound = false;
+
        try {
            const auth = await getAuthData();
-           if (auth && auth.accessToken) {
+           if (auth && auth.accessToken && !signal.aborted) {
                const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
                if (authRes.ok) {
                    const authJson = await authRes.json();
@@ -827,6 +867,7 @@ export default function MiniPlayer() {
                           const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
                           const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
                           if (sId) {
+                              matchFound = true;
                               await setCache(cacheKey, { id: sId, url: sUrl });
                               await execExtras(sId, sUrl);
                               return;
@@ -835,7 +876,9 @@ export default function MiniPlayer() {
                    }
                }
            }
-       } catch (e: any) { if (e.name === 'AbortError') return; }
+       } catch (e: any) { }
+
+       if (matchFound || signal.aborted) return;
 
        // Fallback to RapidAPI only if AK47 fails
        let matchData = null;
@@ -849,28 +892,31 @@ export default function MiniPlayer() {
                rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length;
            }
        } catch (e: any) { 
-           if (e.name === 'AbortError') return;
-           rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; 
+           if (e.name !== 'AbortError') rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; 
        }
        
-       if (!isCurrent) return;
+       if (!isCurrent || signal.aborted) return;
+
        if (matchData) {
           const match: any = performMatching(matchData, searchTitle, searchArtist);
           if (match) { 
              const newUrl = `https://open.spotify.com/track/${match.id}`;
              await setCache(cacheKey, { id: match.id, url: newUrl });
              await execExtras(match.id, newUrl);
+          } else {
+             await setCache(cacheKey, { notFound: true });
           }
+       } else {
+          await setCache(cacheKey, { notFound: true });
        }
     };
 
-    // 400ms STRICT DEBOUNCE to completely eliminate "Vercel DDoS" triggers during rapid skips
-    const debounceTimer = setTimeout(executeNetworkFetches, 400);
+    const debounceTimer = setTimeout(executeHeavyFetches, 500);
 
     return () => { 
         isCurrent = false; 
         clearTimeout(debounceTimer); 
-        abortController.abort(); // Cancel network immediately!
+        abortController.abort(); 
     };
   },[currentSong]);
 
@@ -950,7 +996,7 @@ export default function MiniPlayer() {
       if (audioRef.current) audioRef.current.pause(); setIsPlaying(false); return;
     }
     
-    // MANUAL VIDEO API FETCH (Only triggers when user explicitly wants Video)
+    // MANUAL VIDEO API FETCH
     setIsVideoLoading(true);
     if (audioRef.current) audioRef.current.pause(); setIsPlaying(false);
     const newVid = await prefetchVideoId(displayTitle, displayArtists); 
@@ -1123,7 +1169,7 @@ export default function MiniPlayer() {
     }
   };
 
-  // HIGHLY OPTIMIZED APPLE-MUSIC STYLE WORD SYNC ENGINE (FLICKER FREE)
+  // HIGHLY OPTIMIZED APPLE-MUSIC STYLE WORD SYNC ENGINE
   useEffect(() => {
     if (!isWordSyncEnabled || !isLyricsEnabled || isVideoMode || activeLyricIndex < 0 || !lyrics[activeLyricIndex]) return;
     let animationFrameId: number;
