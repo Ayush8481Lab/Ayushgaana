@@ -278,6 +278,15 @@ const loadLameJS = () => new Promise((resolve, reject) => {
   document.head.appendChild(script);
 });
 
+const loadHlsJS = () => new Promise((resolve, reject) => {
+  if ((window as any).Hls) return resolve(true);
+  const script = document.createElement('script');
+  script.src = "https://cdn.jsdelivr.net/npm/hls.js@1";
+  script.onload = () => resolve(true);
+  script.onerror = reject;
+  document.head.appendChild(script);
+});
+
 const MarqueeText = React.memo(({ text, className = "" }: { text: string, className?: string }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
@@ -325,7 +334,6 @@ export default function MiniPlayer() {
   const[volume, setVolume] = useState(100);
   const[retryCount, setRetryCount] = useState(0);
   
-  // MODAL/UI STATES
   const[isExpanded, setIsExpanded] = useState(false);
   const[showQueue, setShowQueue] = useState(false);
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
@@ -351,7 +359,6 @@ export default function MiniPlayer() {
   const maxListenRef = useRef<number>(0);
   const lastTimeUpdateRef = useRef<number>(0); 
   const isNavigatingBackRef = useRef(false);
-  const mediaMetadataSetRef = useRef(false);
   const hasCachedCurrentSongRef = useRef(false);
   
   const rapidKeyIdxRef = useRef(0);
@@ -379,6 +386,7 @@ export default function MiniPlayer() {
   const touchStartX = useRef(0);
   const isSwipingRef = useRef(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const hlsRef = useRef<any>(null); // NATIVE HLS.JS REFERENCE
   const queueContainerRef = useRef<HTMLDivElement>(null);
   const isSeekingRef = useRef(false);
   const[songDetails, setSongDetails] = useState<any>(null);
@@ -393,6 +401,7 @@ export default function MiniPlayer() {
 
   const fetchingRecsRef = useRef(false);
   const[isSessionRestored, setIsSessionRestored] = useState(false);
+  const[isFetchingRecsUI, setIsFetchingRecsUI] = useState(false);
   
   const QUALITY_MAP: Record<string, string> = { "16": "Low", "64": "Medium", "128": "High", "320": "HD" };
   const[selectedQuality, setSelectedQuality] = useState("320");
@@ -483,14 +492,76 @@ export default function MiniPlayer() {
     window.history.back(); 
   };
 
-  // ADVANCED AUTO-RESUME NETWORK HANDLER (Recovers elegantly from network drops)
+  // --- HLS.JS ENGINE SETUP & ATTACHMENT ---
+  useEffect(() => {
+      if (!audioUrl || !audioRef.current) return;
+      
+      const setupAudio = async () => {
+          if (hlsRef.current) {
+              hlsRef.current.destroy();
+              hlsRef.current = null;
+          }
+
+          if (audioUrl.includes('.m3u8')) {
+              await loadHlsJS();
+              const Hls = (window as any).Hls;
+              if (Hls && Hls.isSupported()) {
+                  const hls = new Hls({
+                      maxBufferLength: 30,
+                      maxMaxBufferLength: 600,
+                      enableWorker: true
+                  });
+                  hlsRef.current = hls;
+                  hls.loadSource(audioUrl);
+                  hls.attachMedia(audioRef.current!);
+                  
+                  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                      if (isPlaying && !isVideoMode) audioRef.current?.play().catch(()=>{});
+                  });
+
+                  hls.on(Hls.Events.ERROR, (event: any, data: any) => {
+                      if (data.fatal) {
+                          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                              if (navigator.onLine) hls.startLoad();
+                          } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                              hls.recoverMediaError();
+                          } else {
+                              if (data.response?.code === 403 || data.response?.code === 401) {
+                                  localStorage.removeItem('gaana_hls_auth');
+                                  setTimeout(() => { setRetryCount(c => c + 1); }, 1500);
+                              }
+                              hls.destroy();
+                          }
+                      }
+                  });
+              } else if (audioRef.current?.canPlayType('application/vnd.apple.mpegurl')) {
+                  audioRef.current.src = audioUrl;
+                  if (isPlaying && !isVideoMode) audioRef.current?.play().catch(()=>{});
+              }
+          } else {
+              audioRef.current.src = audioUrl;
+              if (isPlaying && !isVideoMode) audioRef.current?.play().catch(()=>{});
+          }
+      };
+
+      setupAudio();
+
+      return () => {
+          if (hlsRef.current) {
+              hlsRef.current.destroy();
+              hlsRef.current = null;
+          }
+      };
+  },[audioUrl]);
+
+  // ADVANCED AUTO-RESUME NETWORK HANDLER
   useEffect(() => {
     const handleOnline = () => {
+        if (hlsRef.current) {
+            hlsRef.current.startLoad();
+        }
         if (isPlaying && audioRef.current && audioRef.current.readyState < 3) {
             setLoading(true);
-            const cTime = audioRef.current.currentTime;
-            audioRef.current.load();
-            audioRef.current.currentTime = cTime;
             audioRef.current.play().catch(()=>{});
         }
     };
@@ -670,13 +741,11 @@ export default function MiniPlayer() {
         const targetQ = selectedQuality || "128";
 
         try {
-            // 1. Info Fetch (Super fast)
             let sDetails = null;
             const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`);
             const infoJson = await infoRes.json();
             if (infoJson.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
 
-            // 2. Intelligent HLS Pre-Construct (Saves an API Call!)
             let streamSuccess = false;
             let cachedAuth = null;
             try {
@@ -695,13 +764,12 @@ export default function MiniPlayer() {
                 }
             }
 
-            // 3. Fallback Stream API (Extracts Auth token with global acl=/* for caching)
+            // Fallback Stream API (Extracts Auth token with global acl=/* for caching)
             if (!streamSuccess) {
                 const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`);
                 const streamJson = await streamRes.json();
                 
                 let extractedAuth = null;
-                // Look for the auth token in the direct URL that uses global acl=/* (usually encoded as %2f*)
                 if (streamJson.data?.url) {
                     const authMatch = streamJson.data.url.match(/(hdntl=exp=\d+~acl=(?:%2f|\/)\*~data=hdntl~hmac=[a-f0-9]+)/i);
                     if (authMatch) {
@@ -713,7 +781,7 @@ export default function MiniPlayer() {
                     }
                 }
 
-                // First play MUST use the explicitly returned valid link so we don't mismatch if album_id is missing or weird
+                // ALWAYS USE API GENERATED HLS URL FIRST TIME! 
                 let finalUrl = "";
                 if (streamJson.data?.hlsUrl) {
                     finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
@@ -728,14 +796,13 @@ export default function MiniPlayer() {
         if (isCurrent) setLoading(false);
     };
 
-    // COMBINED LYRICS AND SPOTIFY MATCH ENGINE (AK47 Integrated Properly)
+    // COMBINED LYRICS AND SPOTIFY MATCH ENGINE
     const triggerLyricsAndSpotifyMatch = async (songData: any) => {
        const searchArtist = instantArtists ? instantArtists.split(',').slice(0, 3).join(' ') : "";
        const query = `${instantTitle} ${searchArtist}`.trim();
        
        let matchedSpotifyId = null; let matchedSpotifyUrl = null;
 
-       // Attempt Spotify Matching first (AK47 then RapidAPI)
        try {
          const auth = await getAuthData();
          if (auth && auth.clientId && auth.accessToken) {
@@ -779,7 +846,7 @@ export default function MiniPlayer() {
            }
        }
 
-       // Smart Lyrics Fetcher (Respects Server Priority)
+       // Smart Lyrics Fetcher
        if (!isCurrent || !isLyricsEnabledRef.current) return;
        let lrcFound = false;
 
@@ -812,7 +879,6 @@ export default function MiniPlayer() {
            } catch(e) {}
        }
 
-       // Final Fallback if Gaana was priority but failed
        if (!lrcFound && lyricsServer === "gaana" && matchedSpotifyUrl) {
            try {
                const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(matchedSpotifyUrl)}&format=lrc`);
@@ -840,6 +906,37 @@ export default function MiniPlayer() {
       }
     }
   },[queue]); 
+
+  // ROBUST VIDEO AUTO-NEXT CLICKER
+  useEffect(() => {
+    const handleMsg = (e: MessageEvent) => {
+      if (e.data?.type === 'YTP_TIME' && isVideoMode) {
+        videoStartTimeRef.current = e.data.time; 
+        if (!isSeekingRef.current) setCurrentTime(e.data.time);
+        
+        const newDur = e.data.duration || duration;
+        if (newDur && duration !== newDur) setDuration(newDur);
+        
+        if (newDur > 0 && !isSeekingRef.current) {
+           setProgress((e.data.time / newDur) * 100);
+        }
+      } else {
+        let stateCode = null;
+        if (e.data?.type === 'YTP_STATE') stateCode = e.data.state;
+        else if (e.data?.event === 'onStateChange') stateCode = e.data.info;
+        
+        if (stateCode !== null) {
+            if (stateCode === 1 || String(stateCode) === '1') { audioRef.current?.pause(); setIsPlaying(true); } 
+            else if (stateCode === 2 || String(stateCode) === '2') { setIsPlaying(false); } 
+            else if (stateCode === 0 || String(stateCode) === '0') { setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100); }
+        } else if (e.data === 'ended' || e.data?.event === 'ended' || e.data?.type === 'ENDED') {
+            setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100);
+        }
+      }
+    };
+    window.addEventListener('message', handleMsg);
+    return () => window.removeEventListener('message', handleMsg);
+  },[isVideoMode, duration, upcomingQueue]);
 
   const handlePlayPauseToggle = (e?: any) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
@@ -924,16 +1021,6 @@ export default function MiniPlayer() {
     };
     img.onerror = () => { setDominantColor("rgb(40, 40, 40)"); }
   },[displayImage]);
-
-  useEffect(() => {
-    if (audioRef.current && audioUrl) {
-      audioRef.current.volume = volume / 100;
-      if (isPlaying && !isVideoMode) { 
-          const p = audioRef.current.play(); if (p !== undefined) p.catch(() => {}); 
-      }
-      else if (!isPlaying) audioRef.current.pause();
-    }
-  },[isPlaying, audioUrl, volume, isVideoMode]);
 
   useEffect(() => {
     let timeoutId: any;
@@ -1062,7 +1149,7 @@ export default function MiniPlayer() {
       
       const now = Date.now();
       if (!isSeekingRef.current && now - lastTimeUpdateRef.current < 250) {
-         if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0 && isExpanded) {
+         if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0) {
             let activeIdx = -1;
             const offsetTime = c + 0.4;
             for (let i = 0; i < lyrics.length; i++) { if (lyrics[i].time <= offsetTime) activeIdx = i; else break; }
@@ -1751,34 +1838,6 @@ export default function MiniPlayer() {
         }
       `}} />
 
-      {/* AUDIO ELEMENT WITH NATIVE NETWORK RESILIENCE */}
-      <audio 
-        ref={audioRef} 
-        src={audioUrl} 
-        preload="auto"
-        autoPlay={isPlaying && !isVideoMode} 
-        onEnded={playNext} 
-        onTimeUpdate={handleTimeUpdate}
-        onProgress={handleProgress}
-        onWaiting={() => setLoading(true)}
-        onPlaying={() => setLoading(false)}
-        onStalled={() => { if(isPlaying) setLoading(true); }}
-        onError={() => {
-           if (isPlaying && audioUrl) {
-               setLoading(true);
-               localStorage.removeItem('gaana_hls_auth');
-               setTimeout(() => { setRetryCount(c => c + 1); }, 1500); // Forces auto-retry!
-           }
-        }}
-        crossOrigin="anonymous"
-        onLoadedMetadata={() => { 
-           const dur = audioRef.current?.duration || 0;
-           setDuration(dur); 
-           if (restoreTimeRef.current !== null && restoreTimeRef.current > 0) { audioRef.current!.currentTime = restoreTimeRef.current; setCurrentTime(restoreTimeRef.current); restoreTimeRef.current = null; } 
-           syncPosition();
-        }} 
-      />
-
       <div className={`player-root fixed inset-0 z-[99999] text-white transition-all duration-[450ms] ease-[cubic-bezier(0.32,0.72,0,1)] ${isExpanded ? "translate-y-0 opacity-100 overflow-hidden" : "translate-y-full opacity-0 pointer-events-none"}`}>
         
         {/* Full Screen Background Layer (Saavn Beautiful Blur Engine) */}
@@ -2037,7 +2096,6 @@ export default function MiniPlayer() {
                    </div>
                 </div>
 
-                {/* Lyrics Server Selection */}
                 <div className="flex flex-col gap-3 mt-2">
                    <span className="text-white/60 text-[11px] font-bold uppercase tracking-wider pl-1">Lyrics Server Preference</span>
                    <div className="flex bg-[#1e1e1e] rounded-[16px] overflow-hidden p-2 gap-2">
