@@ -1,3 +1,5 @@
+
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -12,10 +14,10 @@ import {
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles
 } from "lucide-react";
 
-// --- 5-HOUR INDEXEDDB CACHE ENGINE (Audio & APIs) ---
+// --- 30-MINUTE INDEXEDDB CACHE ENGINE (Audio & APIs) ---
 const DB_NAME = "GrooveCacheDB";
 const STORE_NAME = "caches";
-const CACHE_EXPIRY_MS = 5 * 60 * 60 * 1000; // 5 hours
+const CACHE_EXPIRY_MS = 30 * 60 * 1000; // Strictly 30 Minutes
 
 const initDB = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
   if (typeof window === 'undefined' || !window.indexedDB) return reject();
@@ -67,7 +69,7 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
   } catch(e) {}
 };
 
-// --- PRO AUTH ENGINE ---
+// --- PRO AUTH ENGINE (Stores Token & Client locally till expiry) ---
 const AUTH_STORAGE_KEY = 'spotify_app_auth';
 let ongoingAuthPromise: Promise<any> | null = null;
 
@@ -116,7 +118,7 @@ const decodeEntities = (text: string) => {
   return decoded.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&apos;/g, "'");
 };
 
-// --- GAANA SPECIFIC EXTRACTORS ---
+// --- EXTRACTORS ---
 const getArtistsText = (data: any) => {
   let names: string[] =[];
   if (data?.entity_info) {
@@ -164,7 +166,6 @@ const parseTimeTag = (tag: string) => {
 const RAPID_KEYS =["d1edce158amshec139440d20658ap1f2545jsnbb7da9add82f", "6cf7f03014msh787c51a713c0264p15c20djsna1f9a9f6a378", "13d48f6bb8msh459c11b91bdcc44p110f4ejsn099443894115", "03fc23317fmsh0535ef9ec8c6f5bp1db59bjsn545991df9343", "e54e3fbc4dmshfc16d4417b618fdp1a2fafjsn30c72d8cf3ab"];
 const RAPID_API_HOST = "spotify81.p.rapidapi.com";
 
-// --- QUALITY MAPPER ---
 const QUALITY_MAP: any = { "16": "Low", "64": "Medium", "128": "High", "320": "HD" };
 
 // --- AK47 SPECIFIC MATCHER ---
@@ -319,6 +320,43 @@ const MarqueeText = React.memo(({ text, className = "" }: { text: string, classN
 });
 MarqueeText.displayName = 'MarqueeText';
 
+// --- SONG DNA INDIVIDUAL ARTIST ROW ---
+const ArtistDnaRow = React.memo(({ artist, closePlayer }: { artist: any, closePlayer: () => void }) => {
+    const[roleIndex, setRoleIndex] = useState(0);
+
+    useEffect(() => {
+        if (artist.roles.length > 1) {
+            const interval = setInterval(() => {
+                setRoleIndex(prev => (prev + 1) % artist.roles.length);
+            }, 2000);
+            return () => clearInterval(interval);
+        }
+    }, [artist.roles.length]);
+
+    const artistImg = getImageUrl(artist);
+    const fallbackColor = getArtistColor(artist.name || "Unknown");
+
+    return (
+        <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className="flex items-center gap-4 bg-white/5 hover:bg-white/10 p-3 rounded-xl transition-colors no-select-text group w-full">
+            <div className="w-[50px] h-[50px] rounded-full overflow-hidden shadow-md flex-shrink-0 flex items-center justify-center border border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
+                {!artistImg ? <span className="text-white font-bold text-xl">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover" alt={artist.name} />}
+            </div>
+            <div className="flex flex-col flex-1 overflow-hidden justify-center">
+                <span className="text-white font-bold text-[15px] truncate">{decodeEntities(artist.name)}</span>
+                <div className="relative h-[18px] overflow-hidden mt-0.5">
+                    {artist.roles.map((role: string, idx: number) => (
+                        <span key={role} className={`absolute left-0 top-0 text-[#1db954] text-[12px] font-bold tracking-wide uppercase transition-all duration-500 ease-in-out ${idx === roleIndex ? 'opacity-100 translate-y-0' : (idx < roleIndex ? 'opacity-0 -translate-y-4' : 'opacity-0 translate-y-4')}`}>
+                            {role}
+                        </span>
+                    ))}
+                </div>
+            </div>
+        </Link>
+    )
+});
+ArtistDnaRow.displayName = 'ArtistDnaRow';
+
+
 export default function MiniPlayer() {
   const { 
     currentSong, isPlaying, setIsPlaying, setCurrentSong, 
@@ -422,6 +460,8 @@ export default function MiniPlayer() {
 
   const isSongLiked = likedSongs.some((s: any) => s && (s.id || s.track_id) === (currentSong?.id || currentSong?.track_id));
   const handleLikeClick = (e: any) => { e.stopPropagation(); toggleLikeSong(currentSong); };
+
+  const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen;
 
   // --- CUSTOM BUTTERY AUTO-SCROLL FOR LYRICS ENGINE ---
   const customSmoothScroll = useCallback((container: HTMLElement, targetPos: number, duration: number) => {
@@ -627,7 +667,7 @@ export default function MiniPlayer() {
         return data.top_result.videoId; 
       }
     } catch (err: any) {
-        if (err.name === 'AbortError') throw err; // re-throw to break caller flow cleanly
+        if (err.name === 'AbortError') throw err; 
     }
     return null;
   };
@@ -645,13 +685,12 @@ export default function MiniPlayer() {
 
 
   // ----------------------------------------------------------------------
-  // --- MAIN TRACK CHANGE HOOK (DEBOUNCED & ABORTABLE)
+  // --- MAIN TRACK CHANGE HOOK (DEBOUNCED & ABORTABLE WITH 30 MIN CACHE)
   // ----------------------------------------------------------------------
   useEffect(() => {
     if (!currentSong) return;
     let isCurrent = true;
     
-    // ABORT CONTROLLER TO PREVENT PREVIOUS TRACK PLAYBACK AND DDOS ALERTS
     const abortController = new AbortController();
     const signal = abortController.signal;
 
@@ -706,28 +745,39 @@ export default function MiniPlayer() {
         let sDetails = null;
 
         try {
-            // 1. Info (Using AbortSignal)
-            const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
-            const infoJson = await infoRes.json();
+            // 1. Info (Using AbortSignal & Cache)
+            let infoJson = await getCache(`gaana_info_${trackId}`);
+            if (!infoJson) {
+                const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                infoJson = await infoRes.json();
+                if (infoJson.data) await setCache(`gaana_info_${trackId}`, infoJson);
+            }
             if (infoJson.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
 
-            // 2. Stream (Using AbortSignal)
-            const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
-            const streamJson = await streamRes.json();
+            // 2. Stream (Using AbortSignal & Cache)
+            let streamJson = await getCache(`gaana_stream_${trackId}`);
+            if (!streamJson) {
+                const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
+                streamJson = await streamRes.json();
+                if (streamJson.data) await setCache(`gaana_stream_${trackId}`, streamJson);
+            }
             if (streamJson.data?.hlsUrl) {
-                if (isCurrent) setStreamBaseUrl(streamJson.data.hlsUrl); // Handled by secondary useEffect
+                if (isCurrent) setStreamBaseUrl(streamJson.data.hlsUrl); 
             } else if (streamJson.data?.url) {
                 if (isCurrent) setAudioUrl(streamJson.data.url);
             }
 
             // Fallback for Lyrics via Spotify/AK47 Matcher
             let skipSpotifyLyrics = false;
-            // Get from local storage here to avoid reacting on every setting toggle mid-play
             const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
             if (currentLyricsServer === "Gaana") {
                 try {
-                    const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
-                    const lrcJson = await lrcRes.json();
+                    let lrcJson = await getCache(`gaana_lrc_${trackId}`);
+                    if (!lrcJson) {
+                        const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                        lrcJson = await lrcRes.json();
+                        if (lrcJson.data) await setCache(`gaana_lrc_${trackId}`, lrcJson);
+                    }
                     if (lrcJson.data?.lyrics && isCurrent) {
                         const parsed: any[] =[];
                         lrcJson.data.lyrics.split('\n').forEach((line: string) => {
@@ -838,17 +888,16 @@ export default function MiniPlayer() {
        }
     };
 
-    // 200ms debounce prevents API spam if user skips very fast
     const debounceTimer = setTimeout(() => {
         fetchGaanaData();
     }, 200);
 
     return () => { 
         isCurrent = false; 
-        clearTimeout(debounceTimer); // Clear debounce
-        abortController.abort(); // Cancel network immediately!
+        clearTimeout(debounceTimer); 
+        abortController.abort(); 
     };
-  }, [currentSong]); // Only re-run when the song changes!
+  },[currentSong]);
 
   useEffect(() => {
     if (queue && queue.length > 0) {
@@ -927,7 +976,7 @@ export default function MiniPlayer() {
     }
     setIsVideoLoading(true);
     if (audioRef.current) audioRef.current.pause(); setIsPlaying(false);
-    const newVid = await prefetchVideoId(displayTitle, displayArtists); // No signal needed here
+    const newVid = await prefetchVideoId(displayTitle, displayArtists); 
     if (newVid) { setYtVideoId(newVid); setIsVideoMode(true); } 
     else if (audioRef.current) { audioRef.current.play().catch(()=>{}); setIsPlaying(true); }
     setIsVideoLoading(false);
@@ -956,7 +1005,6 @@ export default function MiniPlayer() {
   useEffect(() => {
     if (audioRef.current && audioUrl && !audioUrl.includes('.m3u8')) {
       audioRef.current.volume = volume / 100;
-      // hls handles its own play internally
     }
   },[isPlaying, audioUrl, volume, isVideoMode]);
 
@@ -1431,6 +1479,29 @@ export default function MiniPlayer() {
   const getLineFontSize = () => lineFontSize === "Small" ? "text-[14px]" : lineFontSize === "Large" ? "text-[20px]" : "text-[16px]";
   const showTinyBanner = ((isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen) || isVideoMode || isLyricsFullScreen);
 
+  // --- MEMOIZED MERGED SONG DNA ROLES ---
+  const songDnaArtists = useMemo(() => {
+    if (!songDetails) return[];
+    const map = new Map();
+    const addRole = (arr: any[], roleName: string) => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach(artist => {
+            if (!artist || !artist.name) return;
+            const key = artist.seokey || artist.id || artist.name;
+            if (map.has(key)) {
+                if (!map.get(key).roles.includes(roleName)) map.get(key).roles.push(roleName);
+            } else {
+                map.set(key, { ...artist, roles: [roleName] });
+            }
+        });
+    };
+    addRole(songDetails.singers, "Singer");
+    addRole(songDetails.composers, "Composer");
+    addRole(songDetails.lyricist, "Lyricist");
+    addRole(songDetails.cast, "Cast");
+    return Array.from(map.values());
+  }, [songDetails]);
+
   // MEMOIZED FLICKER-FREE LYRICS ABOVE TITLE
   const RenderedMiniLyrics = useMemo(() => {
     if (!isLyricsEnabled || isLyricsFullScreen || syncType !== "LINE_SYNCED" || lyrics.length === 0 || isVideoMode) return null;
@@ -1474,31 +1545,6 @@ export default function MiniPlayer() {
     });
   },[lyrics, activeLyricIndex, isLyricsFullScreen, isLyricsEnabled, cardFontSize, isWordSyncEnabled, syncType, isVideoMode]);
 
-  const RenderGaanaArtists = (title: string, artists: any[]) => {
-      if (!artists || artists.length === 0) return null;
-      return (
-          <div className="w-full mt-4">
-              <h3 className="text-white font-bold text-[18px] mb-4 drop-shadow-md no-select-text">{title}</h3>
-              <div className="flex overflow-x-auto gap-5 scrollbar-hide pb-2 pointer-events-auto">
-                  {artists.map((artist: any) => {
-                      const artistImg = getImageUrl(artist); 
-                      const fallbackColor = getArtistColor(artist.name || "Unknown");
-                      return (
-                          <Link prefetch={false} key={artist.e_id || artist.id || Math.random()} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayerForNavigation} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
-                              <div className="w-[110px] h-[110px] rounded-full overflow-hidden relative flex items-center justify-center shadow-lg border border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
-                                  {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
-                              </div>
-                              <div className="flex flex-col items-center w-full px-1 no-select-text">
-                                  <span className="text-white/90 text-[13px] text-center font-bold line-clamp-2 leading-tight drop-shadow-md">{decodeEntities(artist.name)}</span>
-                              </div>
-                          </Link>
-                      )
-                  })}
-              </div>
-          </div>
-      );
-  };
-
   const RenderedQueue = useMemo(() => {
     return upcomingQueue.map((track: any, index: number) => {
       const isSelected = selectedQueueItems.includes(index);
@@ -1507,7 +1553,7 @@ export default function MiniPlayer() {
           {isQueueEditMode && (
             <div className="flex-shrink-0 mr-3 pl-1" onClick={(e) => {
                e.stopPropagation();
-               setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]);
+               setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]);
             }}>
                <div className={`w-[22px] h-[22px] rounded-full border-[2px] flex items-center justify-center transition-colors ${isSelected ? 'bg-[#1db954] border-[#1db954]' : 'border-white/40'}`}>
                   {isSelected && <Check size={14} className="text-black stroke-[3px]" />}
@@ -1516,7 +1562,7 @@ export default function MiniPlayer() {
           )}
 
           <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0" onClick={() => { 
-             if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]); return; }
+             if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]); return; }
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
           }}>
             <div className="w-[44px] h-[44px] flex-shrink-0 rounded-[4px] bg-[#282828] overflow-hidden"><img draggable={false} src={getImageUrl(track) || "https://via.placeholder.com/150"} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" /></div>
@@ -1617,13 +1663,13 @@ export default function MiniPlayer() {
             </div>
 
             {/* CONTROLS SECTION */}
-            <div className={`w-full px-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-2 flex flex-col justify-end flex-shrink-0 transition-opacity duration-500 pointer-events-auto ${isLyricsFullScreen ? 'mb-0 pb-[max(0.5rem,env(safe-area-inset-bottom))]' : 'mb-2'}`}>
+            <div className={`w-full px-5 pt-2 flex flex-col justify-end flex-shrink-0 transition-all duration-500 pointer-events-auto ${isLyricsFullScreen ? 'mb-0 pb-[max(0.5rem,env(safe-area-inset-bottom))]' : (isCanvasActive ? 'mb-0 pb-[max(0.5rem,env(safe-area-inset-bottom))]' : 'mb-2 pb-[max(1.5rem,env(safe-area-inset-bottom))]')}`}>
               
               <div className={`transition-all duration-500 w-full relative overflow-hidden flex items-center justify-start mask-edges-vertical ${isUiHidden && !isVideoMode ? 'max-h-0 opacity-0 mb-0' : (isLyricsFullScreen ? 'hidden' : 'mb-3 opacity-100 min-h-[75px]')}`}>
                 {RenderedMiniLyrics}
               </div>
 
-              <div className={`transition-all duration-500 flex items-center justify-between drop-shadow-md w-full no-select-text ${isLyricsFullScreen ? 'mb-2 scale-[0.8] origin-bottom-left' : 'mb-5'}`}>
+              <div className={`transition-all duration-500 flex items-center justify-between drop-shadow-md w-full no-select-text ${isLyricsFullScreen ? 'mb-2 scale-[0.8] origin-bottom-left' : (isCanvasActive ? 'mb-3' : 'mb-5')}`}>
                 <div className="flex items-center gap-3 overflow-hidden pr-4 flex-1 min-w-0 w-full max-w-full">
                   {showTinyBanner && displayImage && !isLyricsFullScreen && (<img draggable={false} src={displayImage} className="w-[48px] h-[48px] rounded-md shadow-md flex-shrink-0 no-select pointer-events-none" alt="tiny cover" />)}
                   <div className="flex flex-col flex-1 min-w-0 w-full overflow-hidden">
@@ -1634,13 +1680,13 @@ export default function MiniPlayer() {
                 {!isLyricsFullScreen && <button onClick={handleLikeClick} className="flex-shrink-0 ml-2 active:scale-75 transition-transform pointer-events-auto"><Heart size={26} fill={isSongLiked ? "#1db954" : "none"} color={isSongLiked ? "#1db954" : "white"} /></button>}
               </div>
 
-              <div className={`w-full flex flex-col gap-1 relative drop-shadow-md ${isLyricsFullScreen ? 'mb-2 scale-[0.95] origin-bottom' : 'mb-5'}`}>
+              <div className={`w-full flex flex-col gap-1 relative drop-shadow-md ${isLyricsFullScreen ? 'mb-2 scale-[0.95] origin-bottom' : (isCanvasActive ? 'mb-3' : 'mb-5')}`}>
                 <input type="range" min="0" max="100" value={duration > 0 ? progress : 0} onChange={handleSeekChange} onPointerDown={handleSeekStart} onPointerUp={handleSeekEnd} onTouchStart={handleSeekStart} onTouchEnd={handleSeekEnd} className="w-full mobile-slider relative z-10 pointer-events-auto" style={{ background: `linear-gradient(to right, #fff ${progress}%, rgba(255,255,255,0.3) ${progress}%, rgba(255,255,255,0.3) ${buffered}%, rgba(255,255,255,0.1) ${buffered}%)` }} />
                 <div className="flex items-center justify-between text-[11px] font-medium text-[#a7a7a7] mt-1 w-full pointer-events-none no-select-text"><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
               </div>
 
               <div className={`flex flex-col w-full transition-all duration-[450ms] ease-[cubic-bezier(0.32,0.72,0,1)] overflow-hidden ${isUiHidden && !isVideoMode ? 'max-h-0 opacity-0 translate-y-6 pointer-events-none' : (isLyricsFullScreen ? 'max-h-[64px] opacity-100 translate-y-0 pointer-events-auto scale-[0.85] origin-bottom' : 'max-h-[140px] opacity-100 translate-y-0 pointer-events-auto')}`}>
-                <div className={`flex items-center justify-between w-full px-1 drop-shadow-md no-select-text ${isLyricsFullScreen ? 'mb-0' : 'mb-5'}`}>
+                <div className={`flex items-center justify-between w-full px-1 drop-shadow-md no-select-text ${isLyricsFullScreen ? 'mb-0' : (isCanvasActive ? 'mb-2' : 'mb-5')}`}>
                   <button onClick={() => { setIsShuffle(!isShuffle); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 pointer-events-auto ${isShuffle ? 'text-[#1db954]' : 'text-white'}`}><Shuffle size={24} /></button>
                   <button onClick={playPrev} className="text-white active:opacity-50 pointer-events-auto"><SkipBack size={36} fill="white" stroke="white" /></button>
                   <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className="w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg pointer-events-auto">
@@ -1650,7 +1696,7 @@ export default function MiniPlayer() {
                   <button onClick={() => { setRepeatMode((prev) => (prev + 1) % 3); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 relative pointer-events-auto ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}><Repeat size={24} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</button>
                 </div>
                 {!isLyricsFullScreen && (
-                  <div className="flex items-center justify-between text-[#b3b3b3] w-full px-1 drop-shadow-md pointer-events-auto">
+                  <div className={`flex items-center justify-between text-[#b3b3b3] w-full px-1 drop-shadow-md pointer-events-auto ${isCanvasActive ? 'mt-2 mb-1' : ''}`}>
                     <button onClick={toggleVideoMode} className={`active:opacity-50 transition-colors ${isVideoMode ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}>{isVideoLoading ? <Loader2 size={20} className="animate-spin" /> : <MonitorPlay size={20} />}</button>
                     <div className="flex items-center gap-6"><button onClick={openQueue} className="active:opacity-50 text-white"><ListMusic size={20} /></button></div>
                   </div>
@@ -1675,10 +1721,18 @@ export default function MiniPlayer() {
               </div>
             )}
 
-            {songDetails?.singers && RenderGaanaArtists("Singers", songDetails.singers)}
-            {songDetails?.composers && RenderGaanaArtists("Composer", songDetails.composers)}
-            {songDetails?.lyricist && RenderGaanaArtists("Lyricist", songDetails.lyricist)}
-            {songDetails?.cast && RenderGaanaArtists("Cast", songDetails.cast)}
+            {songDnaArtists.length > 0 && (
+                <div className="w-full mt-4 bg-[#1e1e1e]/40 border border-white/5 rounded-2xl p-4 shadow-xl backdrop-blur-md">
+                    <h3 className="text-white font-extrabold text-[18px] mb-4 drop-shadow-md no-select-text flex items-center gap-2">
+                        <Sparkles size={18} className="text-[#1db954]" /> Song DNA
+                    </h3>
+                    <div className="flex flex-col gap-3 pointer-events-auto">
+                        {songDnaArtists.map((artist: any, idx: number) => (
+                            <ArtistDnaRow key={artist.seokey || artist.id || idx} artist={artist} closePlayer={closePlayerForNavigation} />
+                        ))}
+                    </div>
+                </div>
+            )}
 
             {songDetails?.album_title && (
               <Link prefetch={false} href={albumRoute} onClick={closePlayerForNavigation} className="w-full mt-4 bg-[#1e1e1e]/60 backdrop-blur-md rounded-2xl p-4 flex items-center gap-4 hover:bg-[#2a2a2a]/80 transition-colors border border-white/10 shadow-xl relative overflow-hidden group no-select-text pointer-events-auto">
