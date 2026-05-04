@@ -613,27 +613,48 @@ export default function MiniPlayer() {
   },[]);
 
   // VIDEO PREFETCH LOGIC
-  const prefetchVideoId = async (songTitle: string, songArtists: string) => {
+  const prefetchVideoId = async (songTitle: string, songArtists: string, abortSignal?: AbortSignal) => {
     try {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
+      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer", signal: abortSignal });
       const data = await fallbackRes.json();
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
         await setCache(`vid_id_${query}`, data.top_result.videoId);
         return data.top_result.videoId; 
       }
-    } catch (err) {}
+    } catch (err: any) {
+        if (err.name === 'AbortError') throw err; // re-throw to break caller flow cleanly
+    }
     return null;
   };
 
-  // MAIN TRACK CHANGE HOOK
+  // ----------------------------------------------------------------------
+  // --- ZERO-FETCH AUDIO QUALITY HOT-SWAP ENGINE
+  // ----------------------------------------------------------------------
+  useEffect(() => {
+    if (streamBaseUrl) {
+        const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
+        const finalUrl = streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`);
+        setAudioUrl(finalUrl);
+    }
+  }, [streamBaseUrl, selectedQuality]);
+
+
+  // ----------------------------------------------------------------------
+  // --- MAIN TRACK CHANGE HOOK (DEBOUNCED & ABORTABLE)
+  // ----------------------------------------------------------------------
   useEffect(() => {
     if (!currentSong) return;
     let isCurrent = true;
+    
+    // ABORT CONTROLLER TO PREVENT PREVIOUS TRACK PLAYBACK AND DDOS ALERTS
+    const abortController = new AbortController();
+    const signal = abortController.signal;
+
     fetchingRecsRef.current = false;
     mediaMetadataSetRef.current = false;
     hasCachedCurrentSongRef.current = false;
@@ -669,12 +690,14 @@ export default function MiniPlayer() {
       setYtVideoId(prefetchedYtIdRef.current);
     } else {
       setIsVideoLoading(isVideoMode); videoStartTimeRef.current = 0;
-      prefetchVideoId(instantTitle, instantArtists).then((vid) => {
-         if (!isCurrent) return;
-         if (vid) setYtVideoId(vid);
-         else if (isVideoMode) { setIsVideoMode(false); audioRef.current?.play().catch(()=>{}); setIsPlaying(true); }
-         setIsVideoLoading(false);
-      });
+      prefetchVideoId(instantTitle, instantArtists, signal)
+        .then((vid) => {
+           if (!isCurrent) return;
+           if (vid) setYtVideoId(vid);
+           else if (isVideoMode) { setIsVideoMode(false); audioRef.current?.play().catch(()=>{}); setIsPlaying(true); }
+           setIsVideoLoading(false);
+        })
+        .catch((e) => { if (e.name !== 'AbortError') setIsVideoLoading(false); });
     }
 
     // --- GAANA FETCH LOGIC ---
@@ -683,28 +706,27 @@ export default function MiniPlayer() {
         let sDetails = null;
 
         try {
-            // 1. Info
-            const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer" });
+            // 1. Info (Using AbortSignal)
+            const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
             const infoJson = await infoRes.json();
             if (infoJson.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
 
-            // 2. Stream
-            const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer" });
+            // 2. Stream (Using AbortSignal)
+            const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
             const streamJson = await streamRes.json();
             if (streamJson.data?.hlsUrl) {
-                setStreamBaseUrl(streamJson.data.hlsUrl);
-                const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
-                const finalUrl = streamJson.data.hlsUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`);
-                if (isCurrent) setAudioUrl(finalUrl);
+                if (isCurrent) setStreamBaseUrl(streamJson.data.hlsUrl); // Handled by secondary useEffect
             } else if (streamJson.data?.url) {
                 if (isCurrent) setAudioUrl(streamJson.data.url);
             }
 
-            // Fallback for Lyrics & Canvas via Spotify/AK47 Matcher
+            // Fallback for Lyrics via Spotify/AK47 Matcher
             let skipSpotifyLyrics = false;
-            if (lyricsServer === "Gaana") {
+            // Get from local storage here to avoid reacting on every setting toggle mid-play
+            const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
+            if (currentLyricsServer === "Gaana") {
                 try {
-                    const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer" });
+                    const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
                     const lrcJson = await lrcRes.json();
                     if (lrcJson.data?.lyrics && isCurrent) {
                         const parsed: any[] =[];
@@ -718,12 +740,15 @@ export default function MiniPlayer() {
                             skipSpotifyLyrics = true;
                         }
                     }
-                } catch(e) {}
+                } catch(e: any) { if (e.name === 'AbortError') return; }
             }
 
             triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
             
-        } catch(e) { triggerSpotifyFallback(currentSong); }
+        } catch(e: any) { 
+            if (e.name === 'AbortError') return; 
+            triggerSpotifyFallback(currentSong); 
+        }
         if (isCurrent) setLoading(false);
     };
 
@@ -738,8 +763,10 @@ export default function MiniPlayer() {
            if (isLyricsEnabledRef.current && !skipLyrics) {
               let lyricsJson = await getCache(`lyrics_${sId}`);
               if (!lyricsJson) {
-                  const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { referrerPolicy: "no-referrer" });
-                  if (lyricsRes.ok) { lyricsJson = await lyricsRes.json(); await setCache(`lyrics_${sId}`, lyricsJson); }
+                  try {
+                      const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { referrerPolicy: "no-referrer", signal });
+                      if (lyricsRes.ok) { lyricsJson = await lyricsRes.json(); await setCache(`lyrics_${sId}`, lyricsJson); }
+                  } catch (e: any) { if (e.name === 'AbortError') return; }
               }
               if (isCurrent && lyricsJson && lyricsJson.lines) { 
                   setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
@@ -749,8 +776,10 @@ export default function MiniPlayer() {
            if (isCanvasEnabledRef.current) {
               let canvasJson = await getCache(`canvas_${sId}`);
               if (!canvasJson) {
-                 const res = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { referrerPolicy: "no-referrer" });
-                 if (res.ok) { canvasJson = await res.json(); await setCache(`canvas_${sId}`, canvasJson); }
+                 try {
+                     const res = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
+                     if (res.ok) { canvasJson = await res.json(); await setCache(`canvas_${sId}`, canvasJson); }
+                 } catch (e: any) { if (e.name === 'AbortError') return; }
               }
               if (isCurrent && canvasJson?.canvasesList?.length > 0) setCanvasData(canvasJson.canvasesList[0]);
            }
@@ -766,7 +795,7 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken) {
-               const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer" });
+               const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
                if (authRes.ok) {
                    const authJson = await authRes.json();
                    if (authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
@@ -783,17 +812,20 @@ export default function MiniPlayer() {
                    }
                }
            }
-       } catch (e) {}
+       } catch (e: any) { if (e.name === 'AbortError') return; }
 
        let matchData = null;
        const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&offset=0&limit=25&numberOfTopResults=5`;
        for (let attempt = 0; attempt < RAPID_KEYS.length; attempt++) {
          try {
-           const response = await fetch(searchUrl, { method: 'GET', headers: { 'x-rapidapi-key': RAPID_KEYS[rapidKeyIdxRef.current], 'x-rapidapi-host': RAPID_API_HOST }, referrerPolicy: "no-referrer" });
+           const response = await fetch(searchUrl, { method: 'GET', headers: { 'x-rapidapi-key': RAPID_KEYS[rapidKeyIdxRef.current], 'x-rapidapi-host': RAPID_API_HOST }, referrerPolicy: "no-referrer", signal });
            if (response.ok) { matchData = await response.json(); break; } 
            else if ([429, 401, 403].includes(response.status)) rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length;
            else break; 
-         } catch (e) { rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; }
+         } catch (e: any) { 
+             if (e.name === 'AbortError') return;
+             rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; 
+         }
        }
        if (!isCurrent) return;
        if (matchData) {
@@ -806,9 +838,17 @@ export default function MiniPlayer() {
        }
     };
 
-    fetchGaanaData();
-    return () => { isCurrent = false; };
-  },[currentSong, selectedQuality, lyricsServer]);
+    // 200ms debounce prevents API spam if user skips very fast
+    const debounceTimer = setTimeout(() => {
+        fetchGaanaData();
+    }, 200);
+
+    return () => { 
+        isCurrent = false; 
+        clearTimeout(debounceTimer); // Clear debounce
+        abortController.abort(); // Cancel network immediately!
+    };
+  }, [currentSong]); // Only re-run when the song changes!
 
   useEffect(() => {
     if (queue && queue.length > 0) {
@@ -887,7 +927,7 @@ export default function MiniPlayer() {
     }
     setIsVideoLoading(true);
     if (audioRef.current) audioRef.current.pause(); setIsPlaying(false);
-    const newVid = await prefetchVideoId(displayTitle, displayArtists);
+    const newVid = await prefetchVideoId(displayTitle, displayArtists); // No signal needed here
     if (newVid) { setYtVideoId(newVid); setIsVideoMode(true); } 
     else if (audioRef.current) { audioRef.current.play().catch(()=>{}); setIsPlaying(true); }
     setIsVideoLoading(false);
@@ -1444,7 +1484,7 @@ export default function MiniPlayer() {
                       const artistImg = getImageUrl(artist); 
                       const fallbackColor = getArtistColor(artist.name || "Unknown");
                       return (
-                          <Link key={artist.e_id || artist.id || Math.random()} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayerForNavigation} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
+                          <Link prefetch={false} key={artist.e_id || artist.id || Math.random()} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayerForNavigation} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
                               <div className="w-[110px] h-[110px] rounded-full overflow-hidden relative flex items-center justify-center shadow-lg border border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
                                   {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
                               </div>
@@ -1467,7 +1507,7 @@ export default function MiniPlayer() {
           {isQueueEditMode && (
             <div className="flex-shrink-0 mr-3 pl-1" onClick={(e) => {
                e.stopPropagation();
-               setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]);
+               setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]);
             }}>
                <div className={`w-[22px] h-[22px] rounded-full border-[2px] flex items-center justify-center transition-colors ${isSelected ? 'bg-[#1db954] border-[#1db954]' : 'border-white/40'}`}>
                   {isSelected && <Check size={14} className="text-black stroke-[3px]" />}
@@ -1641,7 +1681,7 @@ export default function MiniPlayer() {
             {songDetails?.cast && RenderGaanaArtists("Cast", songDetails.cast)}
 
             {songDetails?.album_title && (
-              <Link href={albumRoute} onClick={closePlayerForNavigation} className="w-full mt-4 bg-[#1e1e1e]/60 backdrop-blur-md rounded-2xl p-4 flex items-center gap-4 hover:bg-[#2a2a2a]/80 transition-colors border border-white/10 shadow-xl relative overflow-hidden group no-select-text pointer-events-auto">
+              <Link prefetch={false} href={albumRoute} onClick={closePlayerForNavigation} className="w-full mt-4 bg-[#1e1e1e]/60 backdrop-blur-md rounded-2xl p-4 flex items-center gap-4 hover:bg-[#2a2a2a]/80 transition-colors border border-white/10 shadow-xl relative overflow-hidden group no-select-text pointer-events-auto">
                 <div className="absolute inset-0 z-0 pointer-events-none opacity-30" style={{ backgroundColor: dominantColor }} />
                 {displayImage && <img draggable={false} src={displayImage} className="w-[64px] h-[64px] rounded-md object-cover relative z-10 shadow-md border border-white/5 group-hover:scale-105 transition-transform no-select pointer-events-none" alt="Album Cover" />}
                 <div className="flex flex-col relative z-10 flex-1 pr-2"><span className="text-white/60 text-[11px] uppercase tracking-widest font-bold mb-1 drop-shadow-sm">Album</span><span className="text-white font-bold text-[16px] line-clamp-1 drop-shadow-md">{decodeEntities(songDetails.album_title)}</span></div><div className="relative z-10 text-white/50 group-hover:text-white transition-colors pl-2"><ChevronDown size={20} className="-rotate-90" /></div>
