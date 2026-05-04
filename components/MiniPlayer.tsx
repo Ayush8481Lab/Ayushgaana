@@ -1,3 +1,5 @@
+
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -318,35 +320,23 @@ const MarqueeText = React.memo(({ text, className = "" }: { text: string, classN
 });
 MarqueeText.displayName = 'MarqueeText';
 
-// --- SONG DNA CIRCULAR ARTIST CARD (ANIMATED ROLES) ---
+// --- SONG DNA CIRCULAR ARTIST CARD WITH MARQUEE ROLES ---
 const SongDnaCard = React.memo(({ artist, closePlayer }: { artist: any, closePlayer: () => void }) => {
-    const [roleIndex, setRoleIndex] = useState(0);
-
-    useEffect(() => {
-        if (artist.roles.length > 1) {
-            const interval = setInterval(() => {
-                setRoleIndex(prev => (prev + 1) % artist.roles.length);
-            }, 2000);
-            return () => clearInterval(interval);
-        }
-    }, [artist.roles.length]);
-
     const artistImg = getImageUrl(artist);
     const fallbackColor = getArtistColor(artist.name || "Unknown");
+    
+    // Join multiple roles perfectly separated by commas
+    const rolesText = artist.roles.join(', ');
 
     return (
         <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
             <div className="w-[110px] h-[110px] rounded-full overflow-hidden relative flex items-center justify-center shadow-lg border border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
                 {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
             </div>
-            <div className="flex flex-col items-center w-full px-1 no-select-text">
-                <span className="text-white/90 text-[13px] text-center font-bold line-clamp-1 leading-tight drop-shadow-md">{decodeEntities(artist.name)}</span>
-                <div className="relative w-full h-[16px] flex justify-center overflow-hidden mt-0.5">
-                    {artist.roles.map((role: string, idx: number) => (
-                        <span key={role} className={`absolute text-[#1db954] text-[11px] font-bold tracking-wide uppercase transition-all duration-500 ease-in-out ${idx === roleIndex ? 'opacity-100 translate-y-0' : (idx < roleIndex ? 'opacity-0 -translate-y-4' : 'opacity-0 translate-y-4')}`}>
-                            {role}
-                        </span>
-                    ))}
+            <div className="flex flex-col items-center w-full px-1 no-select-text overflow-hidden">
+                <span className="text-white/90 text-[13px] text-center font-bold line-clamp-1 leading-tight drop-shadow-md w-full">{decodeEntities(artist.name)}</span>
+                <div className="w-full mt-0.5 flex justify-center text-[#1db954] text-[11px] font-bold tracking-wide uppercase">
+                    <MarqueeText text={rolesText} className="w-full justify-center text-center" />
                 </div>
             </div>
         </Link>
@@ -650,23 +640,21 @@ export default function MiniPlayer() {
     } catch (e) {}
   },[]);
 
-  // VIDEO PREFETCH LOGIC
-  const prefetchVideoId = async (songTitle: string, songArtists: string, abortSignal?: AbortSignal) => {
+  // VIDEO PREFETCH LOGIC (NOW ONLY FIRES WHEN TV IS CLICKED)
+  const prefetchVideoId = async (songTitle: string, songArtists: string) => {
     try {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer", signal: abortSignal });
+      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       const data = await fallbackRes.json();
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
         await setCache(`vid_id_${query}`, data.top_result.videoId);
         return data.top_result.videoId; 
       }
-    } catch (err: any) {
-        if (err.name === 'AbortError') throw err; 
-    }
+    } catch (err: any) {}
     return null;
   };
 
@@ -683,7 +671,7 @@ export default function MiniPlayer() {
 
 
   // ----------------------------------------------------------------------
-  // --- MAIN TRACK CHANGE HOOK (400ms DEBOUNCE TO PREVENT DDOS)
+  // --- STRICT ORDER API WORKFLOW (400ms DEBOUNCE TO PREVENT DDOS)
   // ----------------------------------------------------------------------
   useEffect(() => {
     if (!currentSong) return;
@@ -721,91 +709,66 @@ export default function MiniPlayer() {
     setStreamBaseUrl(null);
     setBuffered(0);
 
-    const instantTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
-    const instantArtists = decodeEntities(getArtistsText(currentSong));
-
-    if (currentSong.ytVideoId || currentSong.prefetchedYtId) {
-      prefetchedYtIdRef.current = currentSong.ytVideoId || currentSong.prefetchedYtId;
-      setYtVideoId(prefetchedYtIdRef.current);
-    } else {
-        // Will be fetched inside the debounce below to prevent API spam
-        setIsVideoLoading(isVideoMode); videoStartTimeRef.current = 0;
-    }
-
-    // Wrap ALL network calls in a single execution block
     const executeNetworkFetches = async () => {
         if (!isCurrent) return;
-
-        // 1. YouTube Video Prefetch (Only if not already known)
-        if (!currentSong.ytVideoId && !currentSong.prefetchedYtId) {
-            prefetchVideoId(instantTitle, instantArtists, signal).then((vid) => {
-               if (!isCurrent) return;
-               if (vid) setYtVideoId(vid);
-               else if (isVideoMode) { setIsVideoMode(false); audioRef.current?.play().catch(()=>{}); setIsPlaying(true); }
-               setIsVideoLoading(false);
-            }).catch((e) => { if (e.name !== 'AbortError') setIsVideoLoading(false); });
-        }
-
-        // 2. Fetch Gaana Data & Spotify Fallback
         setLoading(true);
-        let sDetails = null;
 
+        // PRIORITY 1: START STREAM IMMEDIATELY (Async non-blocking)
+        (async () => {
+            try {
+                let streamJson = await getCache(`gaana_stream_${trackId}`);
+                if (!streamJson) {
+                    const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
+                    streamJson = await streamRes.json();
+                    if (streamJson?.data) await setCache(`gaana_stream_${trackId}`, streamJson);
+                }
+                if (streamJson?.data?.hlsUrl && isCurrent) setStreamBaseUrl(streamJson.data.hlsUrl);
+                else if (streamJson?.data?.url && isCurrent) setAudioUrl(streamJson.data.url);
+            } catch (e: any) { if (e.name !== 'AbortError') console.error(e); }
+        })();
+
+        // PRIORITY 2: FETCH SONG INFO
+        let sDetails = null;
         try {
-            // Gaana Info (Using AbortSignal & Cache)
             let infoJson = await getCache(`gaana_info_${trackId}`);
             if (!infoJson) {
                 const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
                 infoJson = await infoRes.json();
-                if (infoJson.data) await setCache(`gaana_info_${trackId}`, infoJson);
+                if (infoJson?.data) await setCache(`gaana_info_${trackId}`, infoJson);
             }
-            if (infoJson.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
+            if (infoJson?.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
+        } catch (e: any) { if (e.name === 'AbortError') return; }
 
-            // Gaana Stream (Using AbortSignal & Cache)
-            let streamJson = await getCache(`gaana_stream_${trackId}`);
-            if (!streamJson) {
-                const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
-                streamJson = await streamRes.json();
-                if (streamJson.data) await setCache(`gaana_stream_${trackId}`, streamJson);
-            }
-            if (streamJson.data?.hlsUrl) {
-                if (isCurrent) setStreamBaseUrl(streamJson.data.hlsUrl); 
-            } else if (streamJson.data?.url) {
-                if (isCurrent) setAudioUrl(streamJson.data.url);
-            }
-
-            // Fallback for Lyrics via Spotify/AK47 Matcher
-            let skipSpotifyLyrics = false;
-            const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
-            if (currentLyricsServer === "Gaana") {
-                try {
-                    let lrcJson = await getCache(`gaana_lrc_${trackId}`);
-                    if (!lrcJson) {
-                        const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
-                        lrcJson = await lrcRes.json();
-                        if (lrcJson.data) await setCache(`gaana_lrc_${trackId}`, lrcJson);
-                    }
-                    if (lrcJson.data?.lyrics && isCurrent) {
-                        const parsed: any[] =[];
-                        lrcJson.data.lyrics.split('\n').forEach((line: string) => {
-                            const match = line.match(/\[(\d+):(\d+\.\d+)\](.*)/);
-                            if (match && match[3].trim()) parsed.push({ time: parseInt(match[1]) * 60 + parseFloat(match[2]), words: match[3].trim() });
-                        });
-                        if (parsed.length > 0) {
-                            setLyrics(parsed);
-                            setSyncType("LINE_SYNCED");
-                            skipSpotifyLyrics = true;
-                        }
-                    }
-                } catch(e: any) { if (e.name === 'AbortError') return; }
-            }
-
-            triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
-            
-        } catch(e: any) { 
-            if (e.name === 'AbortError') return; 
-            triggerSpotifyFallback(currentSong); 
-        }
         if (isCurrent) setLoading(false);
+
+        // PRIORITY 3: LYRICS
+        let skipSpotifyLyrics = false;
+        const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
+        if (currentLyricsServer === "Gaana") {
+            try {
+                let lrcJson = await getCache(`gaana_lrc_${trackId}`);
+                if (!lrcJson) {
+                    const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                    lrcJson = await lrcRes.json();
+                    if (lrcJson?.data) await setCache(`gaana_lrc_${trackId}`, lrcJson);
+                }
+                if (lrcJson?.data?.lyrics && isCurrent) {
+                    const parsed: any[] =[];
+                    lrcJson.data.lyrics.split('\n').forEach((line: string) => {
+                        const match = line.match(/\[(\d+):(\d+\.\d+)\](.*)/);
+                        if (match && match[3].trim()) parsed.push({ time: parseInt(match[1]) * 60 + parseFloat(match[2]), words: match[3].trim() });
+                    });
+                    if (parsed.length > 0) {
+                        setLyrics(parsed);
+                        setSyncType("LINE_SYNCED");
+                        skipSpotifyLyrics = true;
+                    }
+                }
+            } catch(e: any) { if (e.name === 'AbortError') return; }
+        }
+
+        // Trigger Spotify Fallback (This will handle Lyrics fallback and Canvas internally)
+        triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
     };
 
     const triggerSpotifyFallback = async (songData: any, skipLyrics: boolean = false) => {
@@ -816,6 +779,7 @@ export default function MiniPlayer() {
            if (!isCurrent) return;
            setSpotifyId(sId); setSpotifyUrl(sUrl);
            
+           // FETCH LYRICS
            if (isLyricsEnabledRef.current && !skipLyrics) {
               let lyricsJson = await getCache(`lyrics_${sId}`);
               if (!lyricsJson) {
@@ -829,6 +793,12 @@ export default function MiniPlayer() {
                   setSyncType(lyricsJson.syncType);
               }
            }
+
+           // PRIORITY 4: EXPLICIT 0.8 SECOND DELAY BEFORE CANVAS
+           await new Promise(resolve => setTimeout(resolve, 800));
+           if (!isCurrent) return;
+
+           // FETCH CANVAS
            if (isCanvasEnabledRef.current) {
               let canvasJson = await getCache(`canvas_${sId}`);
               if (!canvasJson) {
@@ -870,7 +840,7 @@ export default function MiniPlayer() {
            }
        } catch (e: any) { if (e.name === 'AbortError') return; }
 
-       // Fallback to RapidAPI only if AK47 fails, and only attempt ONCE per key to avoid ban loops
+       // Fallback to RapidAPI only if AK47 fails
        let matchData = null;
        const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&offset=0&limit=25&numberOfTopResults=5`;
        
@@ -982,6 +952,8 @@ export default function MiniPlayer() {
       setYtVideoId(prefetchedYtIdRef.current); setIsVideoMode(true);
       if (audioRef.current) audioRef.current.pause(); setIsPlaying(false); return;
     }
+    
+    // MANUAL VIDEO API FETCH (Only triggers when user explicitly wants Video)
     setIsVideoLoading(true);
     if (audioRef.current) audioRef.current.pause(); setIsPlaying(false);
     const newVid = await prefetchVideoId(displayTitle, displayArtists); 
@@ -991,7 +963,9 @@ export default function MiniPlayer() {
   };
 
   useEffect(() => {
-    if (!displayImage) return;
+    if (!displayImage || displayImage.includes('via.placeholder.com')) {
+      setDominantColor("rgb(83, 83, 83)"); return;
+    }
     const img = new Image(); img.crossOrigin = "Anonymous"; 
     img.src = `https://wsrv.nl/?url=${encodeURIComponent(displayImage)}&w=50&h=50&output=jpg`;
     img.onload = () => {
@@ -1734,7 +1708,7 @@ export default function MiniPlayer() {
                     <h3 className="text-white font-extrabold text-[18px] mb-4 drop-shadow-md no-select-text flex items-center gap-2">
                         <Sparkles size={18} className="text-[#1db954]" /> Song DNA
                     </h3>
-                    <div className="flex overflow-x-auto gap-5 scrollbar-hide pb-2 pointer-events-auto">
+                    <div className="flex flex-wrap justify-start gap-x-4 gap-y-6 pb-2 pointer-events-auto">
                         {songDnaArtists.map((artist: any, idx: number) => (
                             <SongDnaCard key={artist.seokey || artist.id || idx} artist={artist} closePlayer={closePlayerForNavigation} />
                         ))}
