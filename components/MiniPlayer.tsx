@@ -1,5 +1,3 @@
-
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -320,9 +318,9 @@ const MarqueeText = React.memo(({ text, className = "" }: { text: string, classN
 });
 MarqueeText.displayName = 'MarqueeText';
 
-// --- SONG DNA INDIVIDUAL ARTIST ROW ---
-const ArtistDnaRow = React.memo(({ artist, closePlayer }: { artist: any, closePlayer: () => void }) => {
-    const[roleIndex, setRoleIndex] = useState(0);
+// --- SONG DNA CIRCULAR ARTIST CARD (ANIMATED ROLES) ---
+const SongDnaCard = React.memo(({ artist, closePlayer }: { artist: any, closePlayer: () => void }) => {
+    const [roleIndex, setRoleIndex] = useState(0);
 
     useEffect(() => {
         if (artist.roles.length > 1) {
@@ -337,15 +335,15 @@ const ArtistDnaRow = React.memo(({ artist, closePlayer }: { artist: any, closePl
     const fallbackColor = getArtistColor(artist.name || "Unknown");
 
     return (
-        <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className="flex items-center gap-4 bg-white/5 hover:bg-white/10 p-3 rounded-xl transition-colors no-select-text group w-full">
-            <div className="w-[50px] h-[50px] rounded-full overflow-hidden shadow-md flex-shrink-0 flex items-center justify-center border border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
-                {!artistImg ? <span className="text-white font-bold text-xl">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover" alt={artist.name} />}
+        <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
+            <div className="w-[110px] h-[110px] rounded-full overflow-hidden relative flex items-center justify-center shadow-lg border border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
+                {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
             </div>
-            <div className="flex flex-col flex-1 overflow-hidden justify-center">
-                <span className="text-white font-bold text-[15px] truncate">{decodeEntities(artist.name)}</span>
-                <div className="relative h-[18px] overflow-hidden mt-0.5">
+            <div className="flex flex-col items-center w-full px-1 no-select-text">
+                <span className="text-white/90 text-[13px] text-center font-bold line-clamp-1 leading-tight drop-shadow-md">{decodeEntities(artist.name)}</span>
+                <div className="relative w-full h-[16px] flex justify-center overflow-hidden mt-0.5">
                     {artist.roles.map((role: string, idx: number) => (
-                        <span key={role} className={`absolute left-0 top-0 text-[#1db954] text-[12px] font-bold tracking-wide uppercase transition-all duration-500 ease-in-out ${idx === roleIndex ? 'opacity-100 translate-y-0' : (idx < roleIndex ? 'opacity-0 -translate-y-4' : 'opacity-0 translate-y-4')}`}>
+                        <span key={role} className={`absolute text-[#1db954] text-[11px] font-bold tracking-wide uppercase transition-all duration-500 ease-in-out ${idx === roleIndex ? 'opacity-100 translate-y-0' : (idx < roleIndex ? 'opacity-0 -translate-y-4' : 'opacity-0 translate-y-4')}`}>
                             {role}
                         </span>
                     ))}
@@ -354,7 +352,7 @@ const ArtistDnaRow = React.memo(({ artist, closePlayer }: { artist: any, closePl
         </Link>
     )
 });
-ArtistDnaRow.displayName = 'ArtistDnaRow';
+SongDnaCard.displayName = 'SongDnaCard';
 
 
 export default function MiniPlayer() {
@@ -681,16 +679,17 @@ export default function MiniPlayer() {
         const finalUrl = streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`);
         setAudioUrl(finalUrl);
     }
-  }, [streamBaseUrl, selectedQuality]);
+  },[streamBaseUrl, selectedQuality]);
 
 
   // ----------------------------------------------------------------------
-  // --- MAIN TRACK CHANGE HOOK (DEBOUNCED & ABORTABLE WITH 30 MIN CACHE)
+  // --- MAIN TRACK CHANGE HOOK (400ms DEBOUNCE TO PREVENT DDOS)
   // ----------------------------------------------------------------------
   useEffect(() => {
     if (!currentSong) return;
     let isCurrent = true;
     
+    // ABORT CONTROLLER TO PREVENT OVERLAPPING REQUESTS
     const abortController = new AbortController();
     const signal = abortController.signal;
 
@@ -713,6 +712,7 @@ export default function MiniPlayer() {
     }
     currentTrackRef.current = currentSong; maxListenRef.current = 0;
     
+    // Reset UI State instantly
     setYtVideoId(currentSong.ytVideoId || null);
     setSpotifyId(null); setSpotifyUrl(null); setLyrics([]); setSyncType(null); setCanvasData(null);
     setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
@@ -728,24 +728,30 @@ export default function MiniPlayer() {
       prefetchedYtIdRef.current = currentSong.ytVideoId || currentSong.prefetchedYtId;
       setYtVideoId(prefetchedYtIdRef.current);
     } else {
-      setIsVideoLoading(isVideoMode); videoStartTimeRef.current = 0;
-      prefetchVideoId(instantTitle, instantArtists, signal)
-        .then((vid) => {
-           if (!isCurrent) return;
-           if (vid) setYtVideoId(vid);
-           else if (isVideoMode) { setIsVideoMode(false); audioRef.current?.play().catch(()=>{}); setIsPlaying(true); }
-           setIsVideoLoading(false);
-        })
-        .catch((e) => { if (e.name !== 'AbortError') setIsVideoLoading(false); });
+        // Will be fetched inside the debounce below to prevent API spam
+        setIsVideoLoading(isVideoMode); videoStartTimeRef.current = 0;
     }
 
-    // --- GAANA FETCH LOGIC ---
-    const fetchGaanaData = async () => {
+    // Wrap ALL network calls in a single execution block
+    const executeNetworkFetches = async () => {
+        if (!isCurrent) return;
+
+        // 1. YouTube Video Prefetch (Only if not already known)
+        if (!currentSong.ytVideoId && !currentSong.prefetchedYtId) {
+            prefetchVideoId(instantTitle, instantArtists, signal).then((vid) => {
+               if (!isCurrent) return;
+               if (vid) setYtVideoId(vid);
+               else if (isVideoMode) { setIsVideoMode(false); audioRef.current?.play().catch(()=>{}); setIsPlaying(true); }
+               setIsVideoLoading(false);
+            }).catch((e) => { if (e.name !== 'AbortError') setIsVideoLoading(false); });
+        }
+
+        // 2. Fetch Gaana Data & Spotify Fallback
         setLoading(true);
         let sDetails = null;
 
         try {
-            // 1. Info (Using AbortSignal & Cache)
+            // Gaana Info (Using AbortSignal & Cache)
             let infoJson = await getCache(`gaana_info_${trackId}`);
             if (!infoJson) {
                 const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
@@ -754,7 +760,7 @@ export default function MiniPlayer() {
             }
             if (infoJson.data) { sDetails = infoJson.data; if (isCurrent) setSongDetails(infoJson.data); }
 
-            // 2. Stream (Using AbortSignal & Cache)
+            // Gaana Stream (Using AbortSignal & Cache)
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (!streamJson) {
                 const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
@@ -864,19 +870,22 @@ export default function MiniPlayer() {
            }
        } catch (e: any) { if (e.name === 'AbortError') return; }
 
+       // Fallback to RapidAPI only if AK47 fails, and only attempt ONCE per key to avoid ban loops
        let matchData = null;
        const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&offset=0&limit=25&numberOfTopResults=5`;
-       for (let attempt = 0; attempt < RAPID_KEYS.length; attempt++) {
-         try {
+       
+       try {
            const response = await fetch(searchUrl, { method: 'GET', headers: { 'x-rapidapi-key': RAPID_KEYS[rapidKeyIdxRef.current], 'x-rapidapi-host': RAPID_API_HOST }, referrerPolicy: "no-referrer", signal });
-           if (response.ok) { matchData = await response.json(); break; } 
-           else if ([429, 401, 403].includes(response.status)) rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length;
-           else break; 
-         } catch (e: any) { 
-             if (e.name === 'AbortError') return;
-             rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; 
-         }
+           if (response.ok) { 
+               matchData = await response.json(); 
+           } else if ([429, 401, 403].includes(response.status)) {
+               rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length;
+           }
+       } catch (e: any) { 
+           if (e.name === 'AbortError') return;
+           rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; 
        }
+       
        if (!isCurrent) return;
        if (matchData) {
           const match: any = performMatching(matchData, searchTitle, searchArtist);
@@ -888,14 +897,13 @@ export default function MiniPlayer() {
        }
     };
 
-    const debounceTimer = setTimeout(() => {
-        fetchGaanaData();
-    }, 200);
+    // 400ms STRICT DEBOUNCE to completely eliminate "Vercel DDoS" triggers during rapid skips
+    const debounceTimer = setTimeout(executeNetworkFetches, 400);
 
     return () => { 
         isCurrent = false; 
         clearTimeout(debounceTimer); 
-        abortController.abort(); 
+        abortController.abort(); // Cancel network immediately!
     };
   },[currentSong]);
 
@@ -1491,7 +1499,7 @@ export default function MiniPlayer() {
             if (map.has(key)) {
                 if (!map.get(key).roles.includes(roleName)) map.get(key).roles.push(roleName);
             } else {
-                map.set(key, { ...artist, roles: [roleName] });
+                map.set(key, { ...artist, roles:[roleName] });
             }
         });
     };
@@ -1562,7 +1570,7 @@ export default function MiniPlayer() {
           )}
 
           <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0" onClick={() => { 
-             if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]); return; }
+             if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]); return; }
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
           }}>
             <div className="w-[44px] h-[44px] flex-shrink-0 rounded-[4px] bg-[#282828] overflow-hidden"><img draggable={false} src={getImageUrl(track) || "https://via.placeholder.com/150"} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" /></div>
@@ -1722,13 +1730,13 @@ export default function MiniPlayer() {
             )}
 
             {songDnaArtists.length > 0 && (
-                <div className="w-full mt-4 bg-[#1e1e1e]/40 border border-white/5 rounded-2xl p-4 shadow-xl backdrop-blur-md">
+                <div className="w-full mt-4">
                     <h3 className="text-white font-extrabold text-[18px] mb-4 drop-shadow-md no-select-text flex items-center gap-2">
                         <Sparkles size={18} className="text-[#1db954]" /> Song DNA
                     </h3>
-                    <div className="flex flex-col gap-3 pointer-events-auto">
+                    <div className="flex overflow-x-auto gap-5 scrollbar-hide pb-2 pointer-events-auto">
                         {songDnaArtists.map((artist: any, idx: number) => (
-                            <ArtistDnaRow key={artist.seokey || artist.id || idx} artist={artist} closePlayer={closePlayerForNavigation} />
+                            <SongDnaCard key={artist.seokey || artist.id || idx} artist={artist} closePlayer={closePlayerForNavigation} />
                         ))}
                     </div>
                 </div>
