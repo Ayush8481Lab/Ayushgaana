@@ -386,7 +386,7 @@ export default function MiniPlayer() {
   const touchStartX = useRef(0);
   const isSwipingRef = useRef(false);
   const audioRef = useRef<HTMLAudioElement>(null);
-  const hlsRef = useRef<any>(null); // NATIVE HLS.JS REFERENCE
+  const hlsRef = useRef<any>(null); 
   const queueContainerRef = useRef<HTMLDivElement>(null);
   const isSeekingRef = useRef(false);
   const[songDetails, setSongDetails] = useState<any>(null);
@@ -461,7 +461,7 @@ export default function MiniPlayer() {
   useEffect(() => {
       const handlePopState = (e: PopStateEvent) => {
           const modal = e.state?.modal as ModalState;
-          const validModals: ModalState[] = ['player', 'settings', 'queue', 'timer', 'none'];
+          const validModals: ModalState[] =['player', 'settings', 'queue', 'timer', 'none'];
           activeOverlayRef.current = validModals.includes(modal) ? modal : 'none';
 
           if (modal === 'timer') { setShowTimerMenu(true); setShowQueue(false); setShowSettingsMenu(false); setIsExpanded(true); }
@@ -513,10 +513,13 @@ export default function MiniPlayer() {
                   });
                   hlsRef.current = hls;
                   hls.loadSource(audioUrl);
-                  hls.attachMedia(audioRef.current!);
+                  
+                  if (audioRef.current) {
+                      hls.attachMedia(audioRef.current);
+                  }
                   
                   hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                      if (isPlaying && !isVideoMode) audioRef.current?.play().catch(()=>{});
+                      if (isPlaying && !isVideoMode && audioRef.current) audioRef.current.play().catch(()=>{});
                   });
 
                   hls.on(Hls.Events.ERROR, (event: any, data: any) => {
@@ -534,13 +537,13 @@ export default function MiniPlayer() {
                           }
                       }
                   });
-              } else if (audioRef.current?.canPlayType('application/vnd.apple.mpegurl')) {
+              } else if (audioRef.current && audioRef.current.canPlayType('application/vnd.apple.mpegurl')) {
                   audioRef.current.src = audioUrl;
-                  if (isPlaying && !isVideoMode) audioRef.current?.play().catch(()=>{});
+                  if (isPlaying && !isVideoMode) audioRef.current.play().catch(()=>{});
               }
-          } else {
+          } else if (audioRef.current) {
               audioRef.current.src = audioUrl;
-              if (isPlaying && !isVideoMode) audioRef.current?.play().catch(()=>{});
+              if (isPlaying && !isVideoMode) audioRef.current.play().catch(()=>{});
           }
       };
 
@@ -693,7 +696,6 @@ export default function MiniPlayer() {
     if (!currentSong) return;
     let isCurrent = true; let loadTimer: any;
     fetchingRecsRef.current = false;
-    mediaMetadataSetRef.current = false;
     hasCachedCurrentSongRef.current = false;
     
     const trackId = currentSong.track_id || currentSong.id || currentSong.entity_id;
@@ -730,7 +732,7 @@ export default function MiniPlayer() {
       prefetchVideoId(instantTitle, instantArtists).then((vid) => {
          if (!isCurrent) return;
          if (vid) setYtVideoId(vid);
-         else if (isVideoMode) { setIsVideoMode(false); audioRef.current?.play().catch(()=>{}); setIsPlaying(true); }
+         else if (isVideoMode) { setIsVideoMode(false); if (audioRef.current) audioRef.current.play().catch(()=>{}); setIsPlaying(true); }
          setIsVideoLoading(false);
       });
     }
@@ -764,7 +766,7 @@ export default function MiniPlayer() {
                 }
             }
 
-            // Fallback Stream API (Extracts Auth token with global acl=/* for caching)
+            // Fallback Stream API
             if (!streamSuccess) {
                 const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`);
                 const streamJson = await streamRes.json();
@@ -781,7 +783,6 @@ export default function MiniPlayer() {
                     }
                 }
 
-                // ALWAYS USE API GENERATED HLS URL FIRST TIME! 
                 let finalUrl = "";
                 if (streamJson.data?.hlsUrl) {
                     finalUrl = streamJson.data.hlsUrl.replace(/(16|64|128|320)\.mp4\.master\.m3u8/i, `${targetQ}.mp4.master.m3u8`);
@@ -846,7 +847,6 @@ export default function MiniPlayer() {
            }
        }
 
-       // Smart Lyrics Fetcher
        if (!isCurrent || !isLyricsEnabledRef.current) return;
        let lrcFound = false;
 
@@ -907,37 +907,6 @@ export default function MiniPlayer() {
     }
   },[queue]); 
 
-  // ROBUST VIDEO AUTO-NEXT CLICKER
-  useEffect(() => {
-    const handleMsg = (e: MessageEvent) => {
-      if (e.data?.type === 'YTP_TIME' && isVideoMode) {
-        videoStartTimeRef.current = e.data.time; 
-        if (!isSeekingRef.current) setCurrentTime(e.data.time);
-        
-        const newDur = e.data.duration || duration;
-        if (newDur && duration !== newDur) setDuration(newDur);
-        
-        if (newDur > 0 && !isSeekingRef.current) {
-           setProgress((e.data.time / newDur) * 100);
-        }
-      } else {
-        let stateCode = null;
-        if (e.data?.type === 'YTP_STATE') stateCode = e.data.state;
-        else if (e.data?.event === 'onStateChange') stateCode = e.data.info;
-        
-        if (stateCode !== null) {
-            if (stateCode === 1 || String(stateCode) === '1') { audioRef.current?.pause(); setIsPlaying(true); } 
-            else if (stateCode === 2 || String(stateCode) === '2') { setIsPlaying(false); } 
-            else if (stateCode === 0 || String(stateCode) === '0') { setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100); }
-        } else if (e.data === 'ended' || e.data?.event === 'ended' || e.data?.type === 'ENDED') {
-            setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100);
-        }
-      }
-    };
-    window.addEventListener('message', handleMsg);
-    return () => window.removeEventListener('message', handleMsg);
-  },[isVideoMode, duration, upcomingQueue]);
-
   const handlePlayPauseToggle = (e?: any) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     const newState = !isPlaying;
@@ -948,9 +917,10 @@ export default function MiniPlayer() {
       videoIframeRef.current.contentWindow.postMessage({ type: newState ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
     } else {
       if (newState) {
-        const playPromise = audioRef.current?.play();
-        if (playPromise !== undefined) playPromise.catch(()=>{});
-      } else audioRef.current?.pause();
+        if (audioRef.current) audioRef.current.play().catch(()=>{});
+      } else if (audioRef.current) {
+        audioRef.current.pause();
+      }
     }
   };
 
