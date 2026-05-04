@@ -325,8 +325,13 @@ const SongDnaCard = React.memo(({ artist, closePlayer }: { artist: any, closePla
     const artistImg = getImageUrl(artist);
     const fallbackColor = getArtistColor(artist.name || "Unknown");
     
-    // Join multiple roles perfectly separated by commas
-    const rolesText = artist.roles.join(', ');
+    // Format roles: lowercase joined, with only first letter capitalized (e.g. "Singer, composer, cast")
+    const formatRoles = (roles: string[]) => {
+        if (!roles || roles.length === 0) return "";
+        const joined = roles.join(', ').toLowerCase();
+        return joined.charAt(0).toUpperCase() + joined.slice(1);
+    };
+    const rolesText = formatRoles(artist.roles);
 
     return (
         <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
@@ -334,8 +339,8 @@ const SongDnaCard = React.memo(({ artist, closePlayer }: { artist: any, closePla
                 {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
             </div>
             <div className="flex flex-col items-center w-full px-1 no-select-text overflow-hidden">
-                <span className="text-white/90 text-[13px] text-center font-bold line-clamp-1 leading-tight drop-shadow-md w-full">{decodeEntities(artist.name)}</span>
-                <div className="w-full mt-0.5 flex justify-center text-[#1db954] text-[11px] font-bold tracking-wide uppercase">
+                <MarqueeText text={decodeEntities(artist.name)} className="text-white/90 text-[13px] font-bold drop-shadow-md w-full justify-center text-center" />
+                <div className="w-full mt-[1px] flex justify-center text-[#a7a7a7] text-[11px] font-medium tracking-wide">
                     <MarqueeText text={rolesText} className="w-full justify-center text-center" />
                 </div>
             </div>
@@ -470,7 +475,7 @@ export default function MiniPlayer() {
       (container as any)._scrollRaf = requestAnimationFrame(animation);
   },[]);
 
-  // --- ROBUST MODAL HISTORY ROUTING ---
+  // --- FAST STATE-BASED ROUTING FOR MODALS (FIXED NEXT.JS RSC LOGS) ---
   const closeMainPlayer = useCallback(() => {
     setIsExpanded(false);
     setShowQueue(false);
@@ -479,26 +484,16 @@ export default function MiniPlayer() {
     activeOverlayRef.current = 'none';
   },[]);
 
-  useEffect(() => {
-      const handlePopState = (e: PopStateEvent) => {
-          if (activeOverlayRef.current === 'settings') { setShowSettingsMenu(false); activeOverlayRef.current = 'player'; } 
-          else if (activeOverlayRef.current === 'queue') { setShowQueue(false); activeOverlayRef.current = 'player'; } 
-          else if (activeOverlayRef.current === 'timer') { setShowTimerMenu(false); activeOverlayRef.current = 'player'; } 
-          else if (activeOverlayRef.current === 'player') { closeMainPlayer(); }
-      };
-      window.addEventListener('popstate', handlePopState);
-      return () => window.removeEventListener('popstate', handlePopState);
-  },[closeMainPlayer]);
-
   const openMainPlayer = () => {
       if (!isExpanded) { 
           setIsExpanded(true); setShowQueue(false); setShowSettingsMenu(false); setShowTimerMenu(false);
-          activeOverlayRef.current = 'player'; window.history.pushState({ modal: 'player' }, ''); 
+          activeOverlayRef.current = 'player'; 
       }
   };
-  const openSettings = (e: React.MouseEvent) => { e.stopPropagation(); setShowSettingsMenu(true); activeOverlayRef.current = 'settings'; window.history.pushState({ modal: 'settings' }, ''); };
-  const openQueue = () => { setShowQueue(true); activeOverlayRef.current = 'queue'; window.history.pushState({ modal: 'queue' }, ''); };
-  const openTimer = () => { setShowTimerMenu(true); activeOverlayRef.current = 'timer'; window.history.pushState({ modal: 'timer' }, ''); };
+  
+  const openSettings = (e: React.MouseEvent) => { e.stopPropagation(); setShowSettingsMenu(true); activeOverlayRef.current = 'settings'; };
+  const openQueue = () => { setShowQueue(true); activeOverlayRef.current = 'queue'; };
+  const openTimer = () => { setShowTimerMenu(true); activeOverlayRef.current = 'timer'; };
   const closePlayerForNavigation = () => { closeMainPlayer(); };
 
   // --- NATIVE M3U8 SUPPORT VIA HLS.JS ---
@@ -541,6 +536,7 @@ export default function MiniPlayer() {
 
   // --- CLEAN RAW LINK SHARE ---
   const handleShareSong = async () => {
+    setShowSettingsMenu(false); // Close modal instantly without history.back()
     try {
       let path = currentSong.perma_url || currentSong.url || "";
       if (path && path.includes('jiosaavn.com')) path = new URL(path).pathname;
@@ -555,7 +551,6 @@ export default function MiniPlayer() {
         await navigator.clipboard.writeText(shareUrl); alert("Link copied to clipboard!"); 
       }
     } catch (e) { console.error("Error sharing:", e); }
-    window.history.back(); 
   };
 
   useEffect(() => {
@@ -641,20 +636,22 @@ export default function MiniPlayer() {
   },[]);
 
   // VIDEO PREFETCH LOGIC (NOW ONLY FIRES WHEN TV IS CLICKED)
-  const prefetchVideoId = async (songTitle: string, songArtists: string) => {
+  const prefetchVideoId = async (songTitle: string, songArtists: string, abortSignal?: AbortSignal) => {
     try {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
+      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer", signal: abortSignal });
       const data = await fallbackRes.json();
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
         await setCache(`vid_id_${query}`, data.top_result.videoId);
         return data.top_result.videoId; 
       }
-    } catch (err: any) {}
+    } catch (err: any) {
+        if (err.name === 'AbortError') throw err; 
+    }
     return null;
   };
 
@@ -1126,7 +1123,7 @@ export default function MiniPlayer() {
     }
   };
 
-  // HIGHLY OPTIMIZED APPLE-MUSIC STYLE WORD SYNC ENGINE
+  // HIGHLY OPTIMIZED APPLE-MUSIC STYLE WORD SYNC ENGINE (FLICKER FREE)
   useEffect(() => {
     if (!isWordSyncEnabled || !isLyricsEnabled || isVideoMode || activeLyricIndex < 0 || !lyrics[activeLyricIndex]) return;
     let animationFrameId: number;
@@ -1409,6 +1406,7 @@ export default function MiniPlayer() {
   };
 
   const handleDownloadMusicInit = async () => { 
+      setShowSettingsMenu(false);
       let opts: any[] =[];
       if (streamBaseUrl) {['16', '64', '128', '320'].forEach(q => {
               opts.push({ url: streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${q}.mp4.master.m3u8`), quality: `${q}kbps`, label: QUALITY_MAP[q] || `${q}kbps`, num: parseInt(q) });
@@ -1426,10 +1424,12 @@ export default function MiniPlayer() {
           } catch(e) {}
       }
       setDlState({ type: "music", status: "options", options: opts.sort((a, b) => b.num - a.num) });
-      window.history.back(); 
   };
   
-  const handleDownloadVideoInit = () => { setDlState({ type: "video", status: "servers" }); window.history.back(); };
+  const handleDownloadVideoInit = () => { 
+      setShowSettingsMenu(false); 
+      setDlState({ type: "video", status: "servers" }); 
+  };
 
   const triggerVideoServer = async (serverNum: number) => {
     setDlState({ type: "video", status: "verifying", server: serverNum });
@@ -1499,7 +1499,7 @@ export default function MiniPlayer() {
             
             return (
                <div key={idx} ref={diff === 0 ? miniActiveLyricRef : null} className={`absolute left-0 w-full text-left pr-2 no-select-text font-extrabold drop-shadow-xl leading-snug transition-all duration-[1500ms] ease-[cubic-bezier(0.25,1,0.5,1)] ${getLineFontSize()}`} style={{ transform, opacity: op, color: 'white', zIndex: diff === 0 ? 10 : 1, transformOrigin: 'left center' }}>
-                 {isMiniWordSyncEnabled ? (line.words || "♪").split(' ').map((word: string, wIdx: number, arr: any[]) => <span key={wIdx} className="lyric-word-sync inline">{word}{wIdx < arr.length - 1 ? ' ' : ''}</span>) : (line.words || "♪")}
+                 {isMiniWordSyncEnabled ? (line.words || "♪").split(' ').map((word: string, wIdx: number, arr: any[]) => <span key={wIdx} className="lyric-word-sync inline-block">{word}{wIdx < arr.length - 1 ? '\u00A0' : ''}</span>) : (line.words || "♪")}
                </div>
             );
          })}
@@ -1521,7 +1521,7 @@ export default function MiniPlayer() {
 
       return (
         <p key={idx} ref={isActive ? (isLyricsFullScreen ? fullActiveLyricRef : activeLyricRef) : null} onClick={() => { if (syncType === "LINE_SYNCED" && !isVideoMode) handleLyricClick(line.time); }} className={`cursor-pointer transition-all duration-[800ms] ease-out origin-left no-select-text transform ${isActive ? activeClasses : isPast ? pastClasses : futureClasses}`}>
-           {isWordSyncEnabled ? (line.words || "♪").split(' ').map((word: string, wIdx: number, arr: any[]) => <span key={wIdx} className={isActive ? "lyric-word-sync inline" : "inline"}>{word}{wIdx < arr.length - 1 ? ' ' : ''}</span>) : (line.words || "♪")}
+           {isWordSyncEnabled ? (line.words || "♪").split(' ').map((word: string, wIdx: number, arr: any[]) => <span key={wIdx} className={isActive ? "lyric-word-sync inline-block" : "inline-block"}>{word}{wIdx < arr.length - 1 ? '\u00A0' : ''}</span>) : (line.words || "♪")}
         </p>
       )
     });
@@ -1544,7 +1544,7 @@ export default function MiniPlayer() {
           )}
 
           <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0" onClick={() => { 
-             if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]); return; }
+             if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]); return; }
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
           }}>
             <div className="w-[44px] h-[44px] flex-shrink-0 rounded-[4px] bg-[#282828] overflow-hidden"><img draggable={false} src={getImageUrl(track) || "https://via.placeholder.com/150"} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" /></div>
@@ -1582,7 +1582,8 @@ export default function MiniPlayer() {
         .no-select { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; pointer-events: none; }
         .no-select-text { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
         .queue-item { transform-origin: center; will-change: transform; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); }
-        .lyric-word-sync { background: linear-gradient(to right, #ffffff calc(var(--p, 0%) - 15%), rgba(255,255,255,0.2) var(--p, 0%)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; color: transparent; will-change: background; }
+        /* HW Acceleration added here to fix word-sync flicker */
+        .lyric-word-sync { background: linear-gradient(to right, #ffffff calc(var(--p, 0%) - 15%), rgba(255,255,255,0.2) var(--p, 0%)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; color: transparent; will-change: background; transform: translateZ(0); }
       `}} />
 
       <audio 
@@ -1741,11 +1742,11 @@ export default function MiniPlayer() {
         </div>
 
         {/* --- SETTINGS MENU --- */}
-        <div className={`absolute inset-0 z-[100000] bg-black/60 backdrop-blur-sm transition-opacity duration-300 pointer-events-auto flex flex-col justify-end ${showSettingsMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => window.history.back()}>
+        <div className={`absolute inset-0 z-[100000] bg-black/60 backdrop-blur-sm transition-opacity duration-300 pointer-events-auto flex flex-col justify-end ${showSettingsMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setShowSettingsMenu(false)}>
           <div className={`w-full bg-[#121212] rounded-t-[28px] transition-transform duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] shadow-2xl border-t border-white/10 flex flex-col max-h-[85vh] ${showSettingsMenu ? 'translate-y-0' : 'translate-y-full'}`} onClick={e => e.stopPropagation()}>
              <div className="flex items-center justify-between px-6 pt-6 pb-4 flex-shrink-0">
                  <h3 className="text-white font-extrabold text-[22px] flex items-center gap-2"><Settings2 size={24}/> Settings</h3>
-                 <button onClick={() => window.history.back()} className="text-white/60 p-2 hover:text-white bg-white/5 rounded-full"><ChevronDown size={20} /></button>
+                 <button onClick={() => setShowSettingsMenu(false)} className="text-white/60 p-2 hover:text-white bg-white/5 rounded-full"><ChevronDown size={20} /></button>
              </div>
 
              <div className="px-6 pb-[max(2.5rem,env(safe-area-inset-bottom))] flex flex-col gap-6 overflow-y-auto scrollbar-hide flex-1">
@@ -1766,7 +1767,7 @@ export default function MiniPlayer() {
                    <span className="text-white/60 text-[11px] font-bold uppercase tracking-wider pl-1">Audio Quality</span>
                    <div className="flex bg-[#1e1e1e] rounded-[16px] overflow-x-auto hide-scrollbar p-2 gap-2">
                       {['16', '64', '128', '320'].map((q) => (
-                         <button key={q} onClick={() => { setSelectedQuality(q); localStorage.setItem('audio_quality', q); window.history.back(); restoreTimeRef.current = audioRef.current?.currentTime || 0; }} className={`flex-shrink-0 px-4 py-2 rounded-xl text-[14px] font-bold transition-all ${selectedQuality === q ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>
+                         <button key={q} onClick={() => { setSelectedQuality(q); localStorage.setItem('audio_quality', q); restoreTimeRef.current = audioRef.current?.currentTime || 0; setShowSettingsMenu(false); }} className={`flex-shrink-0 px-4 py-2 rounded-xl text-[14px] font-bold transition-all ${selectedQuality === q ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>
                             {QUALITY_MAP[q] || `${q} kbps`}
                          </button>
                       ))}
@@ -1776,8 +1777,8 @@ export default function MiniPlayer() {
                 <div className="flex flex-col gap-3">
                    <span className="text-white/60 text-[11px] font-bold uppercase tracking-wider pl-1">Lyrics Server</span>
                    <div className="flex bg-[#1e1e1e] rounded-[16px] overflow-hidden p-2 gap-2">
-                      <button onClick={() => { setLyricsServer('Spotify'); localStorage.setItem('lyrics_server', 'Spotify'); }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${lyricsServer === 'Spotify' ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>Spotify</button>
-                      <button onClick={() => { setLyricsServer('Gaana'); localStorage.setItem('lyrics_server', 'Gaana'); }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${lyricsServer === 'Gaana' ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>Gaana</button>
+                      <button onClick={() => { setLyricsServer('Spotify'); localStorage.setItem('lyrics_server', 'Spotify'); setShowSettingsMenu(false); }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${lyricsServer === 'Spotify' ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>Spotify</button>
+                      <button onClick={() => { setLyricsServer('Gaana'); localStorage.setItem('lyrics_server', 'Gaana'); setShowSettingsMenu(false); }} className={`flex-1 px-4 py-3 rounded-xl text-[14px] font-bold transition-all ${lyricsServer === 'Gaana' ? 'bg-[#1db954] text-black shadow-md' : 'bg-white/5 text-white hover:bg-white/10'}`}>Gaana</button>
                    </div>
                 </div>
 
@@ -1902,18 +1903,18 @@ export default function MiniPlayer() {
 
         {/* TIMER MENU OVERLAY */}
         {showTimerMenu && (
-          <div className="absolute inset-0 z-[100010] bg-black/60 flex items-center justify-center p-6 backdrop-blur-sm pointer-events-auto" onClick={() => window.history.back()}>
+          <div className="absolute inset-0 z-[100010] bg-black/60 flex items-center justify-center p-6 backdrop-blur-sm pointer-events-auto" onClick={() => setShowTimerMenu(false)}>
              <div className="w-full max-w-sm bg-[#282828] rounded-2xl p-6 shadow-2xl flex flex-col gap-2 animate-in fade-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
-                <h4 className="text-white font-bold text-lg mb-2 flex justify-between items-center">Sleep Timer <button onClick={() => window.history.back()} className="text-white/50 hover:text-white"><X size={20}/></button></h4>
+                <h4 className="text-white font-bold text-lg mb-2 flex justify-between items-center">Sleep Timer <button onClick={() => setShowTimerMenu(false)} className="text-white/50 hover:text-white"><X size={20}/></button></h4>
                 {[5, 15, 30, 45, 60].map(mins => (
-                   <button key={mins} onClick={() => { setSleepTimer(mins); window.history.back(); }} className={`py-3 px-4 rounded-lg flex justify-between items-center transition-colors ${sleepTimer === mins ? 'bg-[#1db954]/20 text-[#1db954]' : 'bg-white/5 text-white hover:bg-white/10'}`}>
+                   <button key={mins} onClick={() => { setSleepTimer(mins); setShowTimerMenu(false); }} className={`py-3 px-4 rounded-lg flex justify-between items-center transition-colors ${sleepTimer === mins ? 'bg-[#1db954]/20 text-[#1db954]' : 'bg-white/5 text-white hover:bg-white/10'}`}>
                       <span className="font-medium">{mins} minutes</span>{sleepTimer === mins && <Check size={18} />}
                    </button>
                 ))}
-                <button onClick={() => { setSleepTimer('end'); window.history.back(); }} className={`py-3 px-4 rounded-lg flex justify-between items-center transition-colors ${sleepTimer === 'end' ? 'bg-[#1db954]/20 text-[#1db954]' : 'bg-white/5 text-white hover:bg-white/10'}`}>
+                <button onClick={() => { setSleepTimer('end'); setShowTimerMenu(false); }} className={`py-3 px-4 rounded-lg flex justify-between items-center transition-colors ${sleepTimer === 'end' ? 'bg-[#1db954]/20 text-[#1db954]' : 'bg-white/5 text-white hover:bg-white/10'}`}>
                    <span className="font-medium">End of track</span>{sleepTimer === 'end' && <Check size={18} />}
                 </button>
-                <button onClick={() => { setSleepTimer(null); window.history.back(); }} className="py-3 px-4 rounded-lg text-white/50 hover:bg-white/5 text-left mt-2 border border-white/10 transition-colors">
+                <button onClick={() => { setSleepTimer(null); setShowTimerMenu(false); }} className="py-3 px-4 rounded-lg text-white/50 hover:bg-white/5 text-left mt-2 border border-white/10 transition-colors">
                    Turn off timer
                 </button>
              </div>
@@ -1923,7 +1924,7 @@ export default function MiniPlayer() {
         {/* QUEUE OVERLAY */}
         <div className={`absolute inset-0 z-[60] bg-[#121212] transition-transform duration-300 flex flex-col pointer-events-auto ${showQueue ? 'translate-y-0' : 'translate-y-full'}`}>
           <div className="flex items-center justify-between px-5 pt-[max(1.5rem,env(safe-area-inset-top))] pb-4 sticky top-0 bg-[#121212] z-20 shadow-md no-select-text">
-            <button onClick={() => { setIsQueueEditMode(false); window.history.back(); }} className="p-2 -ml-2 text-white/80 active:opacity-50"><ChevronDown size={28} /></button>
+            <button onClick={() => { setIsQueueEditMode(false); setShowQueue(false); }} className="p-2 -ml-2 text-white/80 active:opacity-50"><ChevronDown size={28} /></button>
             <span className="text-[15px] font-bold text-white">Queue</span>
             {isQueueEditMode ? (
                <button onClick={() => { setIsQueueEditMode(false); setSelectedQueueItems([]); }} className="text-[14px] font-bold text-[#1db954] active:opacity-50">Done</button>
