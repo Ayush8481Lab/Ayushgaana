@@ -1,4 +1,5 @@
 
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -12,17 +13,6 @@ import {
   MoreHorizontal, Shuffle, Repeat, Heart, ListMusic, 
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles
 } from "lucide-react";
-
-// --- VERCEL PROTECTION BYPASS TOKENS ---
-const BYPASS_TOKENS = {
-  ak47: "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m",
-  server: "gb4zF8QgMXvTlMRTXegMYcHu8HBOrXHx",
-  ayushcom: "FzedpTLNTPYU6ZfOw21yrJVMSvQ29QPM",
-  vid: "waykQvbdHBtNwKnJsp4o5TmVq5tTDLXy",
-  gaana: "GWTCZjy0M7zeULiVjgrbbEEfpMtCQb33",
-  gamma: "lDnXUsJUPeBAMxvwMTPlkc90fe6kIXVL",
-  lyr: "4pQMUVC2Hq0nSKI27JaOb6SYOh9gJU2k"
-};
 
 // --- 30-MINUTE INDEXEDDB CACHE ENGINE (Audio & APIs) ---
 const DB_NAME = "GrooveCacheDB";
@@ -97,13 +87,9 @@ const getCachedAuth = () => {
 
 const fetchNewAuthToken = async () => {
   if (ongoingAuthPromise) return ongoingAuthPromise;
-  if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
   ongoingAuthPromise = (async () => {
     try {
-      const response = await fetch('https://serverayush.vercel.app/api/auth', { 
-          referrerPolicy: "no-referrer",
-          headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.server }
-      });
+      const response = await fetch('https://serverayush.vercel.app/api/auth', { referrerPolicy: "no-referrer" });
       const data = await response.json();
       if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
       return data;
@@ -339,7 +325,7 @@ const SongDnaCard = React.memo(({ artist, closePlayer }: { artist: any, closePla
     const artistImg = getImageUrl(artist);
     const fallbackColor = getArtistColor(artist.name || "Unknown");
     
-    // Format roles: lowercase joined, with only first letter capitalized
+    // Format roles: lowercase joined, with only first letter capitalized (e.g. "Singer, composer, cast")
     const formatRoles = (roles: string[]) => {
         if (!roles || roles.length === 0) return "";
         const joined = roles.join(', ').toLowerCase();
@@ -655,12 +641,7 @@ export default function MiniPlayer() {
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      if (typeof navigator !== 'undefined' && !navigator.onLine) return null;
-
-      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { 
-          referrerPolicy: "no-referrer",
-          headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.vid }
-      });
+      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       const data = await fallbackRes.json();
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
@@ -684,7 +665,7 @@ export default function MiniPlayer() {
 
 
   // ----------------------------------------------------------------------
-  // --- STRICT ORDER API WORKFLOW (ABORTABLE, CONCURRENT & DDOS SAFE)
+  // --- STRICT ORDER API WORKFLOW (ABORTABLE & DDOS SAFE)
   // ----------------------------------------------------------------------
   useEffect(() => {
     if (!currentSong) return;
@@ -720,6 +701,7 @@ export default function MiniPlayer() {
     currentTrackRef.current = currentSong; maxListenRef.current = 0;
     
     // Reset UI State instantly
+    setYtVideoId(currentSong.ytVideoId || null);
     setSpotifyId(null); setSpotifyUrl(null); setLyrics([]); setSyncType(null); setCanvasData(null);
     setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
     setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
@@ -727,112 +709,83 @@ export default function MiniPlayer() {
     setStreamBaseUrl(null);
     setBuffered(0);
 
-    // CONTINUOUS VIDEO MODE HANDLING
-    if (isVideoModeRef.current) {
-        setYtVideoId(null);
-        setIsVideoLoading(true);
-        const tTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
-        const tArtists = decodeEntities(getArtistsText(currentSong));
-        prefetchVideoId(tTitle, tArtists).then((vId) => {
-             if (isCurrent && !signal.aborted) {
-                 if (vId) setYtVideoId(vId);
-                 else setIsVideoMode(false); // fallback to audio
-                 setIsVideoLoading(false);
-             }
-        });
-    } else {
-        setYtVideoId(currentSong.ytVideoId || null);
-    }
-
     // ==========================================
-    // PRIORITY 1: INSTANT STREAM
+    // PRIORITY 1: INSTANT STREAM (No Debounce)
     // ==========================================
     const fetchStream = async () => {
         try {
             let streamJson = await getCache(`gaana_stream_${trackId}`);
-            if (!streamJson && typeof navigator !== 'undefined' && navigator.onLine) {
-                const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { 
-                    referrerPolicy: "no-referrer", signal,
-                    headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.gaana }
-                });
+            if (!streamJson) {
+                const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
                 if (streamRes.ok) {
                     streamJson = await streamRes.json();
                     if (streamJson?.data) await setCache(`gaana_stream_${trackId}`, streamJson);
+                    else await setCache(`gaana_stream_${trackId}`, { notFound: true });
                 }
             }
-            if (!isCurrent || signal.aborted) return;
+            if (!isCurrent || signal.aborted || streamJson?.notFound) return;
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
         } catch (e: any) { /* Aborted */ }
     };
+    fetchStream();
 
     // ==========================================
-    // PRIORITY 2: HEAVY DATA (Simultaneous Execution)
+    // PRIORITY 2: HEAVY DATA (Debounced 500ms)
     // ==========================================
     const executeHeavyFetches = async () => {
         if (!isCurrent || signal.aborted) return;
         setLoading(true);
 
-        const fetches =[];
-        let sDetails: any = null;
-        let skipSpotifyLyrics = false;
-
-        fetches.push((async () => {
-            try {
-                let infoJson = await getCache(`gaana_info_${trackId}`);
-                if (!infoJson && typeof navigator !== 'undefined' && navigator.onLine) {
-                    const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { 
-                        referrerPolicy: "no-referrer", signal,
-                        headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.gaana }
-                    });
-                    if (infoRes.ok) {
-                        infoJson = await infoRes.json();
-                        if (infoJson?.data) await setCache(`gaana_info_${trackId}`, infoJson);
-                    }
+        let sDetails = null;
+        try {
+            let infoJson = await getCache(`gaana_info_${trackId}`);
+            if (!infoJson) {
+                const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                if (infoRes.ok) {
+                    infoJson = await infoRes.json();
+                    if (infoJson?.data) await setCache(`gaana_info_${trackId}`, infoJson);
+                    else await setCache(`gaana_info_${trackId}`, { notFound: true });
                 }
-                if (infoJson?.data && isCurrent && !signal.aborted) { 
-                    sDetails = infoJson.data; 
-                    setSongDetails(infoJson.data); 
-                }
-            } catch (e: any) { }
-        })());
-
-        const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
-        if (currentLyricsServer === "Gaana") {
-            fetches.push((async () => {
-                try {
-                    let lrcJson = await getCache(`gaana_lrc_${trackId}`);
-                    if (!lrcJson && typeof navigator !== 'undefined' && navigator.onLine) {
-                        const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { 
-                            referrerPolicy: "no-referrer", signal,
-                            headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.gaana }
-                        });
-                        if (lrcRes.ok) {
-                            lrcJson = await lrcRes.json();
-                            if (lrcJson?.data?.lyrics) await setCache(`gaana_lrc_${trackId}`, lrcJson);
-                        }
-                    }
-                    if (lrcJson?.data?.lyrics && isCurrent && !signal.aborted) {
-                        const parsed: any[] =[];
-                        lrcJson.data.lyrics.split('\n').forEach((line: string) => {
-                            const match = line.match(/\[(\d+):(\d+\.\d+)\](.*)/);
-                            if (match && match[3].trim()) parsed.push({ time: parseInt(match[1]) * 60 + parseFloat(match[2]), words: match[3].trim() });
-                        });
-                        if (parsed.length > 0) {
-                            setLyrics(parsed);
-                            setSyncType("LINE_SYNCED");
-                            skipSpotifyLyrics = true;
-                        }
-                    }
-                } catch(e: any) { }
-            })());
-        }
-
-        await Promise.all(fetches);
+            }
+            if (infoJson?.data && isCurrent && !signal.aborted) { 
+                sDetails = infoJson.data; 
+                setSongDetails(infoJson.data); 
+            }
+        } catch (e: any) { }
 
         if (isCurrent && !signal.aborted) setLoading(false);
 
-        // TRIGGER SPOTIFY FALLBACK CONCURRENTLY
+        // PRIORITY 3: LYRICS
+        let skipSpotifyLyrics = false;
+        const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
+        if (currentLyricsServer === "Gaana" && !signal.aborted) {
+            try {
+                let lrcJson = await getCache(`gaana_lrc_${trackId}`);
+                if (!lrcJson) {
+                    const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                    if (lrcRes.ok) {
+                        lrcJson = await lrcRes.json();
+                        if (lrcJson?.data) await setCache(`gaana_lrc_${trackId}`, lrcJson);
+                        else await setCache(`gaana_lrc_${trackId}`, { notFound: true });
+                    }
+                }
+                if (lrcJson?.data?.lyrics && isCurrent && !signal.aborted) {
+                    const parsed: any[] =[];
+                    lrcJson.data.lyrics.split('\n').forEach((line: string) => {
+                        const match = line.match(/\[(\d+):(\d+\.\d+)\](.*)/);
+                        if (match && match[3].trim()) parsed.push({ time: parseInt(match[1]) * 60 + parseFloat(match[2]), words: match[3].trim() });
+                    });
+                    if (parsed.length > 0) {
+                        setLyrics(parsed);
+                        setSyncType("LINE_SYNCED");
+                        skipSpotifyLyrics = true;
+                    }
+                }
+            } catch(e: any) { }
+        }
+
+        // TRIGGER SPOTIFY FALLBACK (Handles Match, Lyrics, Canvas)
         if (!signal.aborted) {
             triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
         }
@@ -846,62 +799,54 @@ export default function MiniPlayer() {
            if (!isCurrent || signal.aborted) return;
            setSpotifyId(sId); setSpotifyUrl(sUrl);
            
-           const extraFetches =[];
-
            // FETCH LYRICS
            if (isLyricsEnabledRef.current && !skipLyrics && !signal.aborted) {
-               extraFetches.push((async () => {
-                  let lyricsJson = await getCache(`lyrics_${sId}`);
-                  if (!lyricsJson && typeof navigator !== 'undefined' && navigator.onLine) {
-                      try {
-                          const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { 
-                              referrerPolicy: "no-referrer", signal,
-                              headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.lyr }
-                          });
-                          if (lyricsRes.ok) { 
-                              lyricsJson = await lyricsRes.json(); 
-                              if (lyricsJson.lines) await setCache(`lyrics_${sId}`, lyricsJson); 
-                          }
-                      } catch (e: any) { }
-                  }
-                  if (isCurrent && lyricsJson && !lyricsJson.notFound && lyricsJson.lines && !signal.aborted) { 
-                      setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
-                      setSyncType(lyricsJson.syncType);
-                  }
-               })());
+              let lyricsJson = await getCache(`lyrics_${sId}`);
+              if (!lyricsJson) {
+                  try {
+                      const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { referrerPolicy: "no-referrer", signal });
+                      if (lyricsRes.ok) { 
+                          lyricsJson = await lyricsRes.json(); 
+                          await setCache(`lyrics_${sId}`, lyricsJson); 
+                      } else {
+                          await setCache(`lyrics_${sId}`, { notFound: true });
+                      }
+                  } catch (e: any) { }
+              }
+              if (isCurrent && lyricsJson && !lyricsJson.notFound && lyricsJson.lines && !signal.aborted) { 
+                  setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
+                  setSyncType(lyricsJson.syncType);
+              }
            }
+
+           // PRIORITY 4: EXPLICIT 0.8 SECOND DELAY BEFORE CANVAS
+           await new Promise(resolve => setTimeout(resolve, 800));
+           if (!isCurrent || signal.aborted) return;
 
            // FETCH CANVAS
            if (isCanvasEnabledRef.current && !signal.aborted) {
-               extraFetches.push((async () => {
-                  let canvasJson = await getCache(`canvas_${sId}`);
-                  if (!canvasJson && typeof navigator !== 'undefined' && navigator.onLine) {
-                     try {
-                         const res = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { 
-                             referrerPolicy: "no-referrer", signal,
-                             headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.gamma }
-                         });
-                         if (res.ok) { 
-                             canvasJson = await res.json(); 
-                             if (canvasJson.canvasesList?.length > 0) await setCache(`canvas_${sId}`, canvasJson); 
-                         }
-                     } catch (e: any) { }
-                  }
-                  if (isCurrent && canvasJson && !canvasJson.notFound && canvasJson.canvasesList?.length > 0 && !signal.aborted) {
-                      setCanvasData(canvasJson.canvasesList[0]);
-                  }
-               })());
+              let canvasJson = await getCache(`canvas_${sId}`);
+              if (!canvasJson) {
+                 try {
+                     const res = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
+                     if (res.ok) { 
+                         canvasJson = await res.json(); 
+                         await setCache(`canvas_${sId}`, canvasJson); 
+                     } else {
+                         await setCache(`canvas_${sId}`, { notFound: true });
+                     }
+                 } catch (e: any) { }
+              }
+              if (isCurrent && canvasJson && !canvasJson.notFound && canvasJson.canvasesList?.length > 0 && !signal.aborted) {
+                  setCanvasData(canvasJson.canvasesList[0]);
+              }
            }
-
-           await Promise.all(extraFetches);
        };
 
-       if (cachedMatch && !cachedMatch.notFound) { 
-           await execExtras(cachedMatch.id, cachedMatch.url); 
+       if (cachedMatch) { 
+           if (!cachedMatch.notFound) await execExtras(cachedMatch.id, cachedMatch.url); 
            return; 
        }
-
-       if (typeof navigator !== 'undefined' && !navigator.onLine) return;
 
        const searchTitle = decodeEntities(songData.track_title || songData.title || songData.name || "Unknown");
        const searchArtistsFull = decodeEntities(getArtistsText(songData));
@@ -913,10 +858,7 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
-               const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { 
-                   referrerPolicy: "no-referrer", signal,
-                   headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.ak47 }
-               });
+               const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
                if (authRes.ok) {
                    const authJson = await authRes.json();
                    if (authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
@@ -938,15 +880,12 @@ export default function MiniPlayer() {
 
        if (matchFound || signal.aborted) return;
 
+       // Fallback to RapidAPI only if AK47 fails
        let matchData = null;
        const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&offset=0&limit=25&numberOfTopResults=5`;
        
        try {
-           const response = await fetch(searchUrl, { 
-               method: 'GET', 
-               headers: { 'x-rapidapi-key': RAPID_KEYS[rapidKeyIdxRef.current], 'x-rapidapi-host': RAPID_API_HOST }, 
-               referrerPolicy: "no-referrer", signal 
-           });
+           const response = await fetch(searchUrl, { method: 'GET', headers: { 'x-rapidapi-key': RAPID_KEYS[rapidKeyIdxRef.current], 'x-rapidapi-host': RAPID_API_HOST }, referrerPolicy: "no-referrer", signal });
            if (response.ok) { 
                matchData = await response.json(); 
            } else if ([429, 401, 403].includes(response.status)) {
@@ -964,15 +903,19 @@ export default function MiniPlayer() {
              const newUrl = `https://open.spotify.com/track/${match.id}`;
              await setCache(cacheKey, { id: match.id, url: newUrl });
              await execExtras(match.id, newUrl);
+          } else {
+             await setCache(cacheKey, { notFound: true });
           }
+       } else {
+          await setCache(cacheKey, { notFound: true });
        }
     };
 
-    fetchStream();
-    executeHeavyFetches();
+    const debounceTimer = setTimeout(executeHeavyFetches, 500);
 
     return () => { 
         isCurrent = false; 
+        clearTimeout(debounceTimer); 
         abortController.abort(); 
     };
   },[currentSong]);
@@ -1541,10 +1484,7 @@ export default function MiniPlayer() {
       try {
         const targetVid = ytVideoId || await prefetchVideoId(displayTitle, displayArtists);
         if (!targetVid) throw new Error("Video not found");
-        const res = await fetch(`https://serverayush.vercel.app/api/cnd?id=${targetVid}&v=${serverNum}`, { 
-            referrerPolicy: "no-referrer",
-            headers: { 'x-vercel-protection-bypass': BYPASS_TOKENS.server }
-        });
+        const res = await fetch(`https://serverayush.vercel.app/api/cnd?id=${targetVid}&v=${serverNum}`, { referrerPolicy: "no-referrer" });
         const data = await res.json();
         const mixed = data.VideoWithAudio ||[];
         const formatOptions = mixed.map((v:any) => ({ ...v, label: `${v.quality} Video`, isMuxed: true }));
@@ -1588,7 +1528,7 @@ export default function MiniPlayer() {
     addRole(songDetails.lyricist, "Lyricist");
     addRole(songDetails.cast, "Cast");
     return Array.from(map.values());
-  },[songDetails]);
+  }, [songDetails]);
 
   // MEMOIZED FLICKER-FREE LYRICS ABOVE TITLE
   const RenderedMiniLyrics = useMemo(() => {
@@ -1741,7 +1681,7 @@ export default function MiniPlayer() {
                 </div>
               ) : isVideoMode && ytVideoId ? (
                 <div className="w-full aspect-video max-w-[600px] max-h-[50vh] relative bg-black shadow-[0_15px_40px_rgba(0,0,0,0.5)] rounded-[12px] transition-all duration-500 overflow-hidden mx-auto pointer-events-auto" style={{ transform: 'translateZ(0)' }}>
-                  <iframe referrerPolicy="no-referrer" ref={videoIframeRef} src={`https://ayushcom.vercel.app/?vid=${ytVideoId}&t=${iframeInitialTimeRef.current}&x-vercel-protection-bypass=${BYPASS_TOKENS.ayushcom}`} style={{ width: "100%", height: "100%", border: "none", pointerEvents: 'auto', borderRadius: '12px' }} allow="autoplay; fullscreen; picture-in-picture" />
+                  <iframe referrerPolicy="no-referrer" ref={videoIframeRef} src={`https://ayushcom.vercel.app/?vid=${ytVideoId}&t=${iframeInitialTimeRef.current}`} style={{ width: "100%", height: "100%", border: "none", pointerEvents: 'auto', borderRadius: '12px' }} allow="autoplay; fullscreen; picture-in-picture" />
                 </div>
               ) : (
                 <div className={`relative bg-[#282828] rounded-[8px] shadow-[0_15px_40px_rgba(0,0,0,0.5)] overflow-hidden transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${isCanvasLoaded && isCanvasEnabled ? 'opacity-0 scale-75 pointer-events-none hidden' : 'opacity-100 scale-100 block'}`} style={{ width: '100%', aspectRatio: '1/1', maxWidth: '380px', maxHeight: '50vh' }}>
