@@ -20,7 +20,7 @@ const BYPASS_TOKENS = {
   ayushcom: "FzedpTLNTPYU6ZfOw21yrJVMSvQ29QPM",
   vid: "waykQvbdHBtNwKnJsp4o5TmVq5tTDLXy",
   gaana: "GWTCZjy0M7zeULiVjgrbbEEfpMtCQb33",
-  gamma: "GWTCZjy0M7zeULiVjgrbbEEfpMtCQb33",
+  gamma: "lDnXUsJUPeBAMxvwMTPlkc90fe6kIXVL",
   lyr: "4pQMUVC2Hq0nSKI27JaOb6SYOh9gJU2k"
 };
 
