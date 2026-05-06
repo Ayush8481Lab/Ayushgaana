@@ -30,53 +30,73 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
-// --- IRONCLAD GLOBAL FETCH LOCK (Guarantees exactly 1s gap AFTER response) ---
+// --- GLOBAL STRICT RATE LIMITER ---
 declare global {
   interface Window {
-    __API_QUEUE_PROMISE__?: Promise<any>;
+    __GAANA_API_QUEUE__?: { url: string; resolve: (data: any) => void }[];
+    __GAANA_API_PROCESSING__?: boolean;
+    __GAANA_API_LAST_TIME__?: number;
   }
 }
 
-const fetchStrictly = (url: string): Promise<any> => {
-  // 1. Check cache first to completely avoid network calls if data is fresh
-  try {
-    const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
-    if (cachedStr) {
-      const cached = JSON.parse(cachedStr);
-      if (Date.now() - cached.timestamp < CACHE_DURATION) return Promise.resolve(cached.data);
-    }
-  } catch (e) {}
-
-  if (typeof window === 'undefined') return Promise.resolve(null);
-
-  // 2. Queue system ensures requests never run parallel, and 1-second rule is strictly followed
-  if (!window.__API_QUEUE_PROMISE__) {
-    window.__API_QUEUE_PROMISE__ = Promise.resolve();
-  }
-
-  const task = async () => {
-    try {
-      const res = await fetch(url);
-      let data = null;
-      if (res.ok || res.status === 202 || res.status === 200) {
-        data = await res.json();
-        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
-      }
-      
-      // STRICTLY WAIT 1 FULL SECOND AFTER RECEIVING THE RESPONSE
-      await new Promise(r => setTimeout(r, 1000));
-      return data;
-    } catch (e) {
-      await new Promise(r => setTimeout(r, 1000)); // Enforce wait even on failure to prevent spam
-      return null;
-    }
-  };
-
-  const newPromise = window.__API_QUEUE_PROMISE__.then(task);
-  window.__API_QUEUE_PROMISE__ = newPromise.catch(() => {});
-  return newPromise;
+const getGlobalQueue = () => {
+  if (typeof window === 'undefined') return[];
+  if (!window.__GAANA_API_QUEUE__) window.__GAANA_API_QUEUE__ =[];
+  return window.__GAANA_API_QUEUE__;
 };
 
+const processQueue = async () => {
+  if (typeof window === 'undefined' || window.__GAANA_API_PROCESSING__) return;
+  window.__GAANA_API_PROCESSING__ = true;
+
+  const queue = getGlobalQueue();
+
+  while (queue.length > 0) {
+    const now = Date.now();
+    const lastTime = window.__GAANA_API_LAST_TIME__ || 0;
+    const timeSinceLast = now - lastTime;
+    
+    // Fallback Strict Limiter (UI thread already handles standard delays now)
+    if (timeSinceLast < 1000) await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
+
+    if (queue.length === 0) break;
+    const { url, resolve } = queue.shift()!;
+    window.__GAANA_API_LAST_TIME__ = Date.now();
+
+    try {
+      const res = await fetch(url);
+      if (res.ok || res.status === 202 || res.status === 200) {
+        const data = await res.json();
+        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) { }
+        resolve(data);
+      } else {
+        resolve(null);
+      }
+    } catch (e) {
+      resolve(null);
+    }
+  }
+  window.__GAANA_API_PROCESSING__ = false;
+};
+
+const fetchWithCacheAndRateLimit = (url: string): Promise<any> => {
+  return new Promise((resolve) => {
+    try {
+      const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
+      if (cachedStr) {
+        const cached = JSON.parse(cachedStr);
+        if (Date.now() - cached.timestamp < CACHE_DURATION) return resolve(cached.data);
+      }
+    } catch (e) {}
+
+    if (typeof window !== 'undefined') {
+      getGlobalQueue().push({ url, resolve });
+      processQueue();
+    } else {
+      resolve(null);
+    }
+  });
+};
 
 // --- UTILS ---
 const getImageUrl = (item: any) => {
@@ -153,7 +173,7 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
   );
 };
 
-// --- YOUTUBE/SPOTIFY STYLE SKELETON ---
+// --- YOUTUBE/SPOTIFY STYLE SKELETON (Replaces all Circular Spinners) ---
 const SectionSkeleton = ({ isShowcase = false }: { isShowcase?: boolean }) => (
   <div className={`w-full animate-pulse ${isShowcase ? "mt-2 mb-10 px-4" : "mb-10"}`}>
     {isShowcase ? (
@@ -184,23 +204,23 @@ export default function Home() {
   const router = useRouter();
   
   const [isInitializing, setIsInitializing] = useState(true);
-  const[isChunkLoading, setIsChunkLoading] = useState(false);
-  const [sections, setSections] = useState<any[]>([]);
+  const [isChunkLoading, setIsChunkLoading] = useState(false);
+  const[sections, setSections] = useState<any[]>([]);
   
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
+  const lastLoadedLang = useRef<string | null>(null);
 
   const [viewAll, setViewAll] = useState<any | null>(null);
-  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
 
-  // --- STRICT ONE-BY-ONE FETCHER ---
+  // --- STRICT SEQUENTIAL FETCHER (Waits 1 sec AFTER each request is completed) ---
   const fetchNextChunk = async (chunkSize = 3) => {
     if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
-    
     isLoadingRef.current = true;
     setIsChunkLoading(true);
     
@@ -210,31 +230,31 @@ export default function Home() {
         if (idx >= SECTION_CONFIGS.length) break;
         
         const conf = SECTION_CONFIGS[idx];
-        let url = `${API_BASE}${conf.url.replace('{lang}', language || 'hindi')}`;
+        let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-        // Wait strictly for response AND the 1-sec gap
-        const data = await fetchStrictly(url);
+        // 1. AWAIT RESPONSE FOR EXACTLY ONE API CALL
+        const json = await fetchWithCacheAndRateLimit(url);
         
-        if (data) {
-           const items = data?.entities || data?.tracks || data ||[];
-           if (items.length > 0) {
-              // Push exactly ONE section to UI instantly
+        if (json) {
+           const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
+           if (data.length > 0) {
               setSections(prev => {
                   if (prev.some(s => s.key === conf.key)) return prev;
-                  const updated = [...prev, { ...conf, data: items }];
+                  const updated = [...prev, { ...conf, data }];
                   if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
                   return updated;
               });
            }
         }
 
+        // 2. INCREMENT INDEX
         nextIndexRef.current += 1;
         if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
 
-        // SHOW PAGE INSTANTLY: Stop initializing the moment the 1st section ("Top Picks") is completely processed 
-        if (nextIndexRef.current >= 1) {
-           setIsInitializing(false);
+        // 3. STRICTLY WAIT 1 SECOND BEFORE REQUESTING NEXT IN CHUNK (if not the absolute last section)
+        if (nextIndexRef.current < SECTION_CONFIGS.length) {
+          await new Promise(r => setTimeout(r, 1000));
         }
       }
     } catch (e) { /* Silent */ }
@@ -246,6 +266,8 @@ export default function Home() {
   // --- INITIAL MOUNT & STATE RESTORATION ---
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (lastLoadedLang.current === language) return; 
+    lastLoadedLang.current = language;
 
     const initLoad = async () => {
       const savedLang = sessionStorage.getItem('homeState_lang');
@@ -273,25 +295,23 @@ export default function Home() {
       sessionStorage.removeItem('homeState_viewAll');
       sessionStorage.removeItem('homeScrollY');
       sessionStorage.removeItem('viewAllScrollY');
-      sessionStorage.setItem('homeState_lang', language || 'hindi');
+      sessionStorage.setItem('homeState_lang', language);
       setSections([]);
       setViewAll(null);
       nextIndexRef.current = 0;
-      setIsInitializing(true);
-      
-      // Fire and forget - fetchNextChunk drops the skeleton internally as soon as the 1st chunk loads
-      fetchNextChunk(3); 
+      await fetchNextChunk(3); 
+      setIsInitializing(false);
     };
 
     initLoad();
-  }, [language]); // Removed the problematic strict mode trap
+  },[language]);
 
   // --- HARDWARE BACK BUTTON LOGIC ---
   useEffect(() => {
     const handlePopState = () => { if (viewAll) closeViewAll(true); };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  }, [viewAll]);
+  },[viewAll]);
 
   // Auto-Sliding Showcase
   useEffect(() => {
@@ -308,15 +328,14 @@ export default function Home() {
 
   // Lazy Load Remaining Sections on Scroll
   useEffect(() => {
-    // Removed `sections.length === 0` to prevent getting blocked if first API fails
-    if (viewAll || isInitializing) return; 
+    if (viewAll || isInitializing || sections.length === 0) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isLoadingRef.current) fetchNextChunk(3);
     }, { rootMargin: "600px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  }, [sections, viewAll, isInitializing, language]);
+  },[sections, viewAll, isInitializing, language]);
 
   // Infinite Scroll for "View All"
   useEffect(() => {
@@ -324,13 +343,13 @@ export default function Home() {
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
-        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language || 'hindi')}&limit=${viewAll.offset},40`;
+        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAll.offset},40`;
         
-        fetchStrictly(url).then(json => {
+        fetchWithCacheAndRateLimit(url).then(json => {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
            if (newItems.length > 0) {
              setViewAll((prev: any) => {
-                const updated = { ...prev, data: [...prev.data, ...newItems], offset: prev.offset + 40 };
+                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
              });
@@ -406,8 +425,8 @@ export default function Home() {
     }
   };
 
-  // --- INITIAL YOUTUBE STYLE SKELETON ---
-  if (isInitializing) {
+  // --- INITIAL YOUTUBE STYLE SKELETON (Replaces old blocky boxes) ---
+  if (isInitializing || sections.length === 0) {
     return (
       <div className="flex min-h-screen flex-col bg-[#0B1320] text-white pt-10 pb-28">
          <div className="px-4 mb-6 flex items-center justify-between">
@@ -418,6 +437,7 @@ export default function Home() {
          </div>
          <div className="mx-4 mb-8 bg-[#131D30] rounded-full h-[54px] animate-pulse"></div>
          <SectionSkeleton isShowcase={true} />
+         <SectionSkeleton />
          <SectionSkeleton />
       </div>
     );
@@ -437,6 +457,7 @@ export default function Home() {
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
            ))}
 
+           {/* View All YouTube Style Skeleton (Replaces Circular Spinner) */}
            {isFetchingViewAll && viewAll.hasMore && (
               <>
                  {[...Array(7)].map((_, i) => (
@@ -515,7 +536,7 @@ export default function Home() {
         );
       })}
 
-      {/* Infinite Scroll Anchor & Skeleton Buffer */}
+      {/* Infinite Scroll Anchor & Skeleton Layout (Replaces Circular Spinner) */}
       {nextIndexRef.current < SECTION_CONFIGS.length && (
          <>
             <div ref={observerRef} className="w-full h-1" />
@@ -524,4 +545,4 @@ export default function Home() {
       )}
     </main>
   );
-}
+    }
