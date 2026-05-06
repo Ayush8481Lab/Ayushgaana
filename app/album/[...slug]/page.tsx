@@ -73,6 +73,19 @@ const getArtistImageUrl = (id: string | number) => {
   return `https://a10.gaanacdn.com/images/artists/${last2}/${strId}/crop_175x175_${strId}.jpg`;
 };
 
+const formatDuration = (seconds: number) => {
+  if (!seconds || isNaN(seconds)) return "0:00";
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s < 10 ? "0" : ""}${s}`;
+};
+
+const formatDate = (dateString: string) => {
+  if (!dateString) return "";
+  const date = new Date(dateString);
+  return date.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+};
+
 // --- COMPONENTS ---
 const PingPongMarquee = ({ text, isPlaying, isSub }: { text: string, isPlaying?: boolean, isSub?: boolean }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -120,7 +133,7 @@ const PlayingVisualizer = () => (
   </div>
 );
 
-const PlaylistSkeleton = () => (
+const AlbumSkeleton = () => (
   <div className="min-h-screen bg-[#0B1320] p-6 md:p-8 pt-24 select-none">
     <style dangerouslySetInnerHTML={{__html:`
       @keyframes wave { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
@@ -143,13 +156,13 @@ const PlaylistSkeleton = () => (
   </div>
 );
 
-function PlaylistContent() {
+function AlbumContent() {
   const pathname = usePathname();
   const router = useRouter();
   
   const { currentSong, setCurrentSong, setIsPlaying, setQueue, setPlayContext, likedPlaylists, toggleLikePlaylist } = useAppContext() as any;
   
-  const [playlist, setPlaylist] = useState<any>(null);
+  const [album, setAlbum] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const[headerOpacity, setHeaderOpacity] = useState(0);
   const [showStickyPlay, setShowStickyPlay] = useState(false);
@@ -159,7 +172,7 @@ function PlaylistContent() {
     return segments[segments.length - 1] || "";
   }, [pathname]);
 
-  const isPlaylistLiked = playlist?.seokey ? likedPlaylists.some((p: any) => p?.seokey === playlist.seokey) : false;
+  const isAlbumLiked = album?.seokey ? likedPlaylists.some((p: any) => p?.seokey === album.seokey) : false;
 
   useEffect(() => {
     let ticking = false;
@@ -178,20 +191,21 @@ function PlaylistContent() {
     return () => window.removeEventListener("scroll", handleScroll);
   },[]);
 
+  // Fetch Gaana Album API
   useEffect(() => {
     if (!seokey) return;
 
-    const fetchPlaylist = async () => {
+    const fetchAlbum = async () => {
       setLoading(true);
       const url = `https://gaanaayush.vercel.app/api/albums/${seokey}`;
       
       const json = await fetchStrictly(url);
-      const pData = json?.data?.data?.playlist || json?.data?.playlist || json?.playlist;
+      const aData = json?.data;
       
-      if (pData && pData.tracks) {
-        const tracks = pData.tracks ||[];
+      if (aData && aData.tracks) {
+        const tracks = aData.tracks ||[];
         
-        // 1. Process Artists Analytics
+        // Process All Distinct Artists for Bottom Banner
         const artistFreq: Record<string, number> = {};
         const artistMap: Record<string, any> = {};
         
@@ -206,23 +220,29 @@ function PlaylistContent() {
               artistFreq[id] = (artistFreq[id] || 0) + 1;
               if(!artistMap[id]) artistMap[id] = { id, name: names[i] || "Unknown", seokey: seokeys[i] || id };
             });
-          } else if (t.artist && Array.isArray(t.artist)) {
-            t.artist.forEach((a: any) => {
-              const id = a.artist_id || a.id;
-              if(!id) return;
-              artistFreq[id] = (artistFreq[id] || 0) + 1;
-              if(!artistMap[id]) artistMap[id] = { id, name: a.name, seokey: a.seokey };
-            });
           }
         });
 
-        const sortedArtists = Object.values(artistMap).sort((a: any, b: any) => artistFreq[b.id] - artistFreq[a.id]);
-        
-        // 2. Resolve Banner URL replacing 80x80 to 480x480
-        let bannerImage = pData.artworkUrl || (tracks[0] ? (tracks[0].artworkUrl || tracks[0].artwork) : "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg");
+        // Fallback to album level artists if tracks didn't yield any
+        if (Object.keys(artistMap).length === 0 && aData.artist_ids) {
+            const ids = String(aData.artist_ids).split(',').map((s: string) => s.trim());
+            const names = (aData.artists || "").split(',').map((s: string) => s.trim());
+            const seokeys = (aData.artist_seokeys || "").split(',').map((s: string) => s.trim());
+            ids.forEach((id: string, i: number) => {
+              if(!id) return;
+              artistFreq[id] = 1;
+              if(!artistMap[id]) artistMap[id] = { id, name: names[i] || "Unknown", seokey: seokeys[i] || id };
+            });
+        }
+
+        // Sort by frequency
+        const allArtists = Object.values(artistMap).sort((a: any, b: any) => artistFreq[b.id] - artistFreq[a.id]);
+
+        // Fix Image resolution to highest
+        let bannerImage = aData.artworkUrl || (tracks[0] ? (tracks[0].artworkUrl || tracks[0].artwork) : "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg");
         bannerImage = bannerImage.replace(/crop_80x80/g, "crop_480x480").replace(/150x150|50x50/g, "500x500").replace(/size_[ms]/g, "size_l");
 
-        // 3. Calculate Total Duration Manually
+        // Total Duration manually parsed
         const totalSeconds = tracks.reduce((acc: number, t: any) => acc + (parseInt(t.duration) || 0), 0);
         let durationText = "";
         if (totalSeconds > 0) {
@@ -231,54 +251,56 @@ function PlaylistContent() {
           durationText = h > 0 ? `${h} hr ${m} min` : `${m} min`;
         }
 
-        setPlaylist({
-          id: pData.playlist_id || seokey,
-          seokey: pData.seokey || seokey,
-          title: pData.title || seokey.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        setAlbum({
+          id: aData.album_id || seokey,
+          seokey: aData.seokey || seokey,
+          title: aData.title || seokey.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
           songs: tracks.map((t: any) => ({ ...t, id: t.track_id, name: t.title, image: t.artworkUrl || t.artwork, artist_name: t.artists })),
           image: bannerImage,
-          top3Artists: sortedArtists.slice(0, 3).map((a: any) => a.name).join(", "),
-          top5ArtistsObj: sortedArtists.slice(0, 5),
+          topArtistsDisplay: aData.artists || allArtists.slice(0, 3).map((a: any) => a.name).join(", "),
+          allArtistsObj: allArtists, // Store all artists for the bottom section
           trackCount: tracks.length,
-          totalDurationStr: durationText, // Added Duration
-          type: "playlist"
+          totalDurationStr: durationText,
+          label: aData.label,
+          releaseDate: aData.release_date,
+          type: "album"
         });
       }
       setLoading(false);
     };
 
-    fetchPlaylist();
+    fetchAlbum();
   },[seokey]);
 
   const handlePlaySong = useCallback((song: any) => {
-    if (playlist && playlist.songs) {
-      setPlayContext({ type: "Playlist", name: playlist.title });
-      setQueue(playlist.songs);
+    if (album && album.songs) {
+      setPlayContext({ type: "Album", name: album.title });
+      setQueue(album.songs);
     }
     setCurrentSong(song);
     setIsPlaying(true);
-  },[setCurrentSong, setIsPlaying, setQueue, setPlayContext, playlist]);
+  },[setCurrentSong, setIsPlaying, setQueue, setPlayContext, album]);
 
-  const handlePlayPlaylist = useCallback(() => {
-    if (!playlist?.songs?.length) return;
-    handlePlaySong(playlist.songs[0]);
-  },[playlist?.songs, handlePlaySong]);
+  const handlePlayAlbum = useCallback(() => {
+    if (!album?.songs?.length) return;
+    handlePlaySong(album.songs[0]);
+  },[album?.songs, handlePlaySong]);
 
   const handleShuffle = useCallback(() => {
-    if (!playlist?.songs?.length) return;
-    const shuffled =[...playlist.songs].sort(() => Math.random() - 0.5);
+    if (!album?.songs?.length) return;
+    const shuffled =[...album.songs].sort(() => Math.random() - 0.5);
     const firstSong = shuffled[0];
     const restOfQueue = shuffled.slice(1);
     
-    setPlayContext({ type: "Playlist", name: playlist.title });
+    setPlayContext({ type: "Album", name: album.title });
     setQueue(restOfQueue);
     setCurrentSong(firstSong);
     setIsPlaying(true);
-  },[playlist, setQueue, setPlayContext, setCurrentSong, setIsPlaying]);
+  },[album, setQueue, setPlayContext, setCurrentSong, setIsPlaying]);
 
   const handleShare = useCallback(async () => {
     const shareData = {
-      title: decodeEntities(playlist?.title),
+      title: decodeEntities(album?.title),
       url: window.location.href,
     };
     if (navigator.share) {
@@ -287,12 +309,12 @@ function PlaylistContent() {
       navigator.clipboard.writeText(window.location.href);
       alert("Link copied!");
     }
-  }, [playlist?.title]);
+  }, [album?.title]);
 
   const currentSongId = currentSong?.track_id || currentSong?.id;
 
   const renderedSongs = useMemo(() => {
-    return playlist?.songs?.map((song: any, index: number) => {
+    return album?.songs?.map((song: any, index: number) => {
       const songTitle = song.title || song.track_title || song.name || "Unknown Track";
       const artists = song.artists || song.artist_name || "Unknown Artist";
       const isCurrentPlaying = currentSongId === (song.track_id || song.id);
@@ -322,7 +344,7 @@ function PlaylistContent() {
             <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
               <div className="flex items-center gap-2">
                 <PingPongMarquee text={songTitle} isPlaying={isCurrentPlaying} />
-                {(song.parental_warning === 1 || song.explicitContent) && <BadgeAlert size={15} className="text-blue-200/40 flex-shrink-0" />}
+                {(song.parental_warning === 1 || song.explicitContent || song.is_explicit) && <BadgeAlert size={15} className="text-blue-200/40 flex-shrink-0" />}
               </div>
               <PingPongMarquee text={artists} isPlaying={isCurrentPlaying} isSub={true} />
             </div>
@@ -336,15 +358,15 @@ function PlaylistContent() {
         </div>
       );
     });
-  },[playlist?.songs, currentSongId, handlePlaySong]);
+  },[album?.songs, currentSongId, handlePlaySong]);
 
-  if (loading) return <PlaylistSkeleton />;
+  if (loading) return <AlbumSkeleton />;
 
-  if (!playlist) {
+  if (!album) {
     return (
       <div className="flex flex-col h-screen items-center justify-center bg-[#0B1320] text-white gap-4 select-none selection:bg-[#1db954] selection:text-black">
         <Info size={48} className="text-blue-200/30" />
-        <p className="text-xl font-bold tracking-tight">Playlist not found</p>
+        <p className="text-xl font-bold tracking-tight">Album not found</p>
         <button onClick={() => router.back()} className="px-8 py-3 bg-[#131D30] border border-[#1e293b] hover:bg-[#1a263d] text-white rounded-full font-bold active:scale-95 transition-all">Go Back</button>
       </div>
     );
@@ -369,7 +391,7 @@ function PlaylistContent() {
       {/* Hero Background Effect */}
       <div className="absolute top-0 left-0 w-full h-[500px] md:h-[550px] pointer-events-none overflow-hidden z-0 select-none">
         <div className="absolute inset-0 bg-[#0B1320]" />
-        <img src={playlist.image} alt="bg" className="absolute inset-0 w-full h-full object-cover blur-[60px] saturate-[180%] opacity-[0.65] transform-gpu" draggable={false} />
+        <img src={album.image} alt="bg" className="absolute inset-0 w-full h-full object-cover blur-[60px] saturate-[180%] opacity-[0.65] transform-gpu" draggable={false} />
         <div className="absolute inset-0 bg-gradient-to-b from-[#131D30]/20 via-[#0B1320]/70 to-[#0B1320]" />
       </div>
 
@@ -384,36 +406,44 @@ function PlaylistContent() {
           </button>
           
           <div className={`flex items-center gap-3 overflow-hidden transition-all duration-300 flex-1 min-w-0 ${showStickyPlay ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 pointer-events-none"}`}>
-            <img src={playlist.image} alt="thumb" className="w-9 h-9 rounded-md object-cover shadow-md border border-[#1e293b] flex-shrink-0 pointer-events-none" draggable={false} />
-            <span className="text-[16px] font-black tracking-tight truncate">{playlist.title}</span>
+            <img src={album.image} alt="thumb" className="w-9 h-9 rounded-md object-cover shadow-md border border-[#1e293b] flex-shrink-0 pointer-events-none" draggable={false} />
+            <span className="text-[16px] font-black tracking-tight truncate">{album.title}</span>
           </div>
         </div>
       </nav>
 
-      {/* Playlist Hero Info - Banner size increased 1.4x */}
+      {/* Album Hero Info - Banner size increased 1.4x */}
       <div className="relative z-10 flex flex-col md:flex-row items-center md:items-end gap-6 md:gap-8 px-5 md:px-8 pt-24 md:pt-32 pb-6">
         <div className="w-[224px] h-[224px] sm:w-[268px] sm:h-[268px] md:w-[313px] md:h-[313px] lg:w-[336px] lg:h-[336px] flex-shrink-0 shadow-[0_20px_50px_rgba(0,0,0,0.6)] bg-[#131D30] border border-[#1e293b] rounded-3xl overflow-hidden pointer-events-none">
-          <img src={playlist.image} alt="cover" className="w-full h-full object-cover" draggable={false} />
+          <img src={album.image} alt="cover" className="w-full h-full object-cover" draggable={false} />
         </div>
         
         <div className="flex flex-col items-center md:items-start text-center md:text-left mt-4 md:mt-0 w-full flex-1 min-w-0">
           <span className="text-xs sm:text-sm font-extrabold text-blue-400 mb-2 tracking-wider uppercase hidden md:block drop-shadow-md">
-            Playlist
+            Album
           </span>
           <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-[5.5rem] font-black tracking-tighter mb-4 line-clamp-3 leading-[1.05] drop-shadow-lg">
-            {playlist.title}
+            {album.title}
           </h1>
           
           <div className="flex flex-col gap-2 items-center md:items-start text-[14px] sm:text-[15px] font-medium text-white/90">
-            {playlist.top3Artists && (
-               <span className="text-blue-200/80 font-bold tracking-wide line-clamp-2">{playlist.top3Artists}</span>
+            {album.topArtistsDisplay && (
+               <span className="text-blue-200/80 font-bold tracking-wide line-clamp-2">{album.topArtistsDisplay}</span>
             )}
             <div className="flex items-center flex-wrap justify-center md:justify-start gap-1.5 text-blue-200/50">
-              <span>{playlist.trackCount} tracks</span>
-              {/* DISPLAYING ADDED DURATION HERE */}
-              {playlist.totalDurationStr && <span className="hidden sm:inline">•</span>}
-              {playlist.totalDurationStr && <span>{playlist.totalDurationStr}</span>}
+              <span>{album.trackCount} tracks</span>
+              {album.totalDurationStr && <span className="hidden sm:inline">•</span>}
+              {album.totalDurationStr && <span>{album.totalDurationStr}</span>}
             </div>
+            
+            {/* Added Label & Release Date */}
+            {(album.label || album.releaseDate) && (
+              <div className="flex items-center flex-wrap justify-center md:justify-start gap-1.5 text-blue-200/40 text-[12px] md:text-[13px] uppercase tracking-wider mt-1">
+                {album.label && <span>{album.label}</span>}
+                {album.label && album.releaseDate && <span className="hidden sm:inline">•</span>}
+                {album.releaseDate && <span>Released {formatDate(album.releaseDate)}</span>}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -421,7 +451,7 @@ function PlaylistContent() {
       {/* Action Buttons */}
       <div className="relative z-10 px-5 md:px-8 py-4 flex items-center justify-between mb-4">
         <div className="flex items-center gap-5 md:gap-6">
-          <button onClick={handlePlayPlaylist} className="w-14 h-14 md:w-16 md:h-16 bg-[#1db954] hover:bg-[#1ed760] text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(29,185,84,0.3)] border border-transparent">
+          <button onClick={handlePlayAlbum} className="w-14 h-14 md:w-16 md:h-16 bg-[#1db954] hover:bg-[#1ed760] text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(29,185,84,0.3)] border border-transparent">
             <Play fill="black" size={28} className="ml-1" />
           </button>
           
@@ -429,8 +459,8 @@ function PlaylistContent() {
             <Shuffle size={28} className="md:w-8 md:h-8" />
           </button>
           
-          <button onClick={() => toggleLikePlaylist(playlist)} className={`transition-colors active:scale-90 ${isPlaylistLiked ? "text-[#1db954]" : "text-blue-200/50 hover:text-white"}`}>
-            <Heart size={30} fill={isPlaylistLiked ? "#1db954" : "none"} strokeWidth={1.5} className="md:w-[34px] md:h-[34px]" />
+          <button onClick={() => toggleLikePlaylist(album)} className={`transition-colors active:scale-90 ${isAlbumLiked ? "text-[#1db954]" : "text-blue-200/50 hover:text-white"}`}>
+            <Heart size={30} fill={isAlbumLiked ? "#1db954" : "none"} strokeWidth={1.5} className="md:w-[34px] md:h-[34px]" />
           </button>
           
           <button onClick={handleShare} className="text-blue-200/50 hover:text-white transition-colors active:scale-90" title="Share">
@@ -444,12 +474,12 @@ function PlaylistContent() {
         {renderedSongs}
       </div>
 
-      {/* Top Artists Row */}
-      {playlist.top5ArtistsObj && playlist.top5ArtistsObj.length > 0 && (
+      {/* All Artists Row */}
+      {album.allArtistsObj && album.allArtistsObj.length > 0 && (
          <div className="relative z-10 px-4 md:px-8 pt-8 pb-10 mt-6 border-t border-[#1e293b]">
            <h2 className="text-[22px] md:text-2xl font-black mb-6 text-white tracking-tight px-1">Artists</h2>
            <div className="flex gap-4 md:gap-6 overflow-x-auto hide-scrollbar pb-4 snap-x">
-             {playlist.top5ArtistsObj.map((artist: any) => (
+             {album.allArtistsObj.map((artist: any) => (
                <div 
                  key={artist.id} 
                  onClick={() => router.push(`/artist/${artist.seokey}`)}
@@ -474,10 +504,10 @@ function PlaylistContent() {
   );
 }
 
-export default function PlaylistPage() {
+export default function AlbumPage() {
   return (
-    <Suspense fallback={<PlaylistSkeleton />}>
-      <PlaylistContent />
+    <Suspense fallback={<AlbumSkeleton />}>
+      <AlbumContent />
     </Suspense>
   );
-    }
+}
