@@ -30,15 +30,15 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
-// --- STRICT IRONCLAD GLOBAL FETCH LOCK (Guarantees exactly 1s gap AFTER response) ---
+// --- IRONCLAD GLOBAL FETCH LOCK (Guarantees exactly 1s gap AFTER response) ---
 declare global {
   interface Window {
-    __GAANA_API_LOCK__?: Promise<any>;
+    __API_QUEUE_PROMISE__?: Promise<any>;
   }
 }
 
 const fetchStrictly = (url: string): Promise<any> => {
-  // 1. Cache Check: Instant return if cached (no network, no delays needed)
+  // 1. Check cache first to completely avoid network calls if data is fresh
   try {
     const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
     if (cachedStr) {
@@ -47,40 +47,34 @@ const fetchStrictly = (url: string): Promise<any> => {
     }
   } catch (e) {}
 
-  // 2. Network Fetch with Strict Promise Chaining
-  if (typeof window !== 'undefined') {
-    if (!window.__GAANA_API_LOCK__) {
-      window.__GAANA_API_LOCK__ = Promise.resolve();
-    }
+  if (typeof window === 'undefined') return Promise.resolve(null);
 
-    const executeFetch = async () => {
-      try {
-        const res = await fetch(url);
-        let data = null;
-        if (res.ok || res.status === 202 || res.status === 200) {
-          data = await res.json();
-          try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
-        }
-        
-        // STRICTLY WAIT 1 FULL SECOND AFTER GETTING THE RESPONSE
-        await new Promise(r => setTimeout(r, 1000));
-        return data;
-
-      } catch (e) {
-        // Even on error, strictly wait 1 second to prevent spam
-        await new Promise(r => setTimeout(r, 1000));
-        return null;
-      }
-    };
-
-    // Chain to the global lock so it executes one-by-one
-    const resultPromise = window.__GAANA_API_LOCK__.then(executeFetch);
-    
-    // Update lock pointer
-    window.__GAANA_API_LOCK__ = resultPromise.catch(() => {});
-    return resultPromise;
+  // 2. Queue system ensures requests never run parallel, and 1-second rule is strictly followed
+  if (!window.__API_QUEUE_PROMISE__) {
+    window.__API_QUEUE_PROMISE__ = Promise.resolve();
   }
-  return Promise.resolve(null);
+
+  const task = async () => {
+    try {
+      const res = await fetch(url);
+      let data = null;
+      if (res.ok || res.status === 202 || res.status === 200) {
+        data = await res.json();
+        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
+      }
+      
+      // STRICTLY WAIT 1 FULL SECOND AFTER RECEIVING THE RESPONSE
+      await new Promise(r => setTimeout(r, 1000));
+      return data;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1000)); // Enforce wait even on failure to prevent spam
+      return null;
+    }
+  };
+
+  const newPromise = window.__API_QUEUE_PROMISE__.then(task);
+  window.__API_QUEUE_PROMISE__ = newPromise.catch(() => {});
+  return newPromise;
 };
 
 
@@ -197,14 +191,14 @@ export default function Home() {
   const isLoadingRef = useRef(false);
   const lastLoadedLang = useRef<string | null>(null);
 
-  const [viewAll, setViewAll] = useState<any | null>(null);
+  const[viewAll, setViewAll] = useState<any | null>(null);
   const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
 
-  // --- SEQUENTIAL FETCHER (Awaits Strict Global Fetcher) ---
+  // --- STRICT ONE-BY-ONE FETCHER ---
   const fetchNextChunk = async (chunkSize = 3) => {
     if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
     
@@ -220,15 +214,16 @@ export default function Home() {
         let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-        // Wait completely for the global fetcher (which enforces the 1s delay AFTER response implicitly)
-        const json = await fetchStrictly(url);
+        // Wait strictly for response AND the 1-sec gap
+        const data = await fetchStrictly(url);
         
-        if (json) {
-           const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
-           if (data.length > 0) {
+        if (data) {
+           const items = data?.entities || data?.tracks || data ||[];
+           if (items.length > 0) {
+              // Push exactly ONE section to UI instantly
               setSections(prev => {
-                  if (prev.some(s => s.key === conf.key)) return prev; // Prevent duplicate keys
-                  const updated = [...prev, { ...conf, data }];
+                  if (prev.some(s => s.key === conf.key)) return prev;
+                  const updated =[...prev, { ...conf, data: items }];
                   if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
                   return updated;
               });
@@ -237,6 +232,11 @@ export default function Home() {
 
         nextIndexRef.current += 1;
         if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
+
+        // SHOW PAGE INSTANTLY: Stop initializing the moment "Top Picks" (index 0) is loaded
+        if (nextIndexRef.current === 1) {
+           setIsInitializing(false);
+        }
       }
     } catch (e) { /* Silent */ }
     
@@ -280,8 +280,10 @@ export default function Home() {
       setSections([]);
       setViewAll(null);
       nextIndexRef.current = 0;
-      await fetchNextChunk(3); 
-      setIsInitializing(false);
+      setIsInitializing(true);
+      
+      // Fire and forget (fetchNextChunk drops isInitializing internally as soon as Top Picks arrives)
+      fetchNextChunk(3); 
     };
 
     initLoad();
@@ -418,7 +420,6 @@ export default function Home() {
          </div>
          <div className="mx-4 mb-8 bg-[#131D30] rounded-full h-[54px] animate-pulse"></div>
          <SectionSkeleton isShowcase={true} />
-         <SectionSkeleton />
          <SectionSkeleton />
       </div>
     );
