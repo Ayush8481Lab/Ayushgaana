@@ -222,6 +222,15 @@ function PlaylistContent() {
         let bannerImage = pData.artworkUrl || (tracks[0] ? (tracks[0].artworkUrl || tracks[0].artwork) : "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg");
         bannerImage = bannerImage.replace(/crop_80x80/g, "crop_480x480").replace(/150x150|50x50/g, "500x500").replace(/size_[ms]/g, "size_l");
 
+        // 3. Calculate Total Duration Manually
+        const totalSeconds = tracks.reduce((acc: number, t: any) => acc + (parseInt(t.duration) || 0), 0);
+        let durationText = "";
+        if (totalSeconds > 0) {
+          const h = Math.floor(totalSeconds / 3600);
+          const m = Math.floor((totalSeconds % 3600) / 60);
+          durationText = h > 0 ? `${h} hr ${m} min` : `${m} min`;
+        }
+
         setPlaylist({
           id: pData.playlist_id || seokey,
           seokey: pData.seokey || seokey,
@@ -230,7 +239,8 @@ function PlaylistContent() {
           image: bannerImage,
           top3Artists: sortedArtists.slice(0, 3).map((a: any) => a.name).join(", "),
           top5ArtistsObj: sortedArtists.slice(0, 5),
-          trackCount: tracks.length, // Precise Manual Count
+          trackCount: tracks.length,
+          totalDurationStr: durationText, // Added Duration
           type: "playlist"
         });
       }
@@ -258,7 +268,7 @@ function PlaylistContent() {
     if (!playlist?.songs?.length) return;
     const shuffled =[...playlist.songs].sort(() => Math.random() - 0.5);
     const firstSong = shuffled[0];
-    const restOfQueue = shuffled.slice(1); // Queue completely excludes the currently playing song
+    const restOfQueue = shuffled.slice(1);
     
     setPlayContext({ type: "Playlist", name: playlist.title });
     setQueue(restOfQueue);
@@ -294,7 +304,7 @@ function PlaylistContent() {
           className={`flex items-center justify-between gap-4 p-2.5 rounded-2xl cursor-pointer group transition-all duration-200 border border-transparent ${isCurrentPlaying ? "bg-[#131D30] border-[#1e293b]" : "hover:bg-[#131D30] hover:border-[#1e293b]"}`}
         >
           <div className="flex items-center gap-4 overflow-hidden flex-1 min-w-0">
-            {/* INcreased song banner size 1.5x */}
+            {/* Song banner size 1.5x */}
             <div className="relative w-[72px] h-[72px] md:w-[84px] md:h-[84px] flex-shrink-0 bg-[#0B1320] rounded-xl border border-[#1e293b] shadow-sm overflow-hidden pointer-events-none">
               <img src={getImageUrl(song)} alt="track" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" draggable={false} />
               {isCurrentPlaying && (
@@ -345,7 +355,8 @@ function PlaylistContent() {
       <style dangerouslySetInnerHTML={{__html: `
         @keyframes ping-pong { 0%, 15% { transform: translateX(0); } 85%, 100% { transform: translateX(var(--overflow-dist)); } }
         .animate-ping-pong { animation: ping-pong 10s ease-in-out infinite alternate; }
-        .mask-linear-fade { mask-image: linear-gradient(to right, transparent, black 2%, black 98%, transparent); -webkit-mask-image: linear-gradient(to right, transparent, black 2%, black 98%, transparent); }
+        /* FIXED MASK IMAGE: Prevents left side text clipping! */
+        .mask-linear-fade { mask-image: linear-gradient(to right, black 0%, black 95%, transparent 100%); -webkit-mask-image: linear-gradient(to right, black 0%, black 95%, transparent 100%); }
         .hide-scrollbar::-webkit-scrollbar { display: none; }
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         @keyframes eq { 0%, 100% { height: 4px; } 50% { height: 20px; } }
@@ -399,6 +410,9 @@ function PlaylistContent() {
             )}
             <div className="flex items-center flex-wrap justify-center md:justify-start gap-1.5 text-blue-200/50">
               <span>{playlist.trackCount} tracks</span>
+              {/* DISPLAYING ADDED DURATION HERE */}
+              {playlist.totalDurationStr && <span className="hidden sm:inline">•</span>}
+              {playlist.totalDurationStr && <span>{playlist.totalDurationStr}</span>}
             </div>
           </div>
         </div>
