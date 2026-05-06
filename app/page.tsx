@@ -10,6 +10,7 @@ import { useRouter } from "next/navigation";
 
 // --- API CONSTANTS ---
 const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
 
 const SECTION_CONFIGS =[
   { key: "showcase", title: "Top Picks", url: "/home/showcase?userlanguage={lang}", noPagination: true },
@@ -29,6 +30,62 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
+// --- GLOBAL RATE LIMITER & CACHE QUEUE (1 Request per second) ---
+const requestQueue: { url: string; resolve: (data: any) => void }[] =[];
+let isProcessingQueue = false;
+
+const processQueue = async () => {
+  if (isProcessingQueue) return;
+  isProcessingQueue = true;
+
+  while (requestQueue.length > 0) {
+    const { url, resolve } = requestQueue.shift()!;
+    try {
+      const res = await fetch(url);
+      if (res.ok || res.status === 202 || res.status === 200) {
+        const data = await res.json();
+        try {
+          sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data }));
+        } catch (e) {
+           // Gracefully ignore sessionStorage QuotaExceeded errors
+        }
+        resolve(data);
+      } else {
+        resolve(null);
+      }
+    } catch (e) {
+      resolve(null);
+    }
+    
+    // Strict 1-second delay before allowing the next network request to process
+    if (requestQueue.length > 0) {
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  isProcessingQueue = false;
+};
+
+const fetchWithCacheAndRateLimit = (url: string): Promise<any> => {
+  return new Promise((resolve) => {
+    // 1. Check Cache first to avoid queueing if data exists and is under 30 mins old
+    try {
+      const cacheKey = `api_cache_${url}`;
+      const cachedStr = sessionStorage.getItem(cacheKey);
+      if (cachedStr) {
+        const cached = JSON.parse(cachedStr);
+        if (Date.now() - cached.timestamp < CACHE_DURATION) {
+          return resolve(cached.data);
+        }
+      }
+    } catch (e) {}
+
+    // 2. If not cached, add to strict sequential queue
+    requestQueue.push({ url, resolve });
+    processQueue();
+  });
+};
+
+// --- UTILS ---
 const getImageUrl = (item: any) => {
   let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
   return img.replace(/size_[ms]/g, "size_l").replace("150x150", "500x500").replace("50x50", "500x500");
@@ -63,9 +120,9 @@ const getSubtitle = (item: any) => {
   return Array.from(new Set(names)).join(", ");
 };
 
-// --- LAZY IMAGE COMPONENT (With Background Placeholder) ---
+// --- LAZY IMAGE COMPONENT ---
 const LazyImage = ({ src, alt, className, objectFit = "object-cover" }: any) => {
-  const[loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const placeholder = "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
   
   return (
@@ -82,6 +139,7 @@ const LazyImage = ({ src, alt, className, objectFit = "object-cover" }: any) => 
   );
 };
 
+// --- PREMIUM CARD COMPONENT ---
 const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) => {
   const title = decodeEntities(item.track_title || item.name || item.title || "Unknown");
   const subtitle = decodeEntities(getSubtitle(item));
@@ -108,26 +166,25 @@ export default function Home() {
   const { language, setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   const router = useRouter();
   
-  const [isInitializing, setIsInitializing] = useState(true);
+  const[isInitializing, setIsInitializing] = useState(true);
   const [sections, setSections] = useState<any[]>([]);
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
 
-  const [viewAll, setViewAll] = useState<any | null>(null);
-  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const[viewAll, setViewAll] = useState<any | null>(null);
+  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
 
-  // --- PROGRESSIVE SCROLL FETCHER (Loads 3 sections simultaneously to prevent blanking) ---
+  // --- PROGRESSIVE SCROLL FETCHER (With Global Rate Limiter & Caching) ---
   const fetchNextChunk = async (chunkSize = 3) => {
     if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
     isLoadingRef.current = true;
     
     try {
-      const newSections: any[] =[];
-      const promises: Promise<any>[] = [];
+      const fetchTasks = [];
       const configs: any[] =[];
 
       for (let i = 0; i < chunkSize; i++) {
@@ -138,11 +195,12 @@ export default function Home() {
         let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-        promises.push(fetch(url).then(res => res.json()).catch(() => null));
         configs.push(conf);
+        fetchTasks.push(fetchWithCacheAndRateLimit(url)); // Uses rate-limited cache queue
       }
 
-      const results = await Promise.all(promises);
+      const results = await Promise.all(fetchTasks);
+      const newSections: any[] =[];
       
       results.forEach((json, i) => {
          if(json) {
@@ -151,15 +209,17 @@ export default function Home() {
          }
       });
 
-      setSections(prev => {
-          const updated = [...prev, ...newSections];
-          if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
-          return updated;
-      });
+      if (newSections.length > 0) {
+         setSections(prev => {
+             const updated = [...prev, ...newSections];
+             if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
+             return updated;
+         });
+      }
 
       nextIndexRef.current += chunkSize;
       if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
-    } catch (e) { console.error(e); }
+    } catch (e) { } // Silent to prevent logs
     
     isLoadingRef.current = false;
   };
@@ -179,6 +239,10 @@ export default function Home() {
             
             const savedViewAll = sessionStorage.getItem('homeState_viewAll');
             if (savedViewAll && savedViewAll !== 'null') {
+               // Push state defensively so hardware back button goes to home, not closes app
+               window.history.replaceState({ home: true }, ''); 
+               window.history.pushState({ viewAllOpen: true }, ''); 
+               
                setViewAll(JSON.parse(savedViewAll));
                setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('viewAllScrollY') || '0')), 100);
             } else {
@@ -189,7 +253,7 @@ export default function Home() {
          }
       }
 
-      // If language changed or cache is empty, fresh fast-paint load
+      // Fresh load if changed language or empty cache
       sessionStorage.removeItem('homeState_viewAll');
       sessionStorage.removeItem('homeScrollY');
       sessionStorage.removeItem('viewAllScrollY');
@@ -203,6 +267,18 @@ export default function Home() {
 
     initLoad();
   }, [language]);
+
+  // --- HARDWARE BACK BUTTON LOGIC (PopState Handler) ---
+  useEffect(() => {
+    const handlePopState = () => {
+       if (viewAll) {
+         // Back button triggered while View All is open. Close it safely without closing app
+         closeViewAll(true);
+       }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  },[viewAll]);
 
   // Auto-Sliding Showcase
   useEffect(() => {
@@ -228,19 +304,19 @@ export default function Home() {
     return () => observer.disconnect();
   }, [sections, viewAll, isInitializing, language]);
 
-  // Infinite Scroll for "View All" (Stops fetching if blank data triggers end)
+  // Infinite Scroll for "View All"
   useEffect(() => {
     if (!viewAll || viewAll.noPagination || !viewAll.hasMore) return;
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
         const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAll.offset},40`;
-        fetch(url).then(res => res.json()).then(json => {
+        
+        fetchWithCacheAndRateLimit(url).then(json => {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
-           
            if (newItems.length > 0) {
              setViewAll((prev: any) => {
-                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
+                const updated = { ...prev, data: [...prev.data, ...newItems], offset: prev.offset + 40 };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
              });
@@ -285,7 +361,11 @@ export default function Home() {
   };
 
   const openViewAll = (section: any) => {
-    if (typeof window !== 'undefined') sessionStorage.setItem('homeScrollY', window.scrollY.toString());
+    if (typeof window !== 'undefined') {
+       sessionStorage.setItem('homeScrollY', window.scrollY.toString());
+       // Pushing state to hijack next hardware back button press to close this UI
+       window.history.pushState({ viewAllOpen: true }, ''); 
+    }
     const vAll = { 
         title: section.title, 
         endpoint: section.url.split('&limit')[0].split('?limit')[0],
@@ -300,16 +380,21 @@ export default function Home() {
     window.scrollTo(0, 0);
   };
 
-  const closeViewAll = () => {
+  const closeViewAll = (fromPopState = false) => {
     setViewAll(null);
     if (typeof window !== 'undefined') {
         sessionStorage.removeItem('homeState_viewAll');
         sessionStorage.removeItem('viewAllScrollY');
+        
         const savedHomeScroll = sessionStorage.getItem('homeScrollY');
-        // Restores to exactly where you were (e.g. Romance) before opening View All
         setTimeout(() => {
             window.scrollTo(0, savedHomeScroll ? parseInt(savedHomeScroll) : 0);
         }, 50);
+
+        // If closed manually via the on-screen button, reverse the history push manually
+        if (!fromPopState) {
+           window.history.back();
+        }
     }
   };
 
@@ -329,11 +414,10 @@ export default function Home() {
     return (
       <main className="min-h-screen bg-[#0B1320] pt-10 pb-28 text-white">
         <div className="flex items-center px-4 mb-6 sticky top-0 bg-[#0B1320]/90 backdrop-blur-md z-10 py-3 border-b border-[#131D30]">
-           <button onClick={closeViewAll} className="p-2 bg-[#131D30] border border-[#1e293b] rounded-full active:scale-95"><ChevronLeft size={24} /></button>
+           <button onClick={() => closeViewAll(false)} className="p-2 bg-[#131D30] border border-[#1e293b] rounded-full active:scale-95"><ChevronLeft size={24} /></button>
            <h1 className="text-2xl font-extrabold ml-4 tracking-tight">{viewAll.title}</h1>
         </div>
         
-        {/* Dynamic perfect grid filling area evenly - exactly 3 columns on mobile */}
         <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-7 gap-y-8 gap-x-3 px-4 w-full justify-items-center">
            {viewAll.data.map((item: any, i: number) => (
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
@@ -367,7 +451,7 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Search Bar */}
+      {/* Search Bar - Controlled strictly by onClick, disables prefetching bugs */}
       <div onClick={() => router.push('/search?action=focus')} className="mx-4 mb-8 flex items-center bg-[#131D30] border border-[#1e293b] rounded-full h-[54px] px-5 cursor-pointer hover:bg-[#1a263d] active:scale-[0.98] transition-all shadow-lg">
          <SearchIcon size={22} className="text-blue-200/50" />
          <span className="text-blue-200/50 ml-3 text-[15px] font-medium tracking-wide">Search songs, artists, podcasts...</span>
@@ -376,7 +460,7 @@ export default function Home() {
          </button>
       </div>
 
-      {/* Showcase / Top Picks (Uncropped native ratio prioritizing artwork_alt) */}
+      {/* Showcase / Top Picks */}
       {sections.length > 0 && sections[0].key === "showcase" && (
         <div className="mb-10 mt-2">
           <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 items-center">
@@ -401,7 +485,6 @@ export default function Home() {
                <h2 className="text-[22px] font-black tracking-tight text-white">{section.title}</h2>
                <button onClick={() => openViewAll(section)} className="text-[12px] font-bold text-blue-400 bg-blue-400/10 px-3 py-1.5 rounded-full hover:bg-blue-400/20 active:scale-95 transition-all">View All</button>
             </div>
-            {/* 1.5x Increased Card horizontal scroll (Fits 3 per mobile screen exactly) */}
             <div className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 pt-1">
               {section.data.map((item: any, i: number) => (
                   <PremiumCard key={i} item={item} showSubtitle={section.showSubtitle} onClick={handleItemClick} />
