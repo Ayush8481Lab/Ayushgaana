@@ -1,67 +1,83 @@
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
+/* eslint-disable react-hooks/exhaustive-deps */
 "use client";
 
 import React, { useEffect, useState, Suspense, useRef, useCallback, useMemo } from "react";
-import { useParams, useSearchParams, useRouter } from "next/navigation";
-import { Play, ArrowLeft, Loader2, Shuffle, Share2, Info, BadgeAlert, Heart, Clock } from "lucide-react";
+import { usePathname, useRouter } from "next/navigation";
+import { Play, ArrowLeft, Shuffle, Share2, Info, BadgeAlert, Heart } from "lucide-react";
 import { useAppContext } from "../../../context/AppContext";
 
+// --- GLOBAL SECRETS & CONSTANTS ---
+const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
+const CACHE_DURATION = 72 * 60 * 60 * 1000; // 72 hours in milliseconds
+
+// --- GLOBAL QUEUE TO AVOID DUPLICATE / SPAM CALLS ---
+declare global {
+  interface Window {
+    __API_QUEUE_PROMISE__?: Promise<any>;
+  }
+}
+
+const fetchStrictly = (url: string): Promise<any> => {
+  try {
+    const cachedStr = localStorage.getItem(`api_cache_${url}`);
+    if (cachedStr) {
+      const cached = JSON.parse(cachedStr);
+      if (Date.now() - cached.timestamp < CACHE_DURATION) return Promise.resolve(cached.data);
+    }
+  } catch (e) {}
+
+  if (typeof window === 'undefined') return Promise.resolve(null);
+
+  if (!window.__API_QUEUE_PROMISE__) window.__API_QUEUE_PROMISE__ = Promise.resolve();
+
+  const task = async () => {
+    try {
+      const res = await fetch(url, { headers: { "x-vercel-protection-bypass": AUTOMATION_SECRET } });
+      let data = null;
+      if (res.ok || res.status === 202 || res.status === 200) {
+        data = await res.json();
+        try { localStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
+      }
+      await new Promise(r => setTimeout(r, 1000));
+      return data;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1000)); 
+      return null;
+    }
+  };
+
+  const newPromise = window.__API_QUEUE_PROMISE__.then(task);
+  window.__API_QUEUE_PROMISE__ = newPromise.catch(() => {});
+  return newPromise;
+};
+
+// --- UTILS ---
 const decodeEntities = (text: string) => {
   if (!text) return "";
-  let decoded = text.replace(/&amp;/g, "&"); 
-  return decoded
-    .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&apos;/g, "'");
+  return text.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&apos;/g, "'");
 };
 
-const getImageUrl = (img: any) => {
-  if (!img) return "https://via.placeholder.com/500x500?text=Album";
-  if (typeof img === "string") return img.replace("50x50", "500x500").replace("150x150", "500x500");
-  if (Array.isArray(img)) return img[img.length - 1]?.url || img[0]?.url;
-  return "https://via.placeholder.com/500x500?text=Album";
+const getImageUrl = (item: any) => {
+  if (!item) return "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
+  if (typeof item === 'string') return item.replace(/size_[ms]/g, "size_l").replace(/150x150|50x50/g, "500x500").replace(/crop_80x80/g, "crop_480x480");
+  let img = item.artworkUrl || item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
+  return img.replace(/size_[ms]/g, "size_l").replace(/150x150|50x50/g, "500x500").replace(/crop_80x80/g, "crop_480x480");
 };
 
-const formatDuration = (seconds: number) => {
-  if (!seconds) return "0:00";
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s < 10 ? "0" : ""}${s}`;
+const getArtistImageUrl = (id: string | number) => {
+  if (!id) return "https://a10.gaanacdn.com/gn_img/default/Artist/size_m.jpg";
+  const strId = String(id);
+  const last2 = strId.length > 1 ? strId.slice(-2) : "0" + strId;
+  return `https://a10.gaanacdn.com/images/artists/${last2}/${strId}/crop_175x175_${strId}.jpg`;
 };
 
-const formatNumber = (num: number) => {
-  if (!num) return "";
-  if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
-  if (num >= 1000) return (num / 1000).toFixed(1) + "K";
-  return num.toString();
-};
-
-const getArtists = (data: any) => {
-  let names: string[] =[];
-  if (data?.artists?.primary && Array.isArray(data.artists.primary)) {
-    names = data.artists.primary.map((a: any) => a.name);
-  } else if (Array.isArray(data?.artists)) {
-    names = data.artists.slice(0, 4).map((a: any) => a.name);
-  } else if (typeof data?.artists === "string") {
-    names = data.artists.split(",").map((n: string) => n.trim());
-  } else if (data?.primaryArtists) {
-    names = data.primaryArtists.split(",").map((n: string) => n.trim());
-  } else if (data?.singers) {
-    names = data.singers.split(",").map((n: string) => n.trim());
-  } else {
-    return "Various Artists";
-  }
-  return Array.from(new Set(names)).join(", ");
-};
-
+// --- COMPONENTS ---
 const PingPongMarquee = ({ text, isPlaying, isSub }: { text: string, isPlaying?: boolean, isSub?: boolean }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
-  const [overflowWidth, setOverflowWidth] = useState(0);
+  const[overflowWidth, setOverflowWidth] = useState(0);
 
   useEffect(() => {
     const checkOverflow = () => {
@@ -77,10 +93,10 @@ const PingPongMarquee = ({ text, isPlaying, isSub }: { text: string, isPlaying?:
   },[text]);
 
   let textColor = "text-white group-hover:text-white";
-  if (isPlaying && !isSub) textColor = "text-[#1ed760]";
-  else if (isSub) textColor = "text-neutral-400 group-hover:text-white";
+  if (isPlaying && !isSub) textColor = "text-[#1db954]";
+  else if (isSub) textColor = "text-blue-200/50 group-hover:text-blue-200/80";
 
-  const textSize = isSub ? "text-[13px] sm:text-[14px] font-normal" : "text-[15px] sm:text-[16px] font-medium tracking-tight";
+  const textSize = isSub ? "text-[12px] md:text-[13px] font-medium" : "text-[15px] md:text-[16px] font-bold tracking-tight";
 
   return (
     <div ref={containerRef} className="relative overflow-hidden whitespace-nowrap w-full mask-linear-fade">
@@ -96,55 +112,54 @@ const PingPongMarquee = ({ text, isPlaying, isSub }: { text: string, isPlaying?:
 };
 
 const PlayingVisualizer = () => (
-  <div className="flex items-end justify-center gap-[2px] w-5 h-4">
-    <div className="w-[3px] bg-[#1ed760] rounded-t-sm eq-bar-1"></div>
-    <div className="w-[3px] bg-[#1ed760] rounded-t-sm eq-bar-2"></div>
-    <div className="w-[3px] bg-[#1ed760] rounded-t-sm eq-bar-3"></div>
-    <div className="w-[3px] bg-[#1ed760] rounded-t-sm eq-bar-4"></div>
+  <div className="flex items-end justify-center gap-[2px] w-6 h-5">
+    <div className="w-[3px] bg-[#1db954] rounded-t-sm eq-bar-1"></div>
+    <div className="w-[3px] bg-[#1db954] rounded-t-sm eq-bar-2"></div>
+    <div className="w-[3px] bg-[#1db954] rounded-t-sm eq-bar-3"></div>
+    <div className="w-[3px] bg-[#1db954] rounded-t-sm eq-bar-4"></div>
   </div>
 );
 
-const AlbumSkeleton = () => (
-  <div className="min-h-screen bg-[#121212] p-6 md:p-8 pt-24 animate-pulse select-none">
+const PlaylistSkeleton = () => (
+  <div className="min-h-screen bg-[#0B1320] p-6 md:p-8 pt-24 select-none">
+    <style dangerouslySetInnerHTML={{__html:`
+      @keyframes wave { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+      .skeleton-wave { position: relative; overflow: hidden; background-color: #131D30; }
+      .skeleton-wave::after { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; transform: translateX(-100%); background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent); animation: wave 1.5s infinite; }
+    `}} />
     <div className="flex flex-col md:flex-row gap-6 items-center md:items-end mb-8">
-      <div className="w-40 h-40 md:w-64 md:h-64 bg-white/5 shadow-2xl rounded-lg" />
+      <div className="w-[224px] h-[224px] md:w-[336px] md:h-[336px] skeleton-wave rounded-2xl border border-[#1e293b] shadow-2xl" />
       <div className="flex flex-col gap-4 w-full max-w-xl items-center md:items-start">
-        <div className="w-20 h-4 bg-white/5 rounded-full" />
-        <div className="w-3/4 h-12 md:h-16 bg-white/5 rounded-xl" />
-        <div className="w-1/2 h-4 bg-white/5 rounded-full" />
+        <div className="w-24 h-4 skeleton-wave rounded-md" />
+        <div className="w-3/4 h-12 md:h-16 skeleton-wave rounded-xl" />
+        <div className="w-1/2 h-4 skeleton-wave rounded-md" />
       </div>
     </div>
-    <div className="flex flex-col gap-3">
-      {[1, 2, 3, 4, 5, 6].map((i) => (
-        <div key={i} className="w-full h-14 bg-white/5 rounded-md" />
+    <div className="flex flex-col gap-3 mt-10">
+      {[...Array(8)].map((_, i) => (
+        <div key={i} className="w-full h-20 skeleton-wave rounded-xl border border-[#1e293b]" />
       ))}
     </div>
   </div>
 );
 
-function AlbumContent() {
-  const params = useParams();
-  const searchParams = useSearchParams();
+function PlaylistContent() {
+  const pathname = usePathname();
   const router = useRouter();
-
-  const slug = params?.slug as string | string[];
-  const queryLink = searchParams.get("link");
-  
-  let link = queryLink;
-  if (slug) {
-    const slugPath = Array.isArray(slug) ? slug.join("/") : slug;
-    link = `https://www.jiosaavn.com/album/${slugPath}`;
-  }
   
   const { currentSong, setCurrentSong, setIsPlaying, setQueue, setPlayContext, likedPlaylists, toggleLikePlaylist } = useAppContext() as any;
   
-  const [album, setAlbum] = useState<any>(null);
-  const[loading, setLoading] = useState(true);
-  
-  const [headerOpacity, setHeaderOpacity] = useState(0);
+  const [playlist, setPlaylist] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const[headerOpacity, setHeaderOpacity] = useState(0);
   const [showStickyPlay, setShowStickyPlay] = useState(false);
 
-  const isAlbumLiked = album && album.id ? likedPlaylists.some((p: any) => p && p.id === album.id) : false;
+  const seokey = useMemo(() => {
+    const segments = pathname?.split('/').filter(Boolean) ||[];
+    return segments[segments.length - 1] || "";
+  }, [pathname]);
+
+  const isPlaylistLiked = playlist?.seokey ? likedPlaylists.some((p: any) => p?.seokey === playlist.seokey) : false;
 
   useEffect(() => {
     let ticking = false;
@@ -152,8 +167,7 @@ function AlbumContent() {
       if (!ticking) {
         window.requestAnimationFrame(() => {
           const scrollY = window.scrollY;
-          const opacity = Math.min(scrollY / 250, 1);
-          setHeaderOpacity(opacity);
+          setHeaderOpacity(Math.min(scrollY / 250, 1));
           setShowStickyPlay(scrollY > 300);
           ticking = false;
         });
@@ -165,48 +179,106 @@ function AlbumContent() {
   },[]);
 
   useEffect(() => {
-    if (!link) return;
-    const fetchAlbum = async () => {
+    if (!seokey) return;
+
+    const fetchPlaylist = async () => {
       setLoading(true);
-      try {
-        const res = await fetch(`https://ayushm-psi.vercel.app/api/albums?link=${encodeURIComponent(link)}`);
-        const json = await res.json();
-        setAlbum(json.data);
-      } catch (error) {
-        console.error("Error fetching album:", error);
-      } finally {
-        setLoading(false);
+      const url = `https://gaanaayush.vercel.app/api/albums/${seokey}`;
+      
+      const json = await fetchStrictly(url);
+      const pData = json?.data?.data?.playlist || json?.data?.playlist || json?.playlist;
+      
+      if (pData && pData.tracks) {
+        const tracks = pData.tracks ||[];
+        
+        // 1. Process Artists Analytics
+        const artistFreq: Record<string, number> = {};
+        const artistMap: Record<string, any> = {};
+        
+        tracks.forEach((t: any) => {
+          if (t.artist_ids && typeof t.artist_ids === 'string') {
+            const ids = t.artist_ids.split(',').map((s: string) => s.trim());
+            const names = (t.artists || "").split(',').map((s: string) => s.trim());
+            const seokeys = (t.artist_seokeys || "").split(',').map((s: string) => s.trim());
+            
+            ids.forEach((id: string, i: number) => {
+              if(!id) return;
+              artistFreq[id] = (artistFreq[id] || 0) + 1;
+              if(!artistMap[id]) artistMap[id] = { id, name: names[i] || "Unknown", seokey: seokeys[i] || id };
+            });
+          } else if (t.artist && Array.isArray(t.artist)) {
+            t.artist.forEach((a: any) => {
+              const id = a.artist_id || a.id;
+              if(!id) return;
+              artistFreq[id] = (artistFreq[id] || 0) + 1;
+              if(!artistMap[id]) artistMap[id] = { id, name: a.name, seokey: a.seokey };
+            });
+          }
+        });
+
+        const sortedArtists = Object.values(artistMap).sort((a: any, b: any) => artistFreq[b.id] - artistFreq[a.id]);
+        
+        // 2. Resolve Banner URL replacing 80x80 to 480x480
+        let bannerImage = pData.artworkUrl || (tracks[0] ? (tracks[0].artworkUrl || tracks[0].artwork) : "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg");
+        bannerImage = bannerImage.replace(/crop_80x80/g, "crop_480x480").replace(/150x150|50x50/g, "500x500").replace(/size_[ms]/g, "size_l");
+
+        // 3. Calculate Total Duration Manually
+        const totalSeconds = tracks.reduce((acc: number, t: any) => acc + (parseInt(t.duration) || 0), 0);
+        let durationText = "";
+        if (totalSeconds > 0) {
+          const h = Math.floor(totalSeconds / 3600);
+          const m = Math.floor((totalSeconds % 3600) / 60);
+          durationText = h > 0 ? `${h} hr ${m} min` : `${m} min`;
+        }
+
+        setPlaylist({
+          id: pData.playlist_id || seokey,
+          seokey: pData.seokey || seokey,
+          title: pData.title || seokey.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+          songs: tracks.map((t: any) => ({ ...t, id: t.track_id, name: t.title, image: t.artworkUrl || t.artwork, artist_name: t.artists })),
+          image: bannerImage,
+          top3Artists: sortedArtists.slice(0, 3).map((a: any) => a.name).join(", "),
+          top5ArtistsObj: sortedArtists.slice(0, 5),
+          trackCount: tracks.length,
+          totalDurationStr: durationText, // Added Duration
+          type: "playlist"
+        });
       }
+      setLoading(false);
     };
-    fetchAlbum();
-  }, [link]);
+
+    fetchPlaylist();
+  },[seokey]);
 
   const handlePlaySong = useCallback((song: any) => {
-    if (album) {
-      setPlayContext({ type: "Album", name: album.name || album.title });
-      setQueue(album.songs); 
+    if (playlist && playlist.songs) {
+      setPlayContext({ type: "Playlist", name: playlist.title });
+      setQueue(playlist.songs);
     }
     setCurrentSong(song);
     setIsPlaying(true);
-  },[setCurrentSong, setIsPlaying, setQueue, setPlayContext, album]);
+  },[setCurrentSong, setIsPlaying, setQueue, setPlayContext, playlist]);
 
-  const handlePlayAlbum = useCallback(() => {
-    if (!album?.songs?.length) return;
-    handlePlaySong(album.songs[0]);
-  },[album?.songs, handlePlaySong]);
+  const handlePlayPlaylist = useCallback(() => {
+    if (!playlist?.songs?.length) return;
+    handlePlaySong(playlist.songs[0]);
+  },[playlist?.songs, handlePlaySong]);
 
   const handleShuffle = useCallback(() => {
-    if (!album?.songs?.length) return;
-    const shuffled =[...album.songs].sort(() => Math.random() - 0.5);
-    setPlayContext({ type: "Album", name: album.name || album.title });
-    setQueue(shuffled);
-    setCurrentSong(shuffled[0]);
+    if (!playlist?.songs?.length) return;
+    const shuffled =[...playlist.songs].sort(() => Math.random() - 0.5);
+    const firstSong = shuffled[0];
+    const restOfQueue = shuffled.slice(1);
+    
+    setPlayContext({ type: "Playlist", name: playlist.title });
+    setQueue(restOfQueue);
+    setCurrentSong(firstSong);
     setIsPlaying(true);
-  }, [album, setQueue, setPlayContext, setCurrentSong, setIsPlaying]);
+  },[playlist, setQueue, setPlayContext, setCurrentSong, setIsPlaying]);
 
   const handleShare = useCallback(async () => {
     const shareData = {
-      title: decodeEntities(album?.name || album?.title),
+      title: decodeEntities(playlist?.title),
       url: window.location.href,
     };
     if (navigator.share) {
@@ -215,206 +287,197 @@ function AlbumContent() {
       navigator.clipboard.writeText(window.location.href);
       alert("Link copied!");
     }
-  }, [album?.name, album?.title]);
+  }, [playlist?.title]);
 
-  const currentSongId = currentSong?.id;
+  const currentSongId = currentSong?.track_id || currentSong?.id;
+
   const renderedSongs = useMemo(() => {
-    return album?.songs?.map((song: any, index: number) => {
-      const songTitle = song.name || song.title;
-      const artists = getArtists(song);
-      const plays = formatNumber(song.playCount);
-      const isCurrentPlaying = currentSongId === song.id;
+    return playlist?.songs?.map((song: any, index: number) => {
+      const songTitle = song.title || song.track_title || song.name || "Unknown Track";
+      const artists = song.artists || song.artist_name || "Unknown Artist";
+      const isCurrentPlaying = currentSongId === (song.track_id || song.id);
 
       return (
         <div 
-          key={`${song.id}-${index}`} 
+          key={`${song.track_id || index}`} 
           onClick={() => handlePlaySong(song)} 
-          className={`grid grid-cols-[36px_1fr_auto] md:grid-cols-[48px_1fr_100px_80px] gap-2 md:gap-4 items-center p-2 rounded-md cursor-pointer group transition-colors duration-200 ${isCurrentPlaying ? "bg-white/10" : "hover:bg-white/10"}`}
+          className={`flex items-center justify-between gap-4 p-2.5 rounded-2xl cursor-pointer group transition-all duration-200 border border-transparent ${isCurrentPlaying ? "bg-[#131D30] border-[#1e293b]" : "hover:bg-[#131D30] hover:border-[#1e293b]"}`}
         >
-          <div className="flex justify-center items-center h-full relative text-neutral-400">
-            {isCurrentPlaying ? (
-              <PlayingVisualizer />
-            ) : (
-              <span className="text-[14px] md:text-[16px] font-normal group-hover:opacity-0 transition-opacity">{index + 1}</span>
-            )}
-            <Play fill="white" size={16} className={`text-white absolute opacity-0 ${!isCurrentPlaying && 'group-hover:opacity-100'} transition-opacity`} />
-          </div>
-          
-          <div className="flex items-center gap-3 overflow-hidden pr-2">
-            <div className="relative w-10 h-10 md:w-12 md:h-12 flex-shrink-0 bg-neutral-800 rounded shadow-sm overflow-hidden pointer-events-none">
-              <img src={getImageUrl(song.image)} alt="track" className="w-full h-full object-cover" draggable={false} />
+          <div className="flex items-center gap-4 overflow-hidden flex-1 min-w-0">
+            {/* Song banner size 1.5x */}
+            <div className="relative w-[72px] h-[72px] md:w-[84px] md:h-[84px] flex-shrink-0 bg-[#0B1320] rounded-xl border border-[#1e293b] shadow-sm overflow-hidden pointer-events-none">
+              <img src={getImageUrl(song)} alt="track" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" draggable={false} />
+              {isCurrentPlaying && (
+                <div className="absolute inset-0 bg-black/60 flex items-center justify-center backdrop-blur-[2px]">
+                  <PlayingVisualizer />
+                </div>
+              )}
+              {!isCurrentPlaying && (
+                <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-[1px]">
+                  <Play fill="white" size={26} className="text-white ml-1 shadow-lg" />
+                </div>
+              )}
             </div>
-            <div className="flex-1 min-w-0 flex flex-col justify-center overflow-hidden">
+            
+            <div className="flex-1 min-w-0 flex flex-col justify-center gap-1">
               <div className="flex items-center gap-2">
                 <PingPongMarquee text={songTitle} isPlaying={isCurrentPlaying} />
-                {song.explicitContent && <BadgeAlert size={14} className="text-neutral-400 flex-shrink-0" />}
+                {(song.parental_warning === 1 || song.explicitContent) && <BadgeAlert size={15} className="text-blue-200/40 flex-shrink-0" />}
               </div>
               <PingPongMarquee text={artists} isPlaying={isCurrentPlaying} isSub={true} />
             </div>
           </div>
-
-          <div className="hidden md:flex items-center text-[13px] md:text-[14px] text-neutral-400 group-hover:text-white transition-colors">
-            {plays}
-          </div>
           
-          <div className="flex items-center justify-end gap-3 md:gap-6 pr-2 md:pr-4">
-             <button className="text-neutral-400 hover:text-white opacity-0 group-hover:opacity-100 transition-opacity hidden sm:block">
-               <Heart size={18} />
-             </button>
-            <span className={`text-[13px] md:text-[14px] tabular-nums font-medium ${isCurrentPlaying ? "text-[#1ed760]" : "text-neutral-400"}`}>
-              {formatDuration(song.duration)}
-            </span>
+          <div className="flex items-center justify-end gap-2 pr-2">
+            <button className="text-blue-200/30 hover:text-white opacity-0 group-hover:opacity-100 transition-all p-2 active:scale-90">
+               <Heart size={22} />
+            </button>
           </div>
         </div>
       );
     });
-  },[album?.songs, currentSongId, handlePlaySong]);
+  },[playlist?.songs, currentSongId, handlePlaySong]);
 
-  if (loading) return <AlbumSkeleton />;
-  if (!album) {
+  if (loading) return <PlaylistSkeleton />;
+
+  if (!playlist) {
     return (
-      <div className="flex flex-col h-screen items-center justify-center bg-[#121212] text-white gap-4 select-none">
-        <Info size={48} className="text-white/30" />
-        <p className="text-xl font-bold">Album not found</p>
-        <button onClick={() => router.back()} className="px-8 py-3 bg-white/10 hover:bg-white/20 text-white rounded-full font-bold backdrop-blur-md transition-all">Go Back</button>
+      <div className="flex flex-col h-screen items-center justify-center bg-[#0B1320] text-white gap-4 select-none selection:bg-[#1db954] selection:text-black">
+        <Info size={48} className="text-blue-200/30" />
+        <p className="text-xl font-bold tracking-tight">Playlist not found</p>
+        <button onClick={() => router.back()} className="px-8 py-3 bg-[#131D30] border border-[#1e293b] hover:bg-[#1a263d] text-white rounded-full font-bold active:scale-95 transition-all">Go Back</button>
       </div>
     );
   }
 
-  const coverImage = getImageUrl(album.image);
-  const title = decodeEntities(album.name || album.title);
-  const rawDesc = decodeEntities(album.description || "");
-  const albumArtists = decodeEntities(getArtists(album));
-  const year = album.year;
-  
-  let mainDesc = rawDesc;
-  let coverArtistsDesc = "";
-  if (rawDesc.includes("Artists on Cover:")) {
-    const parts = rawDesc.split("Artists on Cover:");
-    mainDesc = parts[0].trim();
-    coverArtistsDesc = "Artists on Cover: " + parts[1].trim();
-  }
-
-  const totalSeconds = album.songs?.reduce((acc: number, song: any) => acc + (song.duration || 0), 0);
-  let totalDurationStr = "";
-  if (totalSeconds) {
-    const h = Math.floor(totalSeconds / 3600);
-    const m = Math.floor((totalSeconds % 3600) / 60);
-    totalDurationStr = h > 0 ? `${h} hr ${m} min` : `${m} min`;
-  }
-
   return (
-    <div className="pb-40 bg-[#121212] min-h-screen relative text-white select-none[-webkit-touch-callout:none] font-sans">
+    <div className="pb-40 bg-[#0B1320] min-h-screen relative text-white selection:bg-[#1db954] selection:text-black font-sans" style={{ touchAction: 'pan-y' }}>
       <style dangerouslySetInnerHTML={{__html: `
-        @keyframes ping-pong { 0%, 10% { transform: translateX(0); } 90%, 100% { transform: translateX(var(--overflow-dist)); } }
-        .animate-ping-pong { animation: ping-pong 12s ease-in-out infinite alternate; }
-        .mask-linear-fade { mask-image: linear-gradient(to right, transparent, black 2%, black 98%, transparent); -webkit-mask-image: linear-gradient(to right, transparent, black 2%, black 98%, transparent); }
-        @keyframes eq { 0%, 100% { height: 4px; } 50% { height: 16px; } }
+        @keyframes ping-pong { 0%, 15% { transform: translateX(0); } 85%, 100% { transform: translateX(var(--overflow-dist)); } }
+        .animate-ping-pong { animation: ping-pong 10s ease-in-out infinite alternate; }
+        /* FIXED MASK IMAGE: Prevents left side text clipping! */
+        .mask-linear-fade { mask-image: linear-gradient(to right, black 0%, black 95%, transparent 100%); -webkit-mask-image: linear-gradient(to right, black 0%, black 95%, transparent 100%); }
+        .hide-scrollbar::-webkit-scrollbar { display: none; }
+        .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes eq { 0%, 100% { height: 4px; } 50% { height: 20px; } }
         .eq-bar-1 { animation: eq 1s ease-in-out infinite 0s; }
         .eq-bar-2 { animation: eq 1s ease-in-out infinite 0.2s; }
         .eq-bar-3 { animation: eq 1s ease-in-out infinite 0.4s; }
         .eq-bar-4 { animation: eq 1s ease-in-out infinite 0.1s; }
       `}} />
 
-      <div className="absolute top-0 left-0 w-full h-[450px] md:h-[500px] pointer-events-none overflow-hidden z-0 select-none">
-        <div className="absolute inset-0 bg-[#121212]" />
-        <img src={coverImage} alt="bg" className="absolute inset-0 w-full h-full object-cover blur-[80px] saturate-[200%] opacity-85 transform-gpu" draggable={false} />
-        <div className="absolute inset-0 bg-gradient-to-b from-black/10 via-[#121212]/60 to-[#121212]" />
+      {/* Hero Background Effect */}
+      <div className="absolute top-0 left-0 w-full h-[500px] md:h-[550px] pointer-events-none overflow-hidden z-0 select-none">
+        <div className="absolute inset-0 bg-[#0B1320]" />
+        <img src={playlist.image} alt="bg" className="absolute inset-0 w-full h-full object-cover blur-[60px] saturate-[180%] opacity-[0.65] transform-gpu" draggable={false} />
+        <div className="absolute inset-0 bg-gradient-to-b from-[#131D30]/20 via-[#0B1320]/70 to-[#0B1320]" />
       </div>
 
+      {/* Sticky Header */}
       <nav 
-        className="fixed top-0 left-0 w-full z-50 flex items-center justify-between px-4 py-3 transition-all duration-100"
-        style={{ backgroundColor: `rgba(18, 18, 18, ${headerOpacity})`, borderBottom: `1px solid rgba(255,255,255, ${headerOpacity * 0.05})` }}
+        className="fixed top-0 left-0 w-full z-50 flex items-center justify-between px-4 py-3 transition-all duration-200 backdrop-blur-md"
+        style={{ backgroundColor: `rgba(11, 19, 32, ${headerOpacity * 0.9})`, borderBottom: `1px solid rgba(30, 41, 59, ${headerOpacity})` }}
       >
         <div className="flex items-center gap-4 flex-1 min-w-0">
-          <button onClick={() => router.back()} className="p-2.5 rounded-full bg-black/40 hover:bg-black/60 backdrop-blur-md transition-all text-white active:scale-90 z-50 flex-shrink-0">
-            <ArrowLeft size={24} />
+          <button onClick={() => router.back()} className="p-2.5 rounded-full bg-[#131D30] border border-[#1e293b] hover:bg-[#1a263d] active:scale-95 transition-all text-white z-50 flex-shrink-0 shadow-lg">
+            <ArrowLeft size={22} />
           </button>
           
           <div className={`flex items-center gap-3 overflow-hidden transition-all duration-300 flex-1 min-w-0 ${showStickyPlay ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 pointer-events-none"}`}>
-            <img src={coverImage} alt="thumb" className="w-10 h-10 rounded-md object-cover shadow-md flex-shrink-0 pointer-events-none" draggable={false} />
-            <PingPongMarquee text={title} />
+            <img src={playlist.image} alt="thumb" className="w-9 h-9 rounded-md object-cover shadow-md border border-[#1e293b] flex-shrink-0 pointer-events-none" draggable={false} />
+            <span className="text-[16px] font-black tracking-tight truncate">{playlist.title}</span>
           </div>
         </div>
       </nav>
 
-      <div className="relative z-10 flex flex-col md:flex-row items-center md:items-end gap-5 md:gap-8 px-5 md:px-8 pt-24 md:pt-32 pb-4">
-        <div className="w-40 h-40 sm:w-48 sm:h-48 md:w-56 md:h-56 lg:w-60 lg:h-60 flex-shrink-0 shadow-[0_8px_40px_rgba(0,0,0,0.5)] bg-neutral-800 rounded-md overflow-hidden pointer-events-none">
-          <img src={coverImage} alt="cover" className="w-full h-full object-cover" draggable={false} />
+      {/* Playlist Hero Info - Banner size increased 1.4x */}
+      <div className="relative z-10 flex flex-col md:flex-row items-center md:items-end gap-6 md:gap-8 px-5 md:px-8 pt-24 md:pt-32 pb-6">
+        <div className="w-[224px] h-[224px] sm:w-[268px] sm:h-[268px] md:w-[313px] md:h-[313px] lg:w-[336px] lg:h-[336px] flex-shrink-0 shadow-[0_20px_50px_rgba(0,0,0,0.6)] bg-[#131D30] border border-[#1e293b] rounded-3xl overflow-hidden pointer-events-none">
+          <img src={playlist.image} alt="cover" className="w-full h-full object-cover" draggable={false} />
         </div>
         
-        <div className="flex flex-col items-center md:items-start text-center md:text-left mt-3 md:mt-0 w-full flex-1 min-w-0">
-          <span className="text-xs sm:text-sm font-bold text-white mb-1.5 tracking-wide hidden md:block uppercase">
-            Album
+        <div className="flex flex-col items-center md:items-start text-center md:text-left mt-4 md:mt-0 w-full flex-1 min-w-0">
+          <span className="text-xs sm:text-sm font-extrabold text-blue-400 mb-2 tracking-wider uppercase hidden md:block drop-shadow-md">
+            Playlist
           </span>
-          <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-[5.5rem] font-black tracking-tighter mb-3 line-clamp-3 leading-[1.1] pb-1">
-            {title}
+          <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-[5.5rem] font-black tracking-tighter mb-4 line-clamp-3 leading-[1.05] drop-shadow-lg">
+            {playlist.title}
           </h1>
           
-          {(mainDesc || coverArtistsDesc) && (
-            <div className="text-[13px] sm:text-[14px] text-neutral-300 mb-3 max-w-2xl font-medium px-2 md:px-0">
-              {mainDesc && <span className="block mb-0.5 line-clamp-2">{mainDesc}</span>}
-              {coverArtistsDesc && <span className="block text-white/60 line-clamp-1">{coverArtistsDesc}</span>}
-            </div>
-          )}
-          
-          <div className="flex items-center flex-wrap justify-center md:justify-start gap-1.5 text-[13px] sm:text-[14px] font-medium text-white mt-1">
-            <span className="font-bold tracking-wide">{albumArtists}</span>
-            <span className="text-neutral-400 hidden sm:inline">•</span>
-            {year && <><span className="text-neutral-400">{year}</span><span className="text-neutral-400 hidden sm:inline">•</span></>}
-            <span className="text-neutral-400">{album.songCount || album.songs?.length} songs,</span>
-            {totalDurationStr && (
-              <span className="text-neutral-400 opacity-80">{totalDurationStr}</span>
+          <div className="flex flex-col gap-2 items-center md:items-start text-[14px] sm:text-[15px] font-medium text-white/90">
+            {playlist.top3Artists && (
+               <span className="text-blue-200/80 font-bold tracking-wide line-clamp-2">{playlist.top3Artists}</span>
             )}
+            <div className="flex items-center flex-wrap justify-center md:justify-start gap-1.5 text-blue-200/50">
+              <span>{playlist.trackCount} tracks</span>
+              {/* DISPLAYING ADDED DURATION HERE */}
+              {playlist.totalDurationStr && <span className="hidden sm:inline">•</span>}
+              {playlist.totalDurationStr && <span>{playlist.totalDurationStr}</span>}
+            </div>
           </div>
         </div>
       </div>
 
-      <div className="relative z-10 px-5 md:px-8 py-4 flex items-center justify-between">
+      {/* Action Buttons */}
+      <div className="relative z-10 px-5 md:px-8 py-4 flex items-center justify-between mb-4">
         <div className="flex items-center gap-5 md:gap-6">
-          <button onClick={handlePlayAlbum} className="w-14 h-14 md:w-16 md:h-16 bg-[#1ed760] hover:bg-[#3be477] text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-lg">
+          <button onClick={handlePlayPlaylist} className="w-14 h-14 md:w-16 md:h-16 bg-[#1db954] hover:bg-[#1ed760] text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-[0_0_20px_rgba(29,185,84,0.3)] border border-transparent">
             <Play fill="black" size={28} className="ml-1" />
           </button>
           
-          <button onClick={handleShuffle} className="text-neutral-400 hover:text-white transition-colors active:scale-90" title="Shuffle">
+          <button onClick={handleShuffle} className="text-blue-200/50 hover:text-white transition-colors active:scale-90" title="Shuffle">
             <Shuffle size={28} className="md:w-8 md:h-8" />
           </button>
           
-          <button onClick={() => toggleLikePlaylist({ ...album, type: "album" })} className={`transition-colors active:scale-90 ${isAlbumLiked ? "text-[#1ed760]" : "text-neutral-400 hover:text-white"}`}>
-            <Heart size={30} fill={isAlbumLiked ? "#1ed760" : "none"} strokeWidth={1.5} className="md:w-[34px] md:h-[34px]" />
+          <button onClick={() => toggleLikePlaylist(playlist)} className={`transition-colors active:scale-90 ${isPlaylistLiked ? "text-[#1db954]" : "text-blue-200/50 hover:text-white"}`}>
+            <Heart size={30} fill={isPlaylistLiked ? "#1db954" : "none"} strokeWidth={1.5} className="md:w-[34px] md:h-[34px]" />
           </button>
           
-          <button onClick={handleShare} className="text-neutral-400 hover:text-white transition-colors active:scale-90" title="Share">
+          <button onClick={handleShare} className="text-blue-200/50 hover:text-white transition-colors active:scale-90" title="Share">
              <Share2 size={26} className="md:w-7 md:h-7" />
           </button>
         </div>
       </div>
 
-      <div className="relative z-10 px-4 md:px-8 mt-2 hidden md:grid grid-cols-[48px_1fr_100px_80px] gap-4 items-center text-[12px] md:text-[13px] font-medium uppercase tracking-widest text-neutral-400 border-b border-white/10 pb-2 mb-3 sticky top-[68px] bg-[#121212]/95 backdrop-blur-md">
-        <div className="text-center">#</div>
-        <div>Title</div>
-        <div>Plays</div>
-        <div className="text-right pr-6"><Clock size={16} className="inline-block" /></div>
-      </div>
-
-      <div className="relative z-10 px-2 md:px-6 flex flex-col">
+      {/* Song List */}
+      <div className="relative z-10 px-2 md:px-6 flex flex-col gap-1 pb-4">
         {renderedSongs}
       </div>
 
-      {album.songs?.length > 0 && (
-        <div className="px-5 md:px-12 py-16 mt-6 flex flex-col gap-1 text-neutral-500 text-[12px] md:text-[13px] font-medium border-t border-white/5">
-          <p>{album.songs.length} tracks • {totalDurationStr}</p>
-          {album.copyright && <p className="max-w-2xl mt-2">{decodeEntities(album.copyright)}</p>}
-        </div>
+      {/* Top Artists Row */}
+      {playlist.top5ArtistsObj && playlist.top5ArtistsObj.length > 0 && (
+         <div className="relative z-10 px-4 md:px-8 pt-8 pb-10 mt-6 border-t border-[#1e293b]">
+           <h2 className="text-[22px] md:text-2xl font-black mb-6 text-white tracking-tight px-1">Artists</h2>
+           <div className="flex gap-4 md:gap-6 overflow-x-auto hide-scrollbar pb-4 snap-x">
+             {playlist.top5ArtistsObj.map((artist: any) => (
+               <div 
+                 key={artist.id} 
+                 onClick={() => router.push(`/artist/${artist.seokey}`)}
+                 className="flex flex-col items-center gap-3 cursor-pointer group flex-shrink-0 snap-start w-28 md:w-36"
+               >
+                 <div className="w-28 h-28 md:w-36 md:h-36 rounded-full overflow-hidden bg-[#131D30] border border-[#1e293b] group-hover:scale-105 group-hover:border-blue-400/50 transition-all duration-300 shadow-xl">
+                    <img 
+                       src={getArtistImageUrl(artist.id)} 
+                       className="w-full h-full object-cover" 
+                       onError={(e) => { e.currentTarget.src="https://a10.gaanacdn.com/gn_img/default/Artist/size_m.jpg" }} 
+                       draggable={false}
+                    />
+                 </div>
+                 <span className="text-[14px] md:text-[15px] font-bold text-blue-200/80 group-hover:text-white text-center line-clamp-2 w-full transition-colors">{artist.name}</span>
+               </div>
+             ))}
+           </div>
+         </div>
       )}
+
     </div>
   );
 }
 
-export default function AlbumPage() {
+export default function PlaylistPage() {
   return (
-    <Suspense fallback={<AlbumSkeleton />}>
-      <AlbumContent />
+    <Suspense fallback={<PlaylistSkeleton />}>
+      <PlaylistContent />
     </Suspense>
   );
-}
+    }
