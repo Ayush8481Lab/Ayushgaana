@@ -8,9 +8,10 @@ import { useAppContext } from "../context/AppContext";
 import { Search as SearchIcon, Mic, ChevronLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 
-// --- API CONSTANTS ---
+// --- API CONSTANTS & SECRETS ---
 const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 
 const SECTION_CONFIGS =[
   { key: "showcase", title: "Top Picks", url: "/home/showcase?userlanguage={lang}", noPagination: true },
@@ -30,73 +31,59 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
-// --- GLOBAL STRICT RATE LIMITER ---
+// --- IRONCLAD GLOBAL FETCH LOCK (Guarantees exactly 1s gap AFTER response) ---
 declare global {
   interface Window {
-    __GAANA_API_QUEUE__?: { url: string; resolve: (data: any) => void }[];
-    __GAANA_API_PROCESSING__?: boolean;
-    __GAANA_API_LAST_TIME__?: number;
+    __API_QUEUE_PROMISE__?: Promise<any>;
   }
 }
 
-const getGlobalQueue = () => {
-  if (typeof window === 'undefined') return[];
-  if (!window.__GAANA_API_QUEUE__) window.__GAANA_API_QUEUE__ =[];
-  return window.__GAANA_API_QUEUE__;
-};
-
-const processQueue = async () => {
-  if (typeof window === 'undefined' || window.__GAANA_API_PROCESSING__) return;
-  window.__GAANA_API_PROCESSING__ = true;
-
-  const queue = getGlobalQueue();
-
-  while (queue.length > 0) {
-    const now = Date.now();
-    const lastTime = window.__GAANA_API_LAST_TIME__ || 0;
-    const timeSinceLast = now - lastTime;
-    
-    // Fallback Strict Limiter (UI thread already handles standard delays now)
-    if (timeSinceLast < 1000) await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
-
-    if (queue.length === 0) break;
-    const { url, resolve } = queue.shift()!;
-    window.__GAANA_API_LAST_TIME__ = Date.now();
-
-    try {
-      const res = await fetch(url);
-      if (res.ok || res.status === 202 || res.status === 200) {
-        const data = await res.json();
-        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) { }
-        resolve(data);
-      } else {
-        resolve(null);
-      }
-    } catch (e) {
-      resolve(null);
+const fetchStrictly = (url: string): Promise<any> => {
+  // 1. Check cache first to completely avoid network calls if data is fresh
+  try {
+    const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
+    if (cachedStr) {
+      const cached = JSON.parse(cachedStr);
+      if (Date.now() - cached.timestamp < CACHE_DURATION) return Promise.resolve(cached.data);
     }
+  } catch (e) {}
+
+  if (typeof window === 'undefined') return Promise.resolve(null);
+
+  // 2. Queue system ensures requests never run parallel, and 1-second rule is strictly followed
+  if (!window.__API_QUEUE_PROMISE__) {
+    window.__API_QUEUE_PROMISE__ = Promise.resolve();
   }
-  window.__GAANA_API_PROCESSING__ = false;
-};
 
-const fetchWithCacheAndRateLimit = (url: string): Promise<any> => {
-  return new Promise((resolve) => {
+  const task = async () => {
     try {
-      const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
-      if (cachedStr) {
-        const cached = JSON.parse(cachedStr);
-        if (Date.now() - cached.timestamp < CACHE_DURATION) return resolve(cached.data);
+      // INJECTED VERCEL AUTOMATION PROTECTION BYPASS (Official Method)
+      const res = await fetch(url, {
+        headers: {
+          "x-vercel-protection-bypass": AUTOMATION_SECRET
+        }
+      });
+      
+      let data = null;
+      if (res.ok || res.status === 202 || res.status === 200) {
+        data = await res.json();
+        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
       }
-    } catch (e) {}
-
-    if (typeof window !== 'undefined') {
-      getGlobalQueue().push({ url, resolve });
-      processQueue();
-    } else {
-      resolve(null);
+      
+      // STRICTLY WAIT 1 FULL SECOND AFTER RECEIVING THE RESPONSE
+      await new Promise(r => setTimeout(r, 1000));
+      return data;
+    } catch (e) {
+      await new Promise(r => setTimeout(r, 1000)); // Enforce wait even on failure to prevent spam
+      return null;
     }
-  });
+  };
+
+  const newPromise = window.__API_QUEUE_PROMISE__.then(task);
+  window.__API_QUEUE_PROMISE__ = newPromise.catch(() => {});
+  return newPromise;
 };
+
 
 // --- UTILS ---
 const getImageUrl = (item: any) => {
@@ -173,23 +160,23 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
   );
 };
 
-// --- YOUTUBE/SPOTIFY STYLE SKELETON (Replaces all Circular Spinners) ---
+// --- YOUTUBE/SPOTIFY STYLE WAVE SKELETON ---
 const SectionSkeleton = ({ isShowcase = false }: { isShowcase?: boolean }) => (
-  <div className={`w-full animate-pulse ${isShowcase ? "mt-2 mb-10 px-4" : "mb-10"}`}>
+  <div className={`w-full ${isShowcase ? "mt-2 mb-10 px-4" : "mb-10"}`}>
     {isShowcase ? (
-      <div className="w-[90vw] md:w-[600px] aspect-[720/375] bg-[#131D30] rounded-2xl border border-[#1e293b]"></div>
+      <div className="w-[90vw] md:w-[600px] aspect-[720/375] rounded-2xl border border-[#1e293b] skeleton-wave"></div>
     ) : (
       <>
         <div className="flex items-center justify-between px-4 mb-4">
-          <div className="h-[22px] bg-[#131D30] rounded-md w-32 md:w-48"></div>
-          <div className="h-[24px] bg-[#131D30] rounded-full w-16"></div>
+          <div className="h-[22px] rounded-md w-32 md:w-48 skeleton-wave"></div>
+          <div className="h-[24px] rounded-full w-16 skeleton-wave"></div>
         </div>
         <div className="flex gap-4 overflow-hidden px-4">
           {[...Array(5)].map((_, i) => (
             <div key={i} className="w-[29vw] sm:w-[180px] md:w-[210px] flex-shrink-0">
-              <div className="w-full aspect-[1/1] bg-[#131D30] rounded-2xl mb-2 border border-[#1e293b]"></div>
-              <div className="h-3 bg-[#131D30] rounded w-3/4 mx-auto mt-2"></div>
-              <div className="h-2 bg-[#131D30] rounded w-1/2 mx-auto mt-1.5"></div>
+              <div className="w-full aspect-[1/1] rounded-2xl mb-2 border border-[#1e293b] skeleton-wave"></div>
+              <div className="h-3 rounded w-3/4 mx-auto mt-2 skeleton-wave"></div>
+              <div className="h-2 rounded w-1/2 mx-auto mt-1.5 skeleton-wave"></div>
             </div>
           ))}
         </div>
@@ -204,12 +191,11 @@ export default function Home() {
   const router = useRouter();
   
   const [isInitializing, setIsInitializing] = useState(true);
-  const [isChunkLoading, setIsChunkLoading] = useState(false);
-  const[sections, setSections] = useState<any[]>([]);
+  const[isChunkLoading, setIsChunkLoading] = useState(false);
+  const [sections, setSections] = useState<any[]>([]);
   
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
-  const lastLoadedLang = useRef<string | null>(null);
 
   const [viewAll, setViewAll] = useState<any | null>(null);
   const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
@@ -218,9 +204,10 @@ export default function Home() {
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
 
-  // --- STRICT SEQUENTIAL FETCHER (Waits 1 sec AFTER each request is completed) ---
-  const fetchNextChunk = async (chunkSize = 3) => {
+  // --- STRICT SCROLL-DRIVEN FETCHER ---
+  const fetchNextChunk = async (chunkSize = 1) => {
     if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
+    
     isLoadingRef.current = true;
     setIsChunkLoading(true);
     
@@ -230,31 +217,31 @@ export default function Home() {
         if (idx >= SECTION_CONFIGS.length) break;
         
         const conf = SECTION_CONFIGS[idx];
-        let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
+        let url = `${API_BASE}${conf.url.replace('{lang}', language || 'hindi')}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-        // 1. AWAIT RESPONSE FOR EXACTLY ONE API CALL
-        const json = await fetchWithCacheAndRateLimit(url);
+        // Wait strictly for response AND the 1-sec gap with Automation Token
+        const json = await fetchStrictly(url);
         
         if (json) {
-           const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
-           if (data.length > 0) {
+           const items = json?.data?.entities || json?.data?.tracks || json?.data ||[];
+           
+           if (Array.isArray(items) && items.length > 0) {
               setSections(prev => {
                   if (prev.some(s => s.key === conf.key)) return prev;
-                  const updated = [...prev, { ...conf, data }];
+                  const updated =[...prev, { ...conf, data: items }];
                   if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
                   return updated;
               });
            }
         }
 
-        // 2. INCREMENT INDEX
         nextIndexRef.current += 1;
         if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
 
-        // 3. STRICTLY WAIT 1 SECOND BEFORE REQUESTING NEXT IN CHUNK (if not the absolute last section)
-        if (nextIndexRef.current < SECTION_CONFIGS.length) {
-          await new Promise(r => setTimeout(r, 1000));
+        // SHOW PAGE INSTANTLY: Stop initializing the moment the 1st section ("Top Picks") is completely processed 
+        if (nextIndexRef.current >= 1) {
+           setIsInitializing(false);
         }
       }
     } catch (e) { /* Silent */ }
@@ -266,8 +253,6 @@ export default function Home() {
   // --- INITIAL MOUNT & STATE RESTORATION ---
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (lastLoadedLang.current === language) return; 
-    lastLoadedLang.current = language;
 
     const initLoad = async () => {
       const savedLang = sessionStorage.getItem('homeState_lang');
@@ -295,23 +280,25 @@ export default function Home() {
       sessionStorage.removeItem('homeState_viewAll');
       sessionStorage.removeItem('homeScrollY');
       sessionStorage.removeItem('viewAllScrollY');
-      sessionStorage.setItem('homeState_lang', language);
+      sessionStorage.setItem('homeState_lang', language || 'hindi');
       setSections([]);
       setViewAll(null);
       nextIndexRef.current = 0;
-      await fetchNextChunk(3); 
-      setIsInitializing(false);
+      setIsInitializing(true);
+      
+      // Load 2 chunks initially (Top Picks + Trending) to guarantee screen is filled, then switch to scroll-driven.
+      fetchNextChunk(2); 
     };
 
     initLoad();
-  },[language]);
+  }, [language]); 
 
   // --- HARDWARE BACK BUTTON LOGIC ---
   useEffect(() => {
     const handlePopState = () => { if (viewAll) closeViewAll(true); };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  },[viewAll]);
+  }, [viewAll]);
 
   // Auto-Sliding Showcase
   useEffect(() => {
@@ -326,11 +313,12 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [sections, viewAll]);
 
-  // Lazy Load Remaining Sections on Scroll
+  // Lazy Load REMAINING Sections strictly 1-by-1 on Scroll
   useEffect(() => {
-    if (viewAll || isInitializing || sections.length === 0) return;
+    if (viewAll || isInitializing) return; 
     const observer = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting && !isLoadingRef.current) fetchNextChunk(3);
+      // Exactly 1 section processed per intersection when user scrolls down
+      if (entries[0].isIntersecting && !isLoadingRef.current) fetchNextChunk(1);
     }, { rootMargin: "600px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
@@ -343,13 +331,13 @@ export default function Home() {
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
-        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAll.offset},40`;
+        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language || 'hindi')}&limit=${viewAll.offset},40`;
         
-        fetchWithCacheAndRateLimit(url).then(json => {
+        fetchStrictly(url).then(json => {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
-           if (newItems.length > 0) {
+           if (Array.isArray(newItems) && newItems.length > 0) {
              setViewAll((prev: any) => {
-                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
+                const updated = { ...prev, data: [...prev.data, ...newItems], offset: prev.offset + 40 };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
              });
@@ -425,19 +413,23 @@ export default function Home() {
     }
   };
 
-  // --- INITIAL YOUTUBE STYLE SKELETON (Replaces old blocky boxes) ---
-  if (isInitializing || sections.length === 0) {
+  // --- INITIAL YOUTUBE STYLE SKELETON ---
+  if (isInitializing) {
     return (
       <div className="flex min-h-screen flex-col bg-[#0B1320] text-white pt-10 pb-28">
+         <style dangerouslySetInnerHTML={{__html:`
+           @keyframes wave { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+           .skeleton-wave { position: relative; overflow: hidden; background-color: #131D30; }
+           .skeleton-wave::after { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; transform: translateX(-100%); background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent); animation: wave 1.5s infinite; }
+         `}} />
          <div className="px-4 mb-6 flex items-center justify-between">
            <div className="flex items-center gap-3">
-             <div className="w-9 h-9 rounded-full bg-[#1db954]/50 animate-pulse"></div>
-             <div className="h-7 w-32 bg-[#131D30] rounded-md animate-pulse"></div>
+             <div className="w-9 h-9 rounded-full skeleton-wave"></div>
+             <div className="h-7 w-32 rounded-md skeleton-wave"></div>
            </div>
          </div>
-         <div className="mx-4 mb-8 bg-[#131D30] rounded-full h-[54px] animate-pulse"></div>
+         <div className="mx-4 mb-8 rounded-full h-[54px] skeleton-wave"></div>
          <SectionSkeleton isShowcase={true} />
-         <SectionSkeleton />
          <SectionSkeleton />
       </div>
     );
@@ -447,6 +439,13 @@ export default function Home() {
   if (viewAll) {
     return (
       <main className="min-h-screen bg-[#0B1320] pt-10 pb-28 text-white">
+        <style dangerouslySetInnerHTML={{__html:`
+           @keyframes ping-pong { 0%, 15% { transform: translateX(0); } 85%, 100% { transform: translateX(calc(-100% + 140px)); } }
+           .animate-ping-pong { animation-name: ping-pong; animation-timing-function: ease-in-out; animation-iteration-count: infinite; animation-direction: alternate; }
+           @keyframes wave { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+           .skeleton-wave { position: relative; overflow: hidden; background-color: #131D30; }
+           .skeleton-wave::after { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; transform: translateX(-100%); background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent); animation: wave 1.5s infinite; }
+        `}} />
         <div className="flex items-center px-4 mb-6 sticky top-0 bg-[#0B1320]/90 backdrop-blur-md z-10 py-3 border-b border-[#131D30]">
            <button onClick={() => closeViewAll(false)} className="p-2 bg-[#131D30] border border-[#1e293b] rounded-full active:scale-95"><ChevronLeft size={24} /></button>
            <h1 className="text-2xl font-extrabold ml-4 tracking-tight">{viewAll.title}</h1>
@@ -457,14 +456,13 @@ export default function Home() {
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
            ))}
 
-           {/* View All YouTube Style Skeleton (Replaces Circular Spinner) */}
            {isFetchingViewAll && viewAll.hasMore && (
               <>
                  {[...Array(7)].map((_, i) => (
-                    <div key={`skel-${i}`} className="w-full flex-shrink-0 animate-pulse">
-                      <div className="w-full aspect-[1/1] bg-[#131D30] rounded-2xl mb-2 border border-[#1e293b]"></div>
-                      <div className="h-3 bg-[#131D30] rounded w-3/4 mx-auto mt-2"></div>
-                      <div className="h-2 bg-[#131D30] rounded w-1/2 mx-auto mt-1.5"></div>
+                    <div key={`skel-${i}`} className="w-full flex-shrink-0">
+                      <div className="w-full aspect-[1/1] rounded-2xl mb-2 border border-[#1e293b] skeleton-wave"></div>
+                      <div className="h-3 rounded w-3/4 mx-auto mt-2 skeleton-wave"></div>
+                      <div className="h-2 rounded w-1/2 mx-auto mt-1.5 skeleton-wave"></div>
                     </div>
                  ))}
               </>
@@ -487,6 +485,9 @@ export default function Home() {
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         @keyframes ping-pong { 0%, 15% { transform: translateX(0); } 85%, 100% { transform: translateX(calc(-100% + 140px)); } }
         .animate-ping-pong { animation-name: ping-pong; animation-timing-function: ease-in-out; animation-iteration-count: infinite; animation-direction: alternate; }
+        @keyframes wave { 0% { transform: translateX(-100%); } 100% { transform: translateX(100%); } }
+        .skeleton-wave { position: relative; overflow: hidden; background-color: #131D30; }
+        .skeleton-wave::after { content: ''; position: absolute; top: 0; right: 0; bottom: 0; left: 0; transform: translateX(-100%); background-image: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.06), transparent); animation: wave 1.5s infinite; }
       `}} />
 
       {/* Header */}
@@ -536,7 +537,7 @@ export default function Home() {
         );
       })}
 
-      {/* Infinite Scroll Anchor & Skeleton Layout (Replaces Circular Spinner) */}
+      {/* Scroll Driven Lazy Loading Anchor & Wave Skeleton Buffer */}
       {nextIndexRef.current < SECTION_CONFIGS.length && (
          <>
             <div ref={observerRef} className="w-full h-1" />
@@ -545,4 +546,4 @@ export default function Home() {
       )}
     </main>
   );
-    }
+}
