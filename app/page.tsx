@@ -10,7 +10,7 @@ import { useRouter } from "next/navigation";
 
 // --- API CONSTANTS ---
 const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
-const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes in milliseconds
+const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 
 const SECTION_CONFIGS =[
   { key: "showcase", title: "Top Picks", url: "/home/showcase?userlanguage={lang}", noPagination: true },
@@ -30,25 +30,46 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
-// --- GLOBAL RATE LIMITER & CACHE QUEUE (1 Request per second) ---
-const requestQueue: { url: string; resolve: (data: any) => void }[] =[];
-let isProcessingQueue = false;
+// --- GLOBAL STRICT RATE LIMITER (1 Request per sec, survives React StrictMode) ---
+declare global {
+  interface Window {
+    __GAANA_API_QUEUE__?: { url: string; resolve: (data: any) => void }[];
+    __GAANA_API_PROCESSING__?: boolean;
+    __GAANA_API_LAST_TIME__?: number;
+  }
+}
+
+const getGlobalQueue = () => {
+  if (typeof window === 'undefined') return[];
+  if (!window.__GAANA_API_QUEUE__) window.__GAANA_API_QUEUE__ =[];
+  return window.__GAANA_API_QUEUE__;
+};
 
 const processQueue = async () => {
-  if (isProcessingQueue) return;
-  isProcessingQueue = true;
+  if (typeof window === 'undefined' || window.__GAANA_API_PROCESSING__) return;
+  window.__GAANA_API_PROCESSING__ = true;
 
-  while (requestQueue.length > 0) {
-    const { url, resolve } = requestQueue.shift()!;
+  const queue = getGlobalQueue();
+
+  while (queue.length > 0) {
+    const now = Date.now();
+    const lastTime = window.__GAANA_API_LAST_TIME__ || 0;
+    const timeSinceLast = now - lastTime;
+    
+    // Strict enforcement: Exactly 1000ms delay between API Request starts
+    if (timeSinceLast < 1000) {
+      await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
+    }
+
+    if (queue.length === 0) break;
+    const { url, resolve } = queue.shift()!;
+    window.__GAANA_API_LAST_TIME__ = Date.now();
+
     try {
       const res = await fetch(url);
       if (res.ok || res.status === 202 || res.status === 200) {
         const data = await res.json();
-        try {
-          sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data }));
-        } catch (e) {
-           // Gracefully ignore sessionStorage QuotaExceeded errors
-        }
+        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) { /* silent ignore */ }
         resolve(data);
       } else {
         resolve(null);
@@ -56,21 +77,14 @@ const processQueue = async () => {
     } catch (e) {
       resolve(null);
     }
-    
-    // Strict 1-second delay before allowing the next network request to process
-    if (requestQueue.length > 0) {
-      await new Promise(r => setTimeout(r, 1000));
-    }
   }
-  isProcessingQueue = false;
+  window.__GAANA_API_PROCESSING__ = false;
 };
 
 const fetchWithCacheAndRateLimit = (url: string): Promise<any> => {
   return new Promise((resolve) => {
-    // 1. Check Cache first to avoid queueing if data exists and is under 30 mins old
     try {
-      const cacheKey = `api_cache_${url}`;
-      const cachedStr = sessionStorage.getItem(cacheKey);
+      const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
       if (cachedStr) {
         const cached = JSON.parse(cachedStr);
         if (Date.now() - cached.timestamp < CACHE_DURATION) {
@@ -79,9 +93,12 @@ const fetchWithCacheAndRateLimit = (url: string): Promise<any> => {
       }
     } catch (e) {}
 
-    // 2. If not cached, add to strict sequential queue
-    requestQueue.push({ url, resolve });
-    processQueue();
+    if (typeof window !== 'undefined') {
+      getGlobalQueue().push({ url, resolve });
+      processQueue();
+    } else {
+      resolve(null);
+    }
   });
 };
 
@@ -95,7 +112,6 @@ const getShowcaseImageUrl = (item: any) => {
   if (item.entity_info && Array.isArray(item.entity_info)) {
      const artworkAlt = item.entity_info.find((i: any) => i.key === "artwork_alt");
      if (artworkAlt && artworkAlt.value) return artworkAlt.value.replace(/size_[ms]/g, "size_l");
-     
      const atwAlt = item.entity_info.find((i: any) => i.key === "atw_alt");
      if (atwAlt && atwAlt.value) return atwAlt.value.replace(/size_[ms]/g, "size_l");
   }
@@ -122,9 +138,8 @@ const getSubtitle = (item: any) => {
 
 // --- LAZY IMAGE COMPONENT ---
 const LazyImage = ({ src, alt, className, objectFit = "object-cover" }: any) => {
-  const [loaded, setLoaded] = useState(false);
+  const[loaded, setLoaded] = useState(false);
   const placeholder = "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
-  
   return (
     <div className={`relative overflow-hidden ${className}`} style={{ backgroundImage: `url(${placeholder})`, backgroundSize: 'cover', backgroundPosition: 'center' }}>
       <img 
@@ -168,17 +183,19 @@ export default function Home() {
   
   const[isInitializing, setIsInitializing] = useState(true);
   const [sections, setSections] = useState<any[]>([]);
+  
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
+  const lastLoadedLang = useRef<string | null>(null);
 
-  const[viewAll, setViewAll] = useState<any | null>(null);
-  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const [viewAll, setViewAll] = useState<any | null>(null);
+  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
 
-  // --- PROGRESSIVE SCROLL FETCHER (With Global Rate Limiter & Caching) ---
+  // --- PROGRESSIVE SCROLL FETCHER ---
   const fetchNextChunk = async (chunkSize = 3) => {
     if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
     isLoadingRef.current = true;
@@ -196,7 +213,7 @@ export default function Home() {
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
         configs.push(conf);
-        fetchTasks.push(fetchWithCacheAndRateLimit(url)); // Uses rate-limited cache queue
+        fetchTasks.push(fetchWithCacheAndRateLimit(url));
       }
 
       const results = await Promise.all(fetchTasks);
@@ -219,7 +236,7 @@ export default function Home() {
 
       nextIndexRef.current += chunkSize;
       if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
-    } catch (e) { } // Silent to prevent logs
+    } catch (e) { /* Silent */ }
     
     isLoadingRef.current = false;
   };
@@ -227,6 +244,8 @@ export default function Home() {
   // --- INITIAL MOUNT & STATE RESTORATION ---
   useEffect(() => {
     if (typeof window === 'undefined') return;
+    if (lastLoadedLang.current === language) return; // Prevent StrictMode ghost re-runs
+    lastLoadedLang.current = language;
 
     const initLoad = async () => {
       const savedLang = sessionStorage.getItem('homeState_lang');
@@ -239,10 +258,8 @@ export default function Home() {
             
             const savedViewAll = sessionStorage.getItem('homeState_viewAll');
             if (savedViewAll && savedViewAll !== 'null') {
-               // Push state defensively so hardware back button goes to home, not closes app
                window.history.replaceState({ home: true }, ''); 
-               window.history.pushState({ viewAllOpen: true }, ''); 
-               
+               window.history.pushState({ viewAllOpen: true }, '', window.location.href); 
                setViewAll(JSON.parse(savedViewAll));
                setTimeout(() => window.scrollTo(0, parseInt(sessionStorage.getItem('viewAllScrollY') || '0')), 100);
             } else {
@@ -253,7 +270,6 @@ export default function Home() {
          }
       }
 
-      // Fresh load if changed language or empty cache
       sessionStorage.removeItem('homeState_viewAll');
       sessionStorage.removeItem('homeScrollY');
       sessionStorage.removeItem('viewAllScrollY');
@@ -268,13 +284,10 @@ export default function Home() {
     initLoad();
   }, [language]);
 
-  // --- HARDWARE BACK BUTTON LOGIC (PopState Handler) ---
+  // --- HARDWARE BACK BUTTON LOGIC ---
   useEffect(() => {
     const handlePopState = () => {
-       if (viewAll) {
-         // Back button triggered while View All is open. Close it safely without closing app
-         closeViewAll(true);
-       }
+       if (viewAll) closeViewAll(true);
     };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
@@ -297,7 +310,7 @@ export default function Home() {
   useEffect(() => {
     if (viewAll || isInitializing || sections.length === 0) return;
     const observer = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) fetchNextChunk(3);
+      if (entries[0].isIntersecting && !isLoadingRef.current) fetchNextChunk(3);
     }, { rootMargin: "600px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
@@ -363,8 +376,7 @@ export default function Home() {
   const openViewAll = (section: any) => {
     if (typeof window !== 'undefined') {
        sessionStorage.setItem('homeScrollY', window.scrollY.toString());
-       // Pushing state to hijack next hardware back button press to close this UI
-       window.history.pushState({ viewAllOpen: true }, ''); 
+       window.history.pushState({ viewAllOpen: true }, '', window.location.href); 
     }
     const vAll = { 
         title: section.title, 
@@ -391,14 +403,12 @@ export default function Home() {
             window.scrollTo(0, savedHomeScroll ? parseInt(savedHomeScroll) : 0);
         }, 50);
 
-        // If closed manually via the on-screen button, reverse the history push manually
         if (!fromPopState) {
-           window.history.back();
+           window.history.back(); // Pops the state so default browser back continues working normally 
         }
     }
   };
 
-  // Immediate Initial Loader
   if (isInitializing || sections.length === 0) {
     return (
       <div className="flex h-screen flex-col items-center justify-center bg-[#0B1320] text-white">
@@ -425,7 +435,7 @@ export default function Home() {
         </div>
         
         {!viewAll.noPagination && (
-           <div ref={viewAllObserverRef} className="w-full flex justify-center py-8 mt-4">
+           <div ref={viewAllObserverRef} className="w-full flex justify-center py-8 mt-4 h-20">
               {isFetchingViewAll && viewAll.hasMore && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
               {!viewAll.hasMore && <p className="text-blue-200/50 text-sm font-medium">You have reached the end.</p>}
            </div>
@@ -451,7 +461,7 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Search Bar - Controlled strictly by onClick, disables prefetching bugs */}
+      {/* Search Bar - Removed <Link> completely so Next.js STOPS secretly fetching data in the background */}
       <div onClick={() => router.push('/search?action=focus')} className="mx-4 mb-8 flex items-center bg-[#131D30] border border-[#1e293b] rounded-full h-[54px] px-5 cursor-pointer hover:bg-[#1a263d] active:scale-[0.98] transition-all shadow-lg">
          <SearchIcon size={22} className="text-blue-200/50" />
          <span className="text-blue-200/50 ml-3 text-[15px] font-medium tracking-wide">Search songs, artists, podcasts...</span>
@@ -494,9 +504,9 @@ export default function Home() {
         );
       })}
 
-      {/* Bottom Loader Anchor for Infinite Section Scroll */}
+      {/* Bottom Loader Anchor */}
       {nextIndexRef.current < SECTION_CONFIGS.length && (
-         <div ref={observerRef} className="w-full flex justify-center py-6 mt-4">
+         <div ref={observerRef} className="w-full flex justify-center py-6 mt-4 h-20">
             <Loader2 className="animate-spin text-[#1db954]" size={30} />
          </div>
       )}
