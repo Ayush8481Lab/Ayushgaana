@@ -5,7 +5,7 @@
 
 import React, { useEffect, useState, useRef } from "react";
 import { useAppContext } from "../context/AppContext";
-import { Search as SearchIcon, Mic, ChevronLeft, Loader2 } from "lucide-react";
+import { Search as SearchIcon, Mic, ChevronLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 // --- API CONSTANTS ---
@@ -30,7 +30,7 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
-// --- GLOBAL STRICT RATE LIMITER (1 Request per sec, survives React StrictMode) ---
+// --- GLOBAL STRICT RATE LIMITER ---
 declare global {
   interface Window {
     __GAANA_API_QUEUE__?: { url: string; resolve: (data: any) => void }[];
@@ -56,10 +56,8 @@ const processQueue = async () => {
     const lastTime = window.__GAANA_API_LAST_TIME__ || 0;
     const timeSinceLast = now - lastTime;
     
-    // Strict enforcement: Exactly 1000ms delay between API Request starts
-    if (timeSinceLast < 1000) {
-      await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
-    }
+    // Fallback Strict Limiter (UI thread already handles standard delays now)
+    if (timeSinceLast < 1000) await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
 
     if (queue.length === 0) break;
     const { url, resolve } = queue.shift()!;
@@ -69,7 +67,7 @@ const processQueue = async () => {
       const res = await fetch(url);
       if (res.ok || res.status === 202 || res.status === 200) {
         const data = await res.json();
-        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) { /* silent ignore */ }
+        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) { }
         resolve(data);
       } else {
         resolve(null);
@@ -87,9 +85,7 @@ const fetchWithCacheAndRateLimit = (url: string): Promise<any> => {
       const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
       if (cachedStr) {
         const cached = JSON.parse(cachedStr);
-        if (Date.now() - cached.timestamp < CACHE_DURATION) {
-          return resolve(cached.data);
-        }
+        if (Date.now() - cached.timestamp < CACHE_DURATION) return resolve(cached.data);
       }
     } catch (e) {}
 
@@ -177,74 +173,100 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
   );
 };
 
+// --- YOUTUBE/SPOTIFY STYLE SKELETON (Replaces all Circular Spinners) ---
+const SectionSkeleton = ({ isShowcase = false }: { isShowcase?: boolean }) => (
+  <div className={`w-full animate-pulse ${isShowcase ? "mt-2 mb-10 px-4" : "mb-10"}`}>
+    {isShowcase ? (
+      <div className="w-[90vw] md:w-[600px] aspect-[720/375] bg-[#131D30] rounded-2xl border border-[#1e293b]"></div>
+    ) : (
+      <>
+        <div className="flex items-center justify-between px-4 mb-4">
+          <div className="h-[22px] bg-[#131D30] rounded-md w-32 md:w-48"></div>
+          <div className="h-[24px] bg-[#131D30] rounded-full w-16"></div>
+        </div>
+        <div className="flex gap-4 overflow-hidden px-4">
+          {[...Array(5)].map((_, i) => (
+            <div key={i} className="w-[29vw] sm:w-[180px] md:w-[210px] flex-shrink-0">
+              <div className="w-full aspect-[1/1] bg-[#131D30] rounded-2xl mb-2 border border-[#1e293b]"></div>
+              <div className="h-3 bg-[#131D30] rounded w-3/4 mx-auto mt-2"></div>
+              <div className="h-2 bg-[#131D30] rounded w-1/2 mx-auto mt-1.5"></div>
+            </div>
+          ))}
+        </div>
+      </>
+    )}
+  </div>
+);
+
+
 export default function Home() {
   const { language, setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   const router = useRouter();
   
-  const[isInitializing, setIsInitializing] = useState(true);
-  const [sections, setSections] = useState<any[]>([]);
+  const [isInitializing, setIsInitializing] = useState(true);
+  const [isChunkLoading, setIsChunkLoading] = useState(false);
+  const[sections, setSections] = useState<any[]>([]);
   
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
   const lastLoadedLang = useRef<string | null>(null);
 
   const [viewAll, setViewAll] = useState<any | null>(null);
-  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
 
-  // --- PROGRESSIVE SCROLL FETCHER ---
+  // --- STRICT SEQUENTIAL FETCHER (Waits 1 sec AFTER each request is completed) ---
   const fetchNextChunk = async (chunkSize = 3) => {
     if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
     isLoadingRef.current = true;
+    setIsChunkLoading(true);
     
     try {
-      const fetchTasks = [];
-      const configs: any[] =[];
-
       for (let i = 0; i < chunkSize; i++) {
-        const idx = nextIndexRef.current + i;
+        const idx = nextIndexRef.current;
         if (idx >= SECTION_CONFIGS.length) break;
         
         const conf = SECTION_CONFIGS[idx];
         let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-        configs.push(conf);
-        fetchTasks.push(fetchWithCacheAndRateLimit(url));
+        // 1. AWAIT RESPONSE FOR EXACTLY ONE API CALL
+        const json = await fetchWithCacheAndRateLimit(url);
+        
+        if (json) {
+           const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
+           if (data.length > 0) {
+              setSections(prev => {
+                  if (prev.some(s => s.key === conf.key)) return prev;
+                  const updated = [...prev, { ...conf, data }];
+                  if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
+                  return updated;
+              });
+           }
+        }
+
+        // 2. INCREMENT INDEX
+        nextIndexRef.current += 1;
+        if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
+
+        // 3. STRICTLY WAIT 1 SECOND BEFORE REQUESTING NEXT IN CHUNK (if not the absolute last section)
+        if (nextIndexRef.current < SECTION_CONFIGS.length) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
       }
-
-      const results = await Promise.all(fetchTasks);
-      const newSections: any[] =[];
-      
-      results.forEach((json, i) => {
-         if(json) {
-            const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
-            if (data.length > 0) newSections.push({ ...configs[i], data });
-         }
-      });
-
-      if (newSections.length > 0) {
-         setSections(prev => {
-             const updated = [...prev, ...newSections];
-             if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
-             return updated;
-         });
-      }
-
-      nextIndexRef.current += chunkSize;
-      if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
     } catch (e) { /* Silent */ }
     
     isLoadingRef.current = false;
+    setIsChunkLoading(false);
   };
 
   // --- INITIAL MOUNT & STATE RESTORATION ---
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (lastLoadedLang.current === language) return; // Prevent StrictMode ghost re-runs
+    if (lastLoadedLang.current === language) return; 
     lastLoadedLang.current = language;
 
     const initLoad = async () => {
@@ -282,13 +304,11 @@ export default function Home() {
     };
 
     initLoad();
-  }, [language]);
+  },[language]);
 
   // --- HARDWARE BACK BUTTON LOGIC ---
   useEffect(() => {
-    const handlePopState = () => {
-       if (viewAll) closeViewAll(true);
-    };
+    const handlePopState = () => { if (viewAll) closeViewAll(true); };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   },[viewAll]);
@@ -315,7 +335,7 @@ export default function Home() {
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  }, [sections, viewAll, isInitializing, language]);
+  },[sections, viewAll, isInitializing, language]);
 
   // Infinite Scroll for "View All"
   useEffect(() => {
@@ -329,7 +349,7 @@ export default function Home() {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
            if (newItems.length > 0) {
              setViewAll((prev: any) => {
-                const updated = { ...prev, data: [...prev.data, ...newItems], offset: prev.offset + 40 };
+                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
              });
@@ -399,22 +419,26 @@ export default function Home() {
         sessionStorage.removeItem('viewAllScrollY');
         
         const savedHomeScroll = sessionStorage.getItem('homeScrollY');
-        setTimeout(() => {
-            window.scrollTo(0, savedHomeScroll ? parseInt(savedHomeScroll) : 0);
-        }, 50);
+        setTimeout(() => window.scrollTo(0, savedHomeScroll ? parseInt(savedHomeScroll) : 0), 50);
 
-        if (!fromPopState) {
-           window.history.back(); // Pops the state so default browser back continues working normally 
-        }
+        if (!fromPopState) window.history.back(); 
     }
   };
 
+  // --- INITIAL YOUTUBE STYLE SKELETON (Replaces old blocky boxes) ---
   if (isInitializing || sections.length === 0) {
     return (
-      <div className="flex h-screen flex-col items-center justify-center bg-[#0B1320] text-white">
-        <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4 animate-pulse opacity-40 px-4 w-full">
-           {[...Array(12)].map((_, i) => <div key={i} className="w-full aspect-[1/1] bg-[#131D30] rounded-2xl" />)}
-        </div>
+      <div className="flex min-h-screen flex-col bg-[#0B1320] text-white pt-10 pb-28">
+         <div className="px-4 mb-6 flex items-center justify-between">
+           <div className="flex items-center gap-3">
+             <div className="w-9 h-9 rounded-full bg-[#1db954]/50 animate-pulse"></div>
+             <div className="h-7 w-32 bg-[#131D30] rounded-md animate-pulse"></div>
+           </div>
+         </div>
+         <div className="mx-4 mb-8 bg-[#131D30] rounded-full h-[54px] animate-pulse"></div>
+         <SectionSkeleton isShowcase={true} />
+         <SectionSkeleton />
+         <SectionSkeleton />
       </div>
     );
   }
@@ -432,11 +456,23 @@ export default function Home() {
            {viewAll.data.map((item: any, i: number) => (
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
            ))}
+
+           {/* View All YouTube Style Skeleton (Replaces Circular Spinner) */}
+           {isFetchingViewAll && viewAll.hasMore && (
+              <>
+                 {[...Array(7)].map((_, i) => (
+                    <div key={`skel-${i}`} className="w-full flex-shrink-0 animate-pulse">
+                      <div className="w-full aspect-[1/1] bg-[#131D30] rounded-2xl mb-2 border border-[#1e293b]"></div>
+                      <div className="h-3 bg-[#131D30] rounded w-3/4 mx-auto mt-2"></div>
+                      <div className="h-2 bg-[#131D30] rounded w-1/2 mx-auto mt-1.5"></div>
+                    </div>
+                 ))}
+              </>
+           )}
         </div>
         
         {!viewAll.noPagination && (
-           <div ref={viewAllObserverRef} className="w-full flex justify-center py-8 mt-4 h-20">
-              {isFetchingViewAll && viewAll.hasMore && <Loader2 className="animate-spin text-[#1db954]" size={30} />}
+           <div ref={viewAllObserverRef} className="w-full flex justify-center py-4 mt-2">
               {!viewAll.hasMore && <p className="text-blue-200/50 text-sm font-medium">You have reached the end.</p>}
            </div>
         )}
@@ -461,7 +497,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* Search Bar - Removed <Link> completely so Next.js STOPS secretly fetching data in the background */}
       <div onClick={() => router.push('/search?action=focus')} className="mx-4 mb-8 flex items-center bg-[#131D30] border border-[#1e293b] rounded-full h-[54px] px-5 cursor-pointer hover:bg-[#1a263d] active:scale-[0.98] transition-all shadow-lg">
          <SearchIcon size={22} className="text-blue-200/50" />
          <span className="text-blue-200/50 ml-3 text-[15px] font-medium tracking-wide">Search songs, artists, podcasts...</span>
@@ -470,7 +505,6 @@ export default function Home() {
          </button>
       </div>
 
-      {/* Showcase / Top Picks */}
       {sections.length > 0 && sections[0].key === "showcase" && (
         <div className="mb-10 mt-2">
           <div ref={showcaseRef} className="flex gap-4 overflow-x-auto hide-scrollbar px-4 snap-x pb-2 items-center">
@@ -485,10 +519,8 @@ export default function Home() {
         </div>
       )}
 
-      {/* Dynamic Render of All Other Sections */}
       {sections.map((section, idx) => {
         if (section.key === "showcase" || !section.data || section.data.length === 0) return null;
-        
         return (
           <div key={idx} className="mb-10">
             <div className="flex items-center justify-between px-4 mb-4">
@@ -504,11 +536,12 @@ export default function Home() {
         );
       })}
 
-      {/* Bottom Loader Anchor */}
+      {/* Infinite Scroll Anchor & Skeleton Layout (Replaces Circular Spinner) */}
       {nextIndexRef.current < SECTION_CONFIGS.length && (
-         <div ref={observerRef} className="w-full flex justify-center py-6 mt-4 h-20">
-            <Loader2 className="animate-spin text-[#1db954]" size={30} />
-         </div>
+         <>
+            <div ref={observerRef} className="w-full h-1" />
+            {isChunkLoading && <SectionSkeleton />}
+         </>
       )}
     </main>
   );
