@@ -60,7 +60,7 @@ const fetchStrictly = (url: string): Promise<any> => {
       // INJECTED VERCEL AUTOMATION PROTECTION BYPASS (Official Method)
       const res = await fetch(url, {
         headers: {
-          "x-vercel-protection-bypass": AUTOMATION_SECRET
+          "x-vercel-protection-bypass:": AUTOMATION_SECRET
         }
       });
       
