@@ -9,7 +9,6 @@ import { Play, ArrowLeft, Shuffle, Share2, Info, BadgeAlert, Heart, Clock } from
 import { useAppContext } from "../../../context/AppContext";
 
 // --- GLOBAL SECRETS & CONSTANTS ---
-const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
 const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 const CACHE_DURATION = 72 * 60 * 60 * 1000; // 72 hours in milliseconds
 
@@ -75,7 +74,7 @@ const decodeEntities = (text: string) => {
 const getImageUrl = (item: any) => {
   if (!item) return "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
   if (typeof item === 'string') return item.replace(/size_[ms]/g, "size_l").replace("150x150", "500x500").replace("50x50", "500x500");
-  let img = item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
+  let img = item.artworkUrl || item.artwork_large || item.artwork_web || item.atw || item.artwork || item.image || "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
   return img.replace(/size_[ms]/g, "size_l").replace("150x150", "500x500").replace("50x50", "500x500");
 };
 
@@ -90,7 +89,7 @@ const formatDuration = (seconds: number) => {
 const PingPongMarquee = ({ text, isPlaying, isSub }: { text: string, isPlaying?: boolean, isSub?: boolean }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
-  const [overflowWidth, setOverflowWidth] = useState(0);
+  const[overflowWidth, setOverflowWidth] = useState(0);
 
   useEffect(() => {
     const checkOverflow = () => {
@@ -192,35 +191,35 @@ function PlaylistContent() {
     return () => window.removeEventListener("scroll", handleScroll);
   },[]);
 
-  // Fetch Gaana Playlist strictly optimized
+  // Fetch New Gaana Playlist Format
   useEffect(() => {
     if (!seokey) return;
 
     const fetchPlaylist = async () => {
       setLoading(true);
-      const url = `${API_BASE}/playlist/detail?seokey=${seokey}&st=hls&pkc=true&request_type=web&isChrome=1`;
+      const url = `https://gaanaayush.vercel.app/api/playlists/${seokey}`;
       
       const json = await fetchStrictly(url);
+      const pData = json?.data?.data?.playlist || json?.data?.playlist || json?.playlist;
       
-      if (json && json.data && json.data.tracks) {
-        const data = json.data;
-        const tracks = data.tracks ||[];
+      if (pData && pData.tracks) {
+        const tracks = pData.tracks ||[];
         
-        // Gaana specific title formatting fallback if not in JSON explicitly
-        let computedTitle = data.playlist?.title || data.title;
-        if (!computedTitle) {
-          computedTitle = seokey.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        }
-
         setPlaylist({
-          id: data.playlist_id || seokey,
-          seokey: seokey,
-          title: computedTitle,
-          songs: tracks,
-          image: tracks[0] ? getImageUrl(tracks[0]) : "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg",
-          topArtists: data.top_artists ? data.top_artists.map((a: any) => a.name).join(", ") : "Various Artists",
-          count: data.count || tracks.length,
-          favorite_count: data.favorite_count || "0",
+          id: pData.playlist_id || seokey,
+          seokey: pData.seokey || seokey,
+          title: pData.title || seokey.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+          songs: tracks.map((t: any) => ({
+             ...t,
+             id: t.track_id, // Normalize to id
+             name: t.title, // Normalize title
+             image: t.artworkUrl || t.artwork,
+             artist_name: t.artists
+          })),
+          image: pData.artworkUrl || (tracks[0] ? (tracks[0].artworkUrl || tracks[0].artwork) : "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg"),
+          topArtists: pData.author || "Various Artists",
+          count: pData.trackcount || tracks.length,
+          favorite_count: pData.favorite_count || "0",
           type: "playlist"
         });
       }
@@ -228,7 +227,7 @@ function PlaylistContent() {
     };
 
     fetchPlaylist();
-  }, [seokey]);
+  },[seokey]);
 
   const handlePlaySong = useCallback((song: any) => {
     if (playlist && playlist.songs) {
@@ -251,7 +250,7 @@ function PlaylistContent() {
     setQueue(shuffled);
     setCurrentSong(shuffled[0]);
     setIsPlaying(true);
-  }, [playlist, setQueue, setPlayContext, setCurrentSong, setIsPlaying]);
+  },[playlist, setQueue, setPlayContext, setCurrentSong, setIsPlaying]);
 
   const handleShare = useCallback(async () => {
     const shareData = {
@@ -270,11 +269,9 @@ function PlaylistContent() {
 
   const renderedSongs = useMemo(() => {
     return playlist?.songs?.map((song: any, index: number) => {
-      const songTitle = song.track_title || song.title || song.name || "Unknown Track";
-      const artists = song.artist && Array.isArray(song.artist) 
-        ? song.artist.map((a: any) => a.name).join(", ") 
-        : "Unknown Artist";
-      const plays = song.play_ct || "—";
+      const songTitle = song.title || song.track_title || song.name || "Unknown Track";
+      const artists = song.artists || song.artist_name || "Unknown Artist";
+      const albumName = song.album || "Unknown Album";
       const durationStr = formatDuration(parseInt(song.duration) || 0);
       const isCurrentPlaying = currentSongId === (song.track_id || song.id);
 
@@ -282,7 +279,7 @@ function PlaylistContent() {
         <div 
           key={`${song.track_id || index}`} 
           onClick={() => handlePlaySong(song)} 
-          className={`grid grid-cols-[36px_1fr_auto] md:grid-cols-[48px_1fr_100px_80px] gap-2 md:gap-4 items-center p-2 rounded-xl cursor-pointer group transition-all duration-200 border border-transparent ${isCurrentPlaying ? "bg-[#131D30] border-[#1e293b]" : "hover:bg-[#131D30] hover:border-[#1e293b]"}`}
+          className={`grid grid-cols-[36px_1fr_auto] md:grid-cols-[48px_1fr_1fr_80px] gap-2 md:gap-4 items-center p-2 rounded-xl cursor-pointer group transition-all duration-200 border border-transparent ${isCurrentPlaying ? "bg-[#131D30] border-[#1e293b]" : "hover:bg-[#131D30] hover:border-[#1e293b]"}`}
         >
           <div className="flex justify-center items-center h-full relative text-blue-200/40">
             {isCurrentPlaying ? (
@@ -294,7 +291,7 @@ function PlaylistContent() {
           </div>
           
           <div className="flex items-center gap-3 overflow-hidden pr-2">
-            <div className="relative w-10 h-10 md:w-12 md:h-12 flex-shrink-0 bg-[#0B1320] rounded-lg border border-[#1e293b] shadow-sm overflow-hidden pointer-events-none">
+            <div className="relative w-12 h-12 md:w-14 md:h-14 flex-shrink-0 bg-[#0B1320] rounded-lg border border-[#1e293b] shadow-sm overflow-hidden pointer-events-none">
               <img src={getImageUrl(song)} alt="track" className="w-full h-full object-cover" draggable={false} />
             </div>
             <div className="flex-1 min-w-0 flex flex-col justify-center overflow-hidden">
@@ -306,8 +303,8 @@ function PlaylistContent() {
             </div>
           </div>
 
-          <div className="hidden md:flex items-center text-[12px] md:text-[13px] font-medium text-blue-200/50 group-hover:text-blue-200/80 transition-colors">
-            {plays}
+          <div className="hidden md:flex items-center text-[13px] md:text-[14px] font-medium text-blue-200/50 group-hover:text-blue-200/80 transition-colors truncate pr-4">
+            <span className="truncate w-full">{albumName}</span>
           </div>
           
           <div className="flex items-center justify-end gap-3 md:gap-6 pr-2 md:pr-4">
@@ -356,11 +353,11 @@ function PlaylistContent() {
         .eq-bar-4 { animation: eq 1s ease-in-out infinite 0.1s; }
       `}} />
 
-      {/* Hero Background Effect */}
+      {/* Hero Background Effect (Decreased Blur for more color pop) */}
       <div className="absolute top-0 left-0 w-full h-[450px] md:h-[500px] pointer-events-none overflow-hidden z-0 select-none">
         <div className="absolute inset-0 bg-[#0B1320]" />
-        <img src={playlist.image} alt="bg" className="absolute inset-0 w-full h-full object-cover blur-[100px] saturate-[150%] opacity-50 transform-gpu" draggable={false} />
-        <div className="absolute inset-0 bg-gradient-to-b from-[#131D30]/30 via-[#0B1320]/80 to-[#0B1320]" />
+        <img src={playlist.image} alt="bg" className="absolute inset-0 w-full h-full object-cover blur-[60px] saturate-[180%] opacity-[0.65] transform-gpu" draggable={false} />
+        <div className="absolute inset-0 bg-gradient-to-b from-[#131D30]/20 via-[#0B1320]/70 to-[#0B1320]" />
       </div>
 
       {/* Sticky Header */}
@@ -437,11 +434,11 @@ function PlaylistContent() {
         </div>
       </div>
 
-      {/* Table Header (Desktop) */}
-      <div className="relative z-10 px-4 md:px-8 mt-2 hidden md:grid grid-cols-[48px_1fr_100px_80px] gap-4 items-center text-[12px] md:text-[13px] font-bold uppercase tracking-widest text-blue-200/40 border-b border-[#1e293b] pb-3 mb-4 sticky top-[68px] bg-[#0B1320]/95 backdrop-blur-md">
+      {/* Table Header (Desktop) - Added Album column! */}
+      <div className="relative z-10 px-4 md:px-8 mt-2 hidden md:grid grid-cols-[48px_1fr_1fr_80px] gap-4 items-center text-[12px] md:text-[13px] font-bold uppercase tracking-widest text-blue-200/40 border-b border-[#1e293b] pb-3 mb-4 sticky top-[68px] bg-[#0B1320]/95 backdrop-blur-md">
         <div className="text-center">#</div>
         <div>Title</div>
-        <div>Plays</div>
+        <div>Album</div>
         <div className="text-right pr-6"><Clock size={16} className="inline-block" /></div>
       </div>
 
@@ -450,13 +447,6 @@ function PlaylistContent() {
         {renderedSongs}
       </div>
 
-      {/* Playlist Footer Footer */}
-      {playlist.songs?.length > 0 && (
-        <div className="px-5 md:px-12 py-16 mt-6 flex flex-col gap-1 text-blue-200/30 text-[12px] md:text-[13px] font-medium border-t border-[#1e293b]">
-          <p className="font-bold">{playlist.songs.length} tracks • {totalDurationStr}</p>
-          <p className="max-w-2xl mt-1 tracking-wide uppercase">Provided by Gaana Web</p>
-        </div>
-      )}
     </div>
   );
 }
