@@ -30,73 +30,59 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
-// --- GLOBAL STRICT RATE LIMITER ---
+// --- STRICT IRONCLAD GLOBAL FETCH LOCK (Guarantees exactly 1s gap AFTER response) ---
 declare global {
   interface Window {
-    __GAANA_API_QUEUE__?: { url: string; resolve: (data: any) => void }[];
-    __GAANA_API_PROCESSING__?: boolean;
-    __GAANA_API_LAST_TIME__?: number;
+    __GAANA_API_LOCK__?: Promise<any>;
   }
 }
 
-const getGlobalQueue = () => {
-  if (typeof window === 'undefined') return[];
-  if (!window.__GAANA_API_QUEUE__) window.__GAANA_API_QUEUE__ =[];
-  return window.__GAANA_API_QUEUE__;
-};
+const fetchStrictly = (url: string): Promise<any> => {
+  // 1. Cache Check: Instant return if cached (no network, no delays needed)
+  try {
+    const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
+    if (cachedStr) {
+      const cached = JSON.parse(cachedStr);
+      if (Date.now() - cached.timestamp < CACHE_DURATION) return Promise.resolve(cached.data);
+    }
+  } catch (e) {}
 
-const processQueue = async () => {
-  if (typeof window === 'undefined' || window.__GAANA_API_PROCESSING__) return;
-  window.__GAANA_API_PROCESSING__ = true;
+  // 2. Network Fetch with Strict Promise Chaining
+  if (typeof window !== 'undefined') {
+    if (!window.__GAANA_API_LOCK__) {
+      window.__GAANA_API_LOCK__ = Promise.resolve();
+    }
 
-  const queue = getGlobalQueue();
+    const executeFetch = async () => {
+      try {
+        const res = await fetch(url);
+        let data = null;
+        if (res.ok || res.status === 202 || res.status === 200) {
+          data = await res.json();
+          try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
+        }
+        
+        // STRICTLY WAIT 1 FULL SECOND AFTER GETTING THE RESPONSE
+        await new Promise(r => setTimeout(r, 1000));
+        return data;
 
-  while (queue.length > 0) {
-    const now = Date.now();
-    const lastTime = window.__GAANA_API_LAST_TIME__ || 0;
-    const timeSinceLast = now - lastTime;
+      } catch (e) {
+        // Even on error, strictly wait 1 second to prevent spam
+        await new Promise(r => setTimeout(r, 1000));
+        return null;
+      }
+    };
+
+    // Chain to the global lock so it executes one-by-one
+    const resultPromise = window.__GAANA_API_LOCK__.then(executeFetch);
     
-    // Fallback Strict Limiter (UI thread already handles standard delays now)
-    if (timeSinceLast < 1000) await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
-
-    if (queue.length === 0) break;
-    const { url, resolve } = queue.shift()!;
-    window.__GAANA_API_LAST_TIME__ = Date.now();
-
-    try {
-      const res = await fetch(url);
-      if (res.ok || res.status === 202 || res.status === 200) {
-        const data = await res.json();
-        try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) { }
-        resolve(data);
-      } else {
-        resolve(null);
-      }
-    } catch (e) {
-      resolve(null);
-    }
+    // Update lock pointer
+    window.__GAANA_API_LOCK__ = resultPromise.catch(() => {});
+    return resultPromise;
   }
-  window.__GAANA_API_PROCESSING__ = false;
+  return Promise.resolve(null);
 };
 
-const fetchWithCacheAndRateLimit = (url: string): Promise<any> => {
-  return new Promise((resolve) => {
-    try {
-      const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
-      if (cachedStr) {
-        const cached = JSON.parse(cachedStr);
-        if (Date.now() - cached.timestamp < CACHE_DURATION) return resolve(cached.data);
-      }
-    } catch (e) {}
-
-    if (typeof window !== 'undefined') {
-      getGlobalQueue().push({ url, resolve });
-      processQueue();
-    } else {
-      resolve(null);
-    }
-  });
-};
 
 // --- UTILS ---
 const getImageUrl = (item: any) => {
@@ -173,7 +159,7 @@ const PremiumCard = ({ item, onClick, showSubtitle, fullWidth = false }: any) =>
   );
 };
 
-// --- YOUTUBE/SPOTIFY STYLE SKELETON (Replaces all Circular Spinners) ---
+// --- YOUTUBE/SPOTIFY STYLE SKELETON ---
 const SectionSkeleton = ({ isShowcase = false }: { isShowcase?: boolean }) => (
   <div className={`w-full animate-pulse ${isShowcase ? "mt-2 mb-10 px-4" : "mb-10"}`}>
     {isShowcase ? (
@@ -203,7 +189,7 @@ export default function Home() {
   const { language, setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   const router = useRouter();
   
-  const [isInitializing, setIsInitializing] = useState(true);
+  const[isInitializing, setIsInitializing] = useState(true);
   const [isChunkLoading, setIsChunkLoading] = useState(false);
   const[sections, setSections] = useState<any[]>([]);
   
@@ -218,9 +204,10 @@ export default function Home() {
   const observerRef = useRef<HTMLDivElement>(null);
   const viewAllObserverRef = useRef<HTMLDivElement>(null);
 
-  // --- STRICT SEQUENTIAL FETCHER (Waits 1 sec AFTER each request is completed) ---
+  // --- SEQUENTIAL FETCHER (Awaits Strict Global Fetcher) ---
   const fetchNextChunk = async (chunkSize = 3) => {
     if (nextIndexRef.current >= SECTION_CONFIGS.length || isLoadingRef.current || viewAll) return;
+    
     isLoadingRef.current = true;
     setIsChunkLoading(true);
     
@@ -233,14 +220,14 @@ export default function Home() {
         let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-        // 1. AWAIT RESPONSE FOR EXACTLY ONE API CALL
-        const json = await fetchWithCacheAndRateLimit(url);
+        // Wait completely for the global fetcher (which enforces the 1s delay AFTER response implicitly)
+        const json = await fetchStrictly(url);
         
         if (json) {
            const data = json?.data?.entities || json?.data?.tracks || json?.data ||[];
            if (data.length > 0) {
               setSections(prev => {
-                  if (prev.some(s => s.key === conf.key)) return prev;
+                  if (prev.some(s => s.key === conf.key)) return prev; // Prevent duplicate keys
                   const updated = [...prev, { ...conf, data }];
                   if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
                   return updated;
@@ -248,14 +235,8 @@ export default function Home() {
            }
         }
 
-        // 2. INCREMENT INDEX
         nextIndexRef.current += 1;
         if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
-
-        // 3. STRICTLY WAIT 1 SECOND BEFORE REQUESTING NEXT IN CHUNK (if not the absolute last section)
-        if (nextIndexRef.current < SECTION_CONFIGS.length) {
-          await new Promise(r => setTimeout(r, 1000));
-        }
       }
     } catch (e) { /* Silent */ }
     
@@ -345,7 +326,7 @@ export default function Home() {
         setIsFetchingViewAll(true);
         const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAll.offset},40`;
         
-        fetchWithCacheAndRateLimit(url).then(json => {
+        fetchStrictly(url).then(json => {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
            if (newItems.length > 0) {
              setViewAll((prev: any) => {
@@ -425,7 +406,7 @@ export default function Home() {
     }
   };
 
-  // --- INITIAL YOUTUBE STYLE SKELETON (Replaces old blocky boxes) ---
+  // --- INITIAL YOUTUBE STYLE SKELETON ---
   if (isInitializing || sections.length === 0) {
     return (
       <div className="flex min-h-screen flex-col bg-[#0B1320] text-white pt-10 pb-28">
@@ -457,7 +438,6 @@ export default function Home() {
                <PremiumCard key={i} item={item} showSubtitle={viewAll.showSubtitle} fullWidth={true} onClick={handleItemClick} />
            ))}
 
-           {/* View All YouTube Style Skeleton (Replaces Circular Spinner) */}
            {isFetchingViewAll && viewAll.hasMore && (
               <>
                  {[...Array(7)].map((_, i) => (
@@ -536,7 +516,7 @@ export default function Home() {
         );
       })}
 
-      {/* Infinite Scroll Anchor & Skeleton Layout (Replaces Circular Spinner) */}
+      {/* Infinite Scroll Anchor & Skeleton Buffer */}
       {nextIndexRef.current < SECTION_CONFIGS.length && (
          <>
             <div ref={observerRef} className="w-full h-1" />
