@@ -183,16 +183,15 @@ export default function Home() {
   const { language, setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   const router = useRouter();
   
-  const[isInitializing, setIsInitializing] = useState(true);
-  const [isChunkLoading, setIsChunkLoading] = useState(false);
-  const[sections, setSections] = useState<any[]>([]);
+  const [isInitializing, setIsInitializing] = useState(true);
+  const[isChunkLoading, setIsChunkLoading] = useState(false);
+  const [sections, setSections] = useState<any[]>([]);
   
   const nextIndexRef = useRef(0);
   const isLoadingRef = useRef(false);
-  const lastLoadedLang = useRef<string | null>(null);
 
-  const[viewAll, setViewAll] = useState<any | null>(null);
-  const[isFetchingViewAll, setIsFetchingViewAll] = useState(false);
+  const [viewAll, setViewAll] = useState<any | null>(null);
+  const [isFetchingViewAll, setIsFetchingViewAll] = useState(false);
 
   const showcaseRef = useRef<HTMLDivElement>(null);
   const observerRef = useRef<HTMLDivElement>(null);
@@ -211,7 +210,7 @@ export default function Home() {
         if (idx >= SECTION_CONFIGS.length) break;
         
         const conf = SECTION_CONFIGS[idx];
-        let url = `${API_BASE}${conf.url.replace('{lang}', language)}`;
+        let url = `${API_BASE}${conf.url.replace('{lang}', language || 'hindi')}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
         // Wait strictly for response AND the 1-sec gap
@@ -223,7 +222,7 @@ export default function Home() {
               // Push exactly ONE section to UI instantly
               setSections(prev => {
                   if (prev.some(s => s.key === conf.key)) return prev;
-                  const updated =[...prev, { ...conf, data: items }];
+                  const updated = [...prev, { ...conf, data: items }];
                   if (typeof window !== 'undefined') sessionStorage.setItem('homeState_sections', JSON.stringify(updated));
                   return updated;
               });
@@ -233,8 +232,8 @@ export default function Home() {
         nextIndexRef.current += 1;
         if (typeof window !== 'undefined') sessionStorage.setItem('homeState_nextIndex', nextIndexRef.current.toString());
 
-        // SHOW PAGE INSTANTLY: Stop initializing the moment "Top Picks" (index 0) is loaded
-        if (nextIndexRef.current === 1) {
+        // SHOW PAGE INSTANTLY: Stop initializing the moment the 1st section ("Top Picks") is completely processed 
+        if (nextIndexRef.current >= 1) {
            setIsInitializing(false);
         }
       }
@@ -247,8 +246,6 @@ export default function Home() {
   // --- INITIAL MOUNT & STATE RESTORATION ---
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    if (lastLoadedLang.current === language) return; 
-    lastLoadedLang.current = language;
 
     const initLoad = async () => {
       const savedLang = sessionStorage.getItem('homeState_lang');
@@ -276,25 +273,25 @@ export default function Home() {
       sessionStorage.removeItem('homeState_viewAll');
       sessionStorage.removeItem('homeScrollY');
       sessionStorage.removeItem('viewAllScrollY');
-      sessionStorage.setItem('homeState_lang', language);
+      sessionStorage.setItem('homeState_lang', language || 'hindi');
       setSections([]);
       setViewAll(null);
       nextIndexRef.current = 0;
       setIsInitializing(true);
       
-      // Fire and forget (fetchNextChunk drops isInitializing internally as soon as Top Picks arrives)
+      // Fire and forget - fetchNextChunk drops the skeleton internally as soon as the 1st chunk loads
       fetchNextChunk(3); 
     };
 
     initLoad();
-  },[language]);
+  }, [language]); // Removed the problematic strict mode trap
 
   // --- HARDWARE BACK BUTTON LOGIC ---
   useEffect(() => {
     const handlePopState = () => { if (viewAll) closeViewAll(true); };
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
-  },[viewAll]);
+  }, [viewAll]);
 
   // Auto-Sliding Showcase
   useEffect(() => {
@@ -311,14 +308,15 @@ export default function Home() {
 
   // Lazy Load Remaining Sections on Scroll
   useEffect(() => {
-    if (viewAll || isInitializing || sections.length === 0) return;
+    // Removed `sections.length === 0` to prevent getting blocked if first API fails
+    if (viewAll || isInitializing) return; 
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isLoadingRef.current) fetchNextChunk(3);
     }, { rootMargin: "600px" });
 
     if (observerRef.current) observer.observe(observerRef.current);
     return () => observer.disconnect();
-  },[sections, viewAll, isInitializing, language]);
+  }, [sections, viewAll, isInitializing, language]);
 
   // Infinite Scroll for "View All"
   useEffect(() => {
@@ -326,13 +324,13 @@ export default function Home() {
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
-        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language)}&limit=${viewAll.offset},40`;
+        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language || 'hindi')}&limit=${viewAll.offset},40`;
         
         fetchStrictly(url).then(json => {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
            if (newItems.length > 0) {
              setViewAll((prev: any) => {
-                const updated = { ...prev, data:[...prev.data, ...newItems], offset: prev.offset + 40 };
+                const updated = { ...prev, data: [...prev.data, ...newItems], offset: prev.offset + 40 };
                 sessionStorage.setItem('homeState_viewAll', JSON.stringify(updated));
                 return updated;
              });
@@ -409,7 +407,7 @@ export default function Home() {
   };
 
   // --- INITIAL YOUTUBE STYLE SKELETON ---
-  if (isInitializing || sections.length === 0) {
+  if (isInitializing) {
     return (
       <div className="flex min-h-screen flex-col bg-[#0B1320] text-white pt-10 pb-28">
          <div className="px-4 mb-6 flex items-center justify-between">
