@@ -6,7 +6,7 @@
 import React, { useEffect, useState, Suspense, useRef, useCallback, useMemo } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Play, ArrowLeft, Shuffle, Share2, Info, BadgeAlert, Heart, Clock } from "lucide-react";
-import { useAppContext } from "../../context/AppContext";
+import { useAppContext } from "../../../context/AppContext";
 
 // --- GLOBAL SECRETS & CONSTANTS ---
 const API_BASE = "https://gaanaayush.vercel.app/api/superserch";
