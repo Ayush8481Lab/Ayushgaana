@@ -1,4 +1,5 @@
 
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -361,7 +362,6 @@ const SongDnaCard = React.memo(({ artist, closePlayer, isFew }: { artist: any, c
     };
     const rolesText = formatRoles(artist.roles);
 
-    // Dynamic sizing logic for Zoom-to-fit
     const sizeClass = isFew ? "w-[130px] h-[130px] sm:w-[150px] sm:h-[150px]" : "w-[110px] h-[110px]";
     const textClass = isFew ? "text-[15px] sm:text-[16px]" : "text-[13px]";
     const subtextClass = isFew ? "text-[12px] sm:text-[13px]" : "text-[11px]";
@@ -370,7 +370,7 @@ const SongDnaCard = React.memo(({ artist, closePlayer, isFew }: { artist: any, c
     return (
         <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className={`flex flex-col items-center gap-2 flex-shrink-0 ${containerWidth} group no-select-text`}>
             <div className={`${sizeClass} rounded-full overflow-hidden relative flex items-center justify-center shadow-[0_10px_20px_rgba(0,0,0,0.3)] border border-white/10 group-hover:scale-105 transition-transform`} style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
-                {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
+                {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="min-w-full min-h-full w-full h-full object-cover object-center relative z-10 no-select pointer-events-none" alt={artist.name} />}
             </div>
             <div className="flex flex-col items-center w-full px-1 no-select-text overflow-hidden">
                 <MarqueeText text={decodeEntities(artist.name)} className={`text-white/90 ${textClass} font-bold drop-shadow-md w-full justify-center text-center`} />
@@ -664,8 +664,8 @@ export default function MiniPlayer() {
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      const fallbackRes = await fetchProtected(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
-      const data = await fallbackRes.json();
+      // Instantly call ayushvid search API natively with r.jina.ai!
+      const data = await fetchJina(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
         await setCache(`vid_id_${query}`, data.top_result.videoId);
@@ -846,18 +846,22 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
-               const authJson = await fetchJina(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
-               if (authJson && authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
-                   const match = performAK47Matching(authJson.results, searchTitle, searchArtist);
-                   if (match) {
-                      const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
-                      const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
-                      if (sId) {
-                          matchFound = true;
-                          await setCache(cacheKey, { id: sId, url: sUrl });
-                          await execExtras(sId, sUrl);
-                          return;
-                      }
+               // DO NOT USE fetchJina on ak47ayush! Strictly fetchProtected.
+               const authRes = await fetchProtected(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
+               if (authRes.ok) {
+                   const authJson = await authRes.json();
+                   if (authJson && authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
+                       const match = performAK47Matching(authJson.results, searchTitle, searchArtist);
+                       if (match) {
+                          const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
+                          const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
+                          if (sId) {
+                              matchFound = true;
+                              await setCache(cacheKey, { id: sId, url: sUrl });
+                              await execExtras(sId, sUrl);
+                              return;
+                          }
+                       }
                    }
                }
            }
@@ -922,11 +926,13 @@ export default function MiniPlayer() {
             await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
 
         } else {
-            // STANDARD WORKFLOW
+            // STANDARD WORKFLOW - Instantly call ayushvid video prefetch concurrently
             const p1 = fetchStreamTask();
             const p2 = fetchInfoTask();
             const p3 = getAuthData();
-            await Promise.all([p1, p2, p3]);
+            const p4 = prefetchVideoId(searchTitle, searchArtist);
+            
+            await Promise.all([p1, p2, p3, p4]);
             
             if (!isCurrent || signal.aborted) return;
             setLoading(false);
@@ -935,11 +941,6 @@ export default function MiniPlayer() {
             if (!isCurrent || signal.aborted) return;
 
             await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
-
-            await new Promise(r => setTimeout(r, 1500));
-            if (!isCurrent || signal.aborted) return;
-
-            prefetchVideoId(searchTitle, searchArtist);
         }
     };
 
@@ -1792,11 +1793,11 @@ export default function MiniPlayer() {
             )}
 
             {songDetails && (
-              <div className="w-full mt-2 rounded-3xl p-6 flex flex-col gap-6 border border-white/5 shadow-[0_20px_50px_rgba(0,0,0,0.5)] relative overflow-hidden group no-select-text bg-[#181818]/80 backdrop-blur-xl">
+              <div className="w-full mt-2 rounded-3xl p-6 flex flex-col gap-6 border border-white/5 shadow-[0_20px_50px_rgba(0,0,0,0.5)] relative overflow-hidden group no-select-text bg-[#0B132B]/90 backdrop-blur-xl">
                 {displayImage && (
-                  <div className="absolute inset-0 z-0 bg-cover bg-center opacity-30 blur-3xl group-hover:scale-110 transition-transform duration-[1500ms] ease-out mix-blend-screen" style={{ backgroundImage: `url(${displayImage})` }} />
+                  <div className="absolute inset-0 z-0 bg-cover bg-center opacity-20 blur-3xl group-hover:scale-110 transition-transform duration-[1500ms] ease-out mix-blend-screen" style={{ backgroundImage: `url(${displayImage})` }} />
                 )}
-                <div className="absolute inset-0 z-0 bg-gradient-to-br from-black/80 via-black/60 to-black/90 pointer-events-none" />
+                <div className="absolute inset-0 z-0 bg-gradient-to-br from-[#040A18]/95 via-[#0B132B]/85 to-[#040A18]/95 pointer-events-none" />
                 <div className="absolute -top-20 -right-20 w-64 h-64 bg-[#1db954]/10 rounded-full blur-[80px] pointer-events-none" />
                 
                 <h3 className="text-white font-extrabold text-[20px] drop-shadow-md relative z-10 flex items-center gap-2">
