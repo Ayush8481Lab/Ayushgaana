@@ -1,5 +1,4 @@
 
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -14,10 +13,44 @@ import {
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles
 } from "lucide-react";
 
+// --- VERCEL PROTECTION BYPASS ENGINE ---
+const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
+const bypassHeaders = { "x-vercel-protection-bypass": AUTOMATION_SECRET };
+
+const fetchProtected = async (url: string, options: any = {}) => {
+  return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
+};
+
+// Advanced Parser for r.jina.ai to properly extract JSON from Markdown wrap
+const fetchJina = async (targetUrl: string, options: any = {}) => {
+  const res = await fetch(`https://r.jina.ai/${targetUrl}`, {
+      ...options,
+      headers: { ...options.headers, "Accept": "application/json", ...bypassHeaders }
+  });
+  const text = await res.text();
+  let result;
+  try {
+      const jinaWrapper = JSON.parse(text);
+      if (jinaWrapper.data && jinaWrapper.data.content) {
+          const match = jinaWrapper.data.content.match(/```(?:json)?\n([\s\S]*?)\n```/);
+          result = match ? JSON.parse(match[1]) : JSON.parse(jinaWrapper.data.content);
+      } else {
+          result = jinaWrapper;
+      }
+  } catch(e) {
+      try {
+          const match = text.match(/```(?:json)?\n([\s\S]*?)\n```/);
+          result = match ? JSON.parse(match[1]) : JSON.parse(text);
+      } catch(err) { result = null; }
+  }
+  return result;
+};
+
+
 // --- 30-MINUTE INDEXEDDB CACHE ENGINE (Audio & APIs) ---
 const DB_NAME = "GrooveCacheDB";
 const STORE_NAME = "caches";
-const CACHE_EXPIRY_MS = 30 * 60 * 1000; // Strictly 30 Minutes
+const CACHE_EXPIRY_MS = 30 * 60 * 1000;
 
 const initDB = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
   if (typeof window === 'undefined' || !window.indexedDB) return reject();
@@ -89,10 +122,12 @@ const fetchNewAuthToken = async () => {
   if (ongoingAuthPromise) return ongoingAuthPromise;
   ongoingAuthPromise = (async () => {
     try {
-      const response = await fetch('https://serverayush.vercel.app/api/auth', { referrerPolicy: "no-referrer" });
-      const data = await response.json();
-      if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
-      return data;
+      const data = await fetchJina('https://serverayush.vercel.app/api/auth', { referrerPolicy: "no-referrer" });
+      if (data && data.accessToken) {
+         if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
+         return data;
+      }
+      return null;
     } catch (error) { return null; } finally { ongoingAuthPromise = null; }
   })();
   return ongoingAuthPromise;
@@ -104,7 +139,6 @@ const getAuthData = async () => {
   return await fetchNewAuthToken();
 };
 
-// --- ADVANCED HTML ENTITY DECODER ---
 const decodeEntities = (text: string) => {
   if (!text) return "";
   let decoded = text;
@@ -118,7 +152,6 @@ const decodeEntities = (text: string) => {
   return decoded.replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#039;/g, "'").replace(/&#39;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&apos;/g, "'");
 };
 
-// --- EXTRACTORS ---
 const getArtistsText = (data: any) => {
   let names: string[] =[];
   if (data?.entity_info) {
@@ -168,7 +201,6 @@ const RAPID_API_HOST = "spotify81.p.rapidapi.com";
 
 const QUALITY_MAP: any = { "16": "Low", "64": "Medium", "128": "High", "320": "HD" };
 
-// --- AK47 SPECIFIC MATCHER ---
 const performAK47Matching = (results: any[], targetTrack: string, targetArtist: string): any => {
     if (!results || results.length === 0) return null;
     const clean = (s: string) => decodeEntities(s || "").toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ").trim();
@@ -232,7 +264,6 @@ const performMatching = (apiData: any, targetTrack: string, targetArtist: string
   return null;
 };
 
-// --- NATIVE ID3 TAGGER ---
 const NativeID3 = {
   tag: function(data: any) {
       const frames =[];
@@ -291,7 +322,6 @@ const loadHlsJS = (): Promise<any> => new Promise((resolve, reject) => {
     document.head.appendChild(script);
 });
 
-// --- FLICKER-FREE MEMOIZED MARQUEE ---
 const MarqueeText = React.memo(({ text, className = "" }: { text: string, className?: string }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
@@ -320,12 +350,10 @@ const MarqueeText = React.memo(({ text, className = "" }: { text: string, classN
 });
 MarqueeText.displayName = 'MarqueeText';
 
-// --- SONG DNA CIRCULAR ARTIST CARD WITH MARQUEE ROLES ---
-const SongDnaCard = React.memo(({ artist, closePlayer }: { artist: any, closePlayer: () => void }) => {
+const SongDnaCard = React.memo(({ artist, closePlayer, isFew }: { artist: any, closePlayer: () => void, isFew: boolean }) => {
     const artistImg = getImageUrl(artist);
     const fallbackColor = getArtistColor(artist.name || "Unknown");
     
-    // Format roles: lowercase joined, with only first letter capitalized (e.g. "Singer, composer, cast")
     const formatRoles = (roles: string[]) => {
         if (!roles || roles.length === 0) return "";
         const joined = roles.join(', ').toLowerCase();
@@ -333,14 +361,20 @@ const SongDnaCard = React.memo(({ artist, closePlayer }: { artist: any, closePla
     };
     const rolesText = formatRoles(artist.roles);
 
+    // Dynamic sizing logic for Zoom-to-fit
+    const sizeClass = isFew ? "w-[130px] h-[130px] sm:w-[150px] sm:h-[150px]" : "w-[110px] h-[110px]";
+    const textClass = isFew ? "text-[15px] sm:text-[16px]" : "text-[13px]";
+    const subtextClass = isFew ? "text-[12px] sm:text-[13px]" : "text-[11px]";
+    const containerWidth = isFew ? "w-[130px] sm:w-[150px]" : "w-[110px]";
+
     return (
-        <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className="flex flex-col items-center gap-2 flex-shrink-0 w-[110px] group no-select-text">
-            <div className="w-[110px] h-[110px] rounded-full overflow-hidden relative flex items-center justify-center shadow-lg border border-white/10 group-hover:scale-105 transition-transform" style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
+        <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className={`flex flex-col items-center gap-2 flex-shrink-0 ${containerWidth} group no-select-text`}>
+            <div className={`${sizeClass} rounded-full overflow-hidden relative flex items-center justify-center shadow-[0_10px_20px_rgba(0,0,0,0.3)] border border-white/10 group-hover:scale-105 transition-transform`} style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
                 {!artistImg ? <span className="text-white font-bold text-4xl no-select-text">{decodeEntities(artist.name).charAt(0).toUpperCase()}</span> : <img draggable={false} src={artistImg} onError={(e) => { e.currentTarget.style.display = 'none'; }} className="w-full h-full object-cover relative z-10 no-select pointer-events-none" alt={artist.name} />}
             </div>
             <div className="flex flex-col items-center w-full px-1 no-select-text overflow-hidden">
-                <MarqueeText text={decodeEntities(artist.name)} className="text-white/90 text-[13px] font-bold drop-shadow-md w-full justify-center text-center" />
-                <div className="w-full mt-[1px] flex justify-center text-[#a7a7a7] text-[11px] font-medium tracking-wide">
+                <MarqueeText text={decodeEntities(artist.name)} className={`text-white/90 ${textClass} font-bold drop-shadow-md w-full justify-center text-center`} />
+                <div className={`w-full mt-[1px] flex justify-center text-[#a7a7a7] ${subtextClass} font-medium tracking-wide`}>
                     <MarqueeText text={rolesText} className="w-full justify-center text-center" />
                 </div>
             </div>
@@ -366,13 +400,11 @@ export default function MiniPlayer() {
   const[duration, setDuration] = useState(0);
   const[volume, setVolume] = useState(100);
   
-  // MODAL/UI STATES
   const[isExpanded, setIsExpanded] = useState(false);
   const[showQueue, setShowQueue] = useState(false);
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
   
-  // Ref strictly to prevent API duplicate calls on re-renders
   const lastFetchedTrackIdRef = useRef<string | null>(null);
 
   const[dominantColor, setDominantColor] = useState("rgb(83, 83, 83)");
@@ -457,15 +489,12 @@ export default function MiniPlayer() {
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen;
 
-  // --- CUSTOM BUTTERY AUTO-SCROLL FOR LYRICS ENGINE ---
   const customSmoothScroll = useCallback((container: HTMLElement, targetPos: number, duration: number) => {
       if ((container as any)._scrollRaf) cancelAnimationFrame((container as any)._scrollRaf);
       const startPos = container.scrollTop;
       const distance = targetPos - startPos;
       let startTime: number | null = null;
-      
       const easeInOutCubic = (t: number) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-      
       const animation = (currentTime: number) => {
           if (startTime === null) startTime = currentTime;
           const elapsed = currentTime - startTime;
@@ -476,7 +505,6 @@ export default function MiniPlayer() {
       (container as any)._scrollRaf = requestAnimationFrame(animation);
   },[]);
 
-  // --- PURE STATE-BASED ROUTING FOR MODALS (NO NEXT.JS ROUTER LAG/LOGS) ---
   const closeMainPlayer = useCallback(() => {
     setIsExpanded(false);
     setShowQueue(false);
@@ -495,7 +523,6 @@ export default function MiniPlayer() {
   const openTimer = () => { setShowTimerMenu(true); };
   const closePlayerForNavigation = () => { closeMainPlayer(); };
 
-  // --- NATIVE M3U8 SUPPORT VIA HLS.JS ---
   useEffect(() => {
       let isCurrent = true;
       const setupAudio = async () => {
@@ -530,10 +557,8 @@ export default function MiniPlayer() {
       };
       if (isCurrent) setupAudio();
       return () => { isCurrent = false; };
-  }, [audioUrl]);
+  },[audioUrl]);
 
-
-  // --- CLEAN RAW LINK SHARE ---
   const handleShareSong = async () => {
     setShowSettingsMenu(false); 
     try {
@@ -567,7 +592,6 @@ export default function MiniPlayer() {
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   },[]);
 
-  // SLEEP TIMER ENGINE
   useEffect(() => {
     let interval: any;
     if (typeof sleepTimer === 'number' && sleepTimer > 0) {
@@ -634,14 +658,13 @@ export default function MiniPlayer() {
     } catch (e) {}
   },[]);
 
-  // VIDEO PREFETCH LOGIC (MANUAL ONLY)
   const prefetchVideoId = async (songTitle: string, songArtists: string) => {
     try {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      const fallbackRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
+      const fallbackRes = await fetchProtected(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       const data = await fallbackRes.json();
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
@@ -652,9 +675,6 @@ export default function MiniPlayer() {
     return null;
   };
 
-  // ----------------------------------------------------------------------
-  // --- ZERO-FETCH AUDIO QUALITY HOT-SWAP ENGINE
-  // ----------------------------------------------------------------------
   useEffect(() => {
     if (streamBaseUrl) {
         const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
@@ -662,7 +682,6 @@ export default function MiniPlayer() {
         setAudioUrl(finalUrl);
     }
   },[streamBaseUrl, selectedQuality]);
-
 
   // ----------------------------------------------------------------------
   // --- STRICT ORDER API WORKFLOW (ABORTABLE & DDOS SAFE)
@@ -673,7 +692,6 @@ export default function MiniPlayer() {
     
     const trackId = currentSong.track_id || currentSong.id || currentSong.entity_id;
     
-    // GUARD: Prevent exact same song from triggering full API cycle on rapid re-renders
     if (lastFetchedTrackIdRef.current === trackId) {
         currentTrackRef.current = currentSong;
         return;
@@ -700,7 +718,6 @@ export default function MiniPlayer() {
     }
     currentTrackRef.current = currentSong; maxListenRef.current = 0;
     
-    // Reset UI State instantly
     setYtVideoId(currentSong.ytVideoId || null);
     setSpotifyId(null); setSpotifyUrl(null); setLyrics([]); setSyncType(null); setCanvasData(null);
     setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
@@ -709,14 +726,14 @@ export default function MiniPlayer() {
     setStreamBaseUrl(null);
     setBuffered(0);
 
-    // ==========================================
-    // PRIORITY 1: INSTANT STREAM (No Debounce)
-    // ==========================================
-    const fetchStream = async () => {
+    let sDetails: any = null;
+    let skipSpotifyLyrics = false;
+
+    const fetchStreamTask = async () => {
         try {
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (!streamJson) {
-                const streamRes = await fetch(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
+                const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
                 if (streamRes.ok) {
                     streamJson = await streamRes.json();
                     if (streamJson?.data) await setCache(`gaana_stream_${trackId}`, streamJson);
@@ -726,22 +743,14 @@ export default function MiniPlayer() {
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
-        } catch (e: any) { /* Aborted */ }
+        } catch (e: any) { }
     };
-    fetchStream();
 
-    // ==========================================
-    // PRIORITY 2: HEAVY DATA (Debounced 500ms)
-    // ==========================================
-    const executeHeavyFetches = async () => {
-        if (!isCurrent || signal.aborted) return;
-        setLoading(true);
-
-        let sDetails = null;
+    const fetchInfoTask = async () => {
         try {
             let infoJson = await getCache(`gaana_info_${trackId}`);
             if (!infoJson) {
-                const infoRes = await fetch(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                const infoRes = await fetchProtected(`https://gaanaayush.vercel.app/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
                 if (infoRes.ok) {
                     infoJson = await infoRes.json();
                     if (infoJson?.data) await setCache(`gaana_info_${trackId}`, infoJson);
@@ -752,18 +761,12 @@ export default function MiniPlayer() {
                 sDetails = infoJson.data; 
                 setSongDetails(infoJson.data); 
             }
-        } catch (e: any) { }
 
-        if (isCurrent && !signal.aborted) setLoading(false);
-
-        // PRIORITY 3: LYRICS
-        let skipSpotifyLyrics = false;
-        const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
-        if (currentLyricsServer === "Gaana" && !signal.aborted) {
-            try {
+            const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
+            if (currentLyricsServer === "Gaana" && !signal.aborted) {
                 let lrcJson = await getCache(`gaana_lrc_${trackId}`);
                 if (!lrcJson) {
-                    const lrcRes = await fetch(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                    const lrcRes = await fetchProtected(`https://gaanaayush.vercel.app/api/lrc?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
                     if (lrcRes.ok) {
                         lrcJson = await lrcRes.json();
                         if (lrcJson?.data) await setCache(`gaana_lrc_${trackId}`, lrcJson);
@@ -782,13 +785,8 @@ export default function MiniPlayer() {
                         skipSpotifyLyrics = true;
                     }
                 }
-            } catch(e: any) { }
-        }
-
-        // TRIGGER SPOTIFY FALLBACK (Handles Match, Lyrics, Canvas)
-        if (!signal.aborted) {
-            triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
-        }
+            }
+        } catch (e: any) { }
     };
 
     const triggerSpotifyFallback = async (songData: any, skipLyrics: boolean = false) => {
@@ -799,48 +797,38 @@ export default function MiniPlayer() {
            if (!isCurrent || signal.aborted) return;
            setSpotifyId(sId); setSpotifyUrl(sUrl);
            
-           // FETCH LYRICS
+           const tasks =[];
+
            if (isLyricsEnabledRef.current && !skipLyrics && !signal.aborted) {
-              let lyricsJson = await getCache(`lyrics_${sId}`);
-              if (!lyricsJson) {
-                  try {
-                      const lyricsRes = await fetch(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { referrerPolicy: "no-referrer", signal });
-                      if (lyricsRes.ok) { 
-                          lyricsJson = await lyricsRes.json(); 
-                          await setCache(`lyrics_${sId}`, lyricsJson); 
-                      } else {
-                          await setCache(`lyrics_${sId}`, { notFound: true });
-                      }
-                  } catch (e: any) { }
-              }
-              if (isCurrent && lyricsJson && !lyricsJson.notFound && lyricsJson.lines && !signal.aborted) { 
-                  setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
-                  setSyncType(lyricsJson.syncType);
-              }
+              tasks.push((async () => {
+                  let lyricsJson = await getCache(`lyrics_${sId}`);
+                  if (!lyricsJson) {
+                      lyricsJson = await fetchJina(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { referrerPolicy: "no-referrer", signal });
+                      if (lyricsJson && !lyricsJson.error) await setCache(`lyrics_${sId}`, lyricsJson);
+                      else lyricsJson = { notFound: true };
+                  }
+                  if (isCurrent && lyricsJson && !lyricsJson.notFound && lyricsJson.lines && !signal.aborted) { 
+                      setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
+                      setSyncType(lyricsJson.syncType);
+                  }
+              })());
            }
 
-           // PRIORITY 4: EXPLICIT 0.8 SECOND DELAY BEFORE CANVAS
-           await new Promise(resolve => setTimeout(resolve, 800));
-           if (!isCurrent || signal.aborted) return;
-
-           // FETCH CANVAS
            if (isCanvasEnabledRef.current && !signal.aborted) {
-              let canvasJson = await getCache(`canvas_${sId}`);
-              if (!canvasJson) {
-                 try {
-                     const res = await fetch(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
-                     if (res.ok) { 
-                         canvasJson = await res.json(); 
-                         await setCache(`canvas_${sId}`, canvasJson); 
-                     } else {
-                         await setCache(`canvas_${sId}`, { notFound: true });
-                     }
-                 } catch (e: any) { }
-              }
-              if (isCurrent && canvasJson && !canvasJson.notFound && canvasJson.canvasesList?.length > 0 && !signal.aborted) {
-                  setCanvasData(canvasJson.canvasesList[0]);
-              }
+              tasks.push((async () => {
+                  let canvasJson = await getCache(`canvas_${sId}`);
+                  if (!canvasJson) {
+                      canvasJson = await fetchJina(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
+                      if (canvasJson && canvasJson.canvasesList) await setCache(`canvas_${sId}`, canvasJson);
+                      else canvasJson = { notFound: true };
+                  }
+                  if (isCurrent && canvasJson && !canvasJson.notFound && canvasJson.canvasesList?.length > 0 && !signal.aborted) {
+                      setCanvasData(canvasJson.canvasesList[0]);
+                  }
+              })());
            }
+
+           await Promise.all(tasks);
        };
 
        if (cachedMatch) { 
@@ -858,21 +846,18 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
-               const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
-               if (authRes.ok) {
-                   const authJson = await authRes.json();
-                   if (authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
-                       const match = performAK47Matching(authJson.results, searchTitle, searchArtist);
-                       if (match) {
-                          const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
-                          const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
-                          if (sId) {
-                              matchFound = true;
-                              await setCache(cacheKey, { id: sId, url: sUrl });
-                              await execExtras(sId, sUrl);
-                              return;
-                          }
-                       }
+               const authJson = await fetchJina(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
+               if (authJson && authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
+                   const match = performAK47Matching(authJson.results, searchTitle, searchArtist);
+                   if (match) {
+                      const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
+                      const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
+                      if (sId) {
+                          matchFound = true;
+                          await setCache(cacheKey, { id: sId, url: sUrl });
+                          await execExtras(sId, sUrl);
+                          return;
+                      }
                    }
                }
            }
@@ -880,7 +865,6 @@ export default function MiniPlayer() {
 
        if (matchFound || signal.aborted) return;
 
-       // Fallback to RapidAPI only if AK47 fails
        let matchData = null;
        const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&offset=0&limit=25&numberOfTopResults=5`;
        
@@ -911,11 +895,58 @@ export default function MiniPlayer() {
        }
     };
 
-    const debounceTimer = setTimeout(executeHeavyFetches, 500);
+    const executeHeavyFetches = async () => {
+        setLoading(true);
+        const searchTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
+        const searchArtistsFull = decodeEntities(getArtistsText(currentSong));
+        const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
+
+        if (isVideoModeRef.current) {
+            // VIDEO PRIORITY WORKFLOW
+            setIsVideoLoading(true);
+            const vid = await prefetchVideoId(searchTitle, searchArtist);
+            if (vid && isCurrent && !signal.aborted) setYtVideoId(vid);
+            setIsVideoLoading(false);
+
+            await new Promise(r => setTimeout(r, 1500));
+            if (!isCurrent || signal.aborted) return;
+
+            await Promise.all([fetchStreamTask(), fetchInfoTask()]);
+            if (!isCurrent || signal.aborted) return;
+            setLoading(false);
+
+            getAuthData();
+            await new Promise(r => setTimeout(r, 1500));
+            if (!isCurrent || signal.aborted) return;
+
+            await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
+
+        } else {
+            // STANDARD WORKFLOW
+            const p1 = fetchStreamTask();
+            const p2 = fetchInfoTask();
+            const p3 = getAuthData();
+            await Promise.all([p1, p2, p3]);
+            
+            if (!isCurrent || signal.aborted) return;
+            setLoading(false);
+
+            await new Promise(r => setTimeout(r, 1500));
+            if (!isCurrent || signal.aborted) return;
+
+            await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
+
+            await new Promise(r => setTimeout(r, 1500));
+            if (!isCurrent || signal.aborted) return;
+
+            prefetchVideoId(searchTitle, searchArtist);
+        }
+    };
+
+    executeHeavyFetches();
 
     return () => { 
         isCurrent = false; 
-        clearTimeout(debounceTimer); 
         abortController.abort(); 
     };
   },[currentSong]);
@@ -930,7 +961,6 @@ export default function MiniPlayer() {
     }
   },[queue]); 
 
-  // ROBUST VIDEO AUTO-NEXT CLICKER
   useEffect(() => {
     const handleMsg = (e: MessageEvent) => {
       if (e.data?.type === 'YTP_TIME' && isVideoMode) {
@@ -996,7 +1026,6 @@ export default function MiniPlayer() {
       if (audioRef.current) audioRef.current.pause(); setIsPlaying(false); return;
     }
     
-    // MANUAL VIDEO API FETCH
     setIsVideoLoading(true);
     if (audioRef.current) audioRef.current.pause(); setIsPlaying(false);
     const newVid = await prefetchVideoId(displayTitle, displayArtists); 
@@ -1088,7 +1117,6 @@ export default function MiniPlayer() {
     }
   },[]);
 
-  // MEDIA METADATA ENGINE
   useEffect(() => {
     if ('mediaSession' in navigator && displayTitle) {
        try {
@@ -1119,7 +1147,6 @@ export default function MiniPlayer() {
     if (audioRef.current && !isVideoMode) {
       const c = audioRef.current.currentTime; const d = audioRef.current.duration;
       
-      // Update buffer seamlessly
       if (audioRef.current.buffered.length > 0 && d > 0) {
          const bufferedEnd = audioRef.current.buffered.end(audioRef.current.buffered.length - 1);
          setBuffered((bufferedEnd / d) * 100);
@@ -1169,7 +1196,6 @@ export default function MiniPlayer() {
     }
   };
 
-  // HIGHLY OPTIMIZED APPLE-MUSIC STYLE WORD SYNC ENGINE
   useEffect(() => {
     if (!isWordSyncEnabled || !isLyricsEnabled || isVideoMode || activeLyricIndex < 0 || !lyrics[activeLyricIndex]) return;
     let animationFrameId: number;
@@ -1270,7 +1296,6 @@ export default function MiniPlayer() {
     }
   };
 
-  // SPOTIFY BUTTERY SMOOTH DIRECT DOM DRAG QUEUE ENGINE
   const updateDOM = useCallback(() => {
     if (!queueContainerRef.current) return;
     const { activeIndex, startY, currentY, startScrollTop } = dragRef.current;
@@ -1350,7 +1375,6 @@ export default function MiniPlayer() {
       setSwipeX(0); 
   };
 
-  // --- 20X FASTER NATIVE MP3 PACKER ENGINE ---
   const executeMp3PackerDownload = async (url: string, quality: string) => {
     setDlState({ type: "music", status: "downloading", progress: 0, packStep: "Fetching Audio..." });
     try {
@@ -1462,7 +1486,7 @@ export default function MiniPlayer() {
       } else {
           try {
              const fetchLink = encodeURIComponent(currentSong.url || currentSong.perma_url || "");
-             const res = await fetch(`https://ayushm-psi.vercel.app/api/songs?link=${fetchLink}`, { referrerPolicy: "no-referrer" });
+             const res = await fetchProtected(`https://ayushm-psi.vercel.app/api/songs?link=${fetchLink}`, { referrerPolicy: "no-referrer" });
              const json = await res.json();
              if (json.data?.[0]?.downloadUrl) {
                  opts = json.data[0].downloadUrl.map((u:any) => ({ url: u.url, quality: u.quality, label: u.quality, num: parseInt(u.quality) }));
@@ -1484,7 +1508,7 @@ export default function MiniPlayer() {
       try {
         const targetVid = ytVideoId || await prefetchVideoId(displayTitle, displayArtists);
         if (!targetVid) throw new Error("Video not found");
-        const res = await fetch(`https://serverayush.vercel.app/api/cnd?id=${targetVid}&v=${serverNum}`, { referrerPolicy: "no-referrer" });
+        const res = await fetchProtected(`https://serverayush.vercel.app/api/cnd?id=${targetVid}&v=${serverNum}`, { referrerPolicy: "no-referrer" });
         const data = await res.json();
         const mixed = data.VideoWithAudio ||[];
         const formatOptions = mixed.map((v:any) => ({ ...v, label: `${v.quality} Video`, isMuxed: true }));
@@ -1507,7 +1531,6 @@ export default function MiniPlayer() {
   const getLineFontSize = () => lineFontSize === "Small" ? "text-[14px]" : lineFontSize === "Large" ? "text-[20px]" : "text-[16px]";
   const showTinyBanner = ((isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen) || isVideoMode || isLyricsFullScreen);
 
-  // --- MEMOIZED MERGED SONG DNA ROLES ---
   const songDnaArtists = useMemo(() => {
     if (!songDetails) return[];
     const map = new Map();
@@ -1530,7 +1553,6 @@ export default function MiniPlayer() {
     return Array.from(map.values());
   }, [songDetails]);
 
-  // MEMOIZED FLICKER-FREE LYRICS ABOVE TITLE
   const RenderedMiniLyrics = useMemo(() => {
     if (!isLyricsEnabled || isLyricsFullScreen || syncType !== "LINE_SYNCED" || lyrics.length === 0 || isVideoMode) return null;
     return (
@@ -1628,7 +1650,6 @@ export default function MiniPlayer() {
         .no-select { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; pointer-events: none; }
         .no-select-text { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
         .queue-item { transform-origin: center; will-change: transform; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); }
-        /* HW Acceleration added here to fix word-sync flicker */
         .lyric-word-sync { background: linear-gradient(to right, #ffffff calc(var(--p, 0%) - 15%), rgba(255,255,255,0.2) var(--p, 0%)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; color: transparent; will-change: background; transform: translateZ(0); }
       `}} />
 
@@ -1691,7 +1712,6 @@ export default function MiniPlayer() {
               )}
             </div>
 
-            {/* CONTROLS SECTION */}
             <div className={`w-full px-5 pt-2 flex flex-col justify-end flex-shrink-0 transition-all duration-500 pointer-events-auto ${isLyricsFullScreen ? 'mb-0 pb-[max(0.5rem,env(safe-area-inset-bottom))]' : (isCanvasActive ? 'mb-0 pb-[max(0.5rem,env(safe-area-inset-bottom))]' : 'mb-2 pb-[max(1.5rem,env(safe-area-inset-bottom))]')}`}>
               
               <div className={`transition-all duration-500 w-full relative overflow-hidden flex items-center justify-start mask-edges-vertical ${isUiHidden && !isVideoMode ? 'max-h-0 opacity-0 mb-0' : (isLyricsFullScreen ? 'hidden' : 'mb-3 opacity-100 min-h-[75px]')}`}>
@@ -1755,16 +1775,16 @@ export default function MiniPlayer() {
                     <h3 className="text-white font-extrabold text-[18px] mb-4 drop-shadow-md no-select-text flex items-center gap-2">
                         <Sparkles size={18} className="text-[#1db954]" /> Song DNA
                     </h3>
-                    <div className="flex flex-wrap justify-start gap-x-4 gap-y-6 pb-2 pointer-events-auto">
+                    <div className={`flex flex-wrap ${songDnaArtists.length <= 4 ? 'justify-center' : 'justify-start'} gap-x-4 gap-y-8 pb-4 pointer-events-auto`}>
                         {songDnaArtists.map((artist: any, idx: number) => (
-                            <SongDnaCard key={artist.seokey || artist.id || idx} artist={artist} closePlayer={closePlayerForNavigation} />
+                            <SongDnaCard key={artist.seokey || artist.id || idx} artist={artist} closePlayer={closePlayerForNavigation} isFew={songDnaArtists.length <= 4} />
                         ))}
                     </div>
                 </div>
             )}
 
             {songDetails?.album_title && (
-              <Link prefetch={false} href={albumRoute} onClick={closePlayerForNavigation} className="w-full mt-4 bg-[#1e1e1e]/60 backdrop-blur-md rounded-2xl p-4 flex items-center gap-4 hover:bg-[#2a2a2a]/80 transition-colors border border-white/10 shadow-xl relative overflow-hidden group no-select-text pointer-events-auto">
+              <Link prefetch={false} href={albumRoute} onClick={closePlayerForNavigation} className="w-full mt-2 bg-[#1e1e1e]/60 backdrop-blur-md rounded-2xl p-4 flex items-center gap-4 hover:bg-[#2a2a2a]/80 transition-colors border border-white/10 shadow-xl relative overflow-hidden group no-select-text pointer-events-auto">
                 <div className="absolute inset-0 z-0 pointer-events-none opacity-30" style={{ backgroundColor: dominantColor }} />
                 {displayImage && <img draggable={false} src={displayImage} className="w-[64px] h-[64px] rounded-md object-cover relative z-10 shadow-md border border-white/5 group-hover:scale-105 transition-transform no-select pointer-events-none" alt="Album Cover" />}
                 <div className="flex flex-col relative z-10 flex-1 pr-2"><span className="text-white/60 text-[11px] uppercase tracking-widest font-bold mb-1 drop-shadow-sm">Album</span><span className="text-white font-bold text-[16px] line-clamp-1 drop-shadow-md">{decodeEntities(songDetails.album_title)}</span></div><div className="relative z-10 text-white/50 group-hover:text-white transition-colors pl-2"><ChevronDown size={20} className="-rotate-90" /></div>
@@ -1772,22 +1792,69 @@ export default function MiniPlayer() {
             )}
 
             {songDetails && (
-              <div className="w-full mt-2 rounded-2xl p-5 flex flex-col gap-4 border border-white/10 shadow-2xl relative overflow-hidden no-select-text">
-                {displayImage && <div className="absolute inset-0 z-0 bg-cover bg-center opacity-30 blur-lg scale-110" style={{ backgroundImage: `url(${displayImage})` }} />}<div className="absolute inset-0 z-0 bg-gradient-to-t from-black/90 via-black/60 to-black/30 pointer-events-none" />
-                <h3 className="text-white font-bold text-[18px] drop-shadow-md relative z-10 mb-2">About Song</h3>
-                <div className="relative z-10 grid grid-cols-2 gap-y-5 gap-x-4">
-                  {songDetails.popularity && (<div className="flex flex-col gap-1"><div className="flex items-center gap-1.5 text-white/50"><Hash size={12} /><span className="font-semibold text-[10px] uppercase tracking-wider">Play Count</span></div><span className="text-white font-bold text-[15px]">{Number(songDetails.popularity).toLocaleString('en-US')}</span></div>)}
-                  {songDetails.duration && (<div className="flex flex-col gap-1"><div className="flex items-center gap-1.5 text-white/50"><Clock size={12} /><span className="font-semibold text-[10px] uppercase tracking-wider">Duration</span></div><span className="text-white font-bold text-[15px]">{formatTime(Number(songDetails.duration))}</span></div>)}
-                  {songDetails.release_date && (<div className="flex flex-col gap-1"><div className="flex items-center gap-1.5 text-white/50"><Calendar size={12} /><span className="font-semibold text-[10px] uppercase tracking-wider">Released</span></div><span className="text-white font-bold text-[15px]">{songDetails.release_date}</span></div>)}
-                  {songDetails.language && (<div className="flex flex-col gap-1"><div className="flex items-center gap-1.5 text-white/50"><Globe size={12} /><span className="font-semibold text-[10px] uppercase tracking-wider">Language</span></div><span className="text-white font-bold text-[15px] capitalize">{songDetails.language}</span></div>)}
-                  {songDetails.vendor && (<div className="flex flex-col gap-1 col-span-2"><div className="flex items-center gap-1.5 text-white/50"><Disc3 size={12} /><span className="font-semibold text-[10px] uppercase tracking-wider">Label</span></div><span className="text-white font-bold text-[15px] line-clamp-1">{decodeEntities(songDetails.vendor)}</span></div>)}
+              <div className="w-full mt-2 rounded-3xl p-6 flex flex-col gap-6 border border-white/5 shadow-[0_20px_50px_rgba(0,0,0,0.5)] relative overflow-hidden group no-select-text bg-[#181818]/80 backdrop-blur-xl">
+                {displayImage && (
+                  <div className="absolute inset-0 z-0 bg-cover bg-center opacity-30 blur-3xl group-hover:scale-110 transition-transform duration-[1500ms] ease-out mix-blend-screen" style={{ backgroundImage: `url(${displayImage})` }} />
+                )}
+                <div className="absolute inset-0 z-0 bg-gradient-to-br from-black/80 via-black/60 to-black/90 pointer-events-none" />
+                <div className="absolute -top-20 -right-20 w-64 h-64 bg-[#1db954]/10 rounded-full blur-[80px] pointer-events-none" />
+                
+                <h3 className="text-white font-extrabold text-[20px] drop-shadow-md relative z-10 flex items-center gap-2">
+                   <Sparkles size={20} className="text-[#1db954]" /> About Track
+                </h3>
+                
+                <div className="relative z-10 grid grid-cols-2 gap-y-4 gap-x-4">
+                  {songDetails.popularity && (
+                    <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.05] shadow-inner backdrop-blur-md">
+                      <div className="flex items-center gap-2 text-white/50">
+                        <Hash size={14} className="text-[#1db954]/80" />
+                        <span className="font-bold text-[10px] uppercase tracking-widest">Play Count</span>
+                      </div>
+                      <span className="text-white font-black text-[16px] tracking-tight">{Number(songDetails.popularity).toLocaleString('en-US')}</span>
+                    </div>
+                  )}
+                  {songDetails.duration && (
+                    <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.05] shadow-inner backdrop-blur-md">
+                      <div className="flex items-center gap-2 text-white/50">
+                        <Clock size={14} className="text-[#1db954]/80" />
+                        <span className="font-bold text-[10px] uppercase tracking-widest">Duration</span>
+                      </div>
+                      <span className="text-white font-black text-[16px] tracking-tight">{formatTime(Number(songDetails.duration))}</span>
+                    </div>
+                  )}
+                  {songDetails.release_date && (
+                    <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.05] shadow-inner backdrop-blur-md">
+                      <div className="flex items-center gap-2 text-white/50">
+                        <Calendar size={14} className="text-[#1db954]/80" />
+                        <span className="font-bold text-[10px] uppercase tracking-widest">Released</span>
+                      </div>
+                      <span className="text-white font-black text-[16px] tracking-tight">{songDetails.release_date}</span>
+                    </div>
+                  )}
+                  {songDetails.language && (
+                    <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.05] shadow-inner backdrop-blur-md">
+                      <div className="flex items-center gap-2 text-white/50">
+                        <Globe size={14} className="text-[#1db954]/80" />
+                        <span className="font-bold text-[10px] uppercase tracking-widest">Language</span>
+                      </div>
+                      <span className="text-white font-black text-[16px] tracking-tight capitalize">{songDetails.language}</span>
+                    </div>
+                  )}
+                  {songDetails.vendor && (
+                    <div className="flex flex-col gap-1.5 p-3.5 rounded-2xl bg-white/[0.03] border border-white/[0.05] shadow-inner backdrop-blur-md col-span-2">
+                      <div className="flex items-center gap-2 text-white/50">
+                        <Disc3 size={14} className="text-[#1db954]/80" />
+                        <span className="font-bold text-[10px] uppercase tracking-widest">Label</span>
+                      </div>
+                      <span className="text-white font-black text-[16px] tracking-tight line-clamp-1">{decodeEntities(songDetails.vendor)}</span>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
           </div>
         </div>
 
-        {/* --- SETTINGS MENU --- */}
         <div className={`absolute inset-0 z-[100000] bg-black/60 backdrop-blur-sm transition-opacity duration-300 pointer-events-auto flex flex-col justify-end ${showSettingsMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setShowSettingsMenu(false)}>
           <div className={`w-full bg-[#121212] rounded-t-[28px] transition-transform duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] shadow-2xl border-t border-white/10 flex flex-col max-h-[85vh] ${showSettingsMenu ? 'translate-y-0' : 'translate-y-full'}`} onClick={e => e.stopPropagation()}>
              <div className="flex items-center justify-between px-6 pt-6 pb-4 flex-shrink-0">
@@ -1885,7 +1952,6 @@ export default function MiniPlayer() {
           </div>
         </div>
 
-        {/* --- ADVANCED DOWNLOAD MANAGER MODAL --- */}
         <div className={`absolute inset-0 z-[100005] bg-black/80 backdrop-blur-md transition-opacity duration-300 flex items-center justify-center p-6 ${dlState.type !== null ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`} onClick={() => setDlState({ type: null, status: "idle" })}>
            <div className={`w-full max-w-sm bg-[#181818] rounded-2xl shadow-2xl border border-white/10 p-6 flex flex-col gap-4 transform transition-transform duration-500 ${dlState.type !== null ? 'scale-100 translate-y-0' : 'scale-95 translate-y-8'}`} onClick={e => e.stopPropagation()}>
               <h3 className="text-xl font-bold text-white flex items-center justify-between">
@@ -1947,7 +2013,6 @@ export default function MiniPlayer() {
            </div>
         </div>
 
-        {/* TIMER MENU OVERLAY */}
         {showTimerMenu && (
           <div className="absolute inset-0 z-[100010] bg-black/60 flex items-center justify-center p-6 backdrop-blur-sm pointer-events-auto" onClick={() => setShowTimerMenu(false)}>
              <div className="w-full max-w-sm bg-[#282828] rounded-2xl p-6 shadow-2xl flex flex-col gap-2 animate-in fade-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
@@ -1967,7 +2032,6 @@ export default function MiniPlayer() {
           </div>
         )}
 
-        {/* QUEUE OVERLAY */}
         <div className={`absolute inset-0 z-[60] bg-[#121212] transition-transform duration-300 flex flex-col pointer-events-auto ${showQueue ? 'translate-y-0' : 'translate-y-full'}`}>
           <div className="flex items-center justify-between px-5 pt-[max(1.5rem,env(safe-area-inset-top))] pb-4 sticky top-0 bg-[#121212] z-20 shadow-md no-select-text">
             <button onClick={() => { setIsQueueEditMode(false); setShowQueue(false); }} className="p-2 -ml-2 text-white/80 active:opacity-50"><ChevronDown size={28} /></button>
