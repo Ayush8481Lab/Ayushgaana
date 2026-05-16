@@ -1,4 +1,5 @@
 "use client";
+import { useEffect, useState } from "react";
 import { useAppContext } from "../../context/AppContext";
 
 const languages = [
@@ -9,22 +10,46 @@ const languages = [
 
 export default function SettingsPage() {
   const { language, setLanguage } = useAppContext();
+  const [mounted, setMounted] = useState(false);
+
+  // Load cached languages when the page mounts
+  useEffect(() => {
+    setMounted(true);
+    const cachedLanguages = localStorage.getItem("preferredLanguages");
+    
+    // If context language is empty but we have a cache, restore it
+    if (cachedLanguages && !language) {
+      setLanguage(cachedLanguages);
+    }
+  }, [language, setLanguage]);
 
   // Safely parse the comma-separated string into an array of languages
   const selectedLanguages = (language || "").split(",").filter(Boolean);
 
-  // Toggle function for multi-selection
+  // Toggle function for multi-selection & caching
   const toggleLanguage = (lang: string) => {
+    let updatedSelection: string[];
+    
     if (selectedLanguages.includes(lang)) {
-      // Remove language if it's already selected
-      const updated = selectedLanguages.filter((l) => l !== lang);
-      setLanguage(updated.join(","));
+      // Remove language
+      updatedSelection = selectedLanguages.filter((l) => l !== lang);
     } else {
-      // Add language to the selection
-      const updated = [...selectedLanguages, lang];
-      setLanguage(updated.join(","));
+      // Add language
+      updatedSelection = [...selectedLanguages, lang];
     }
+    
+    const newLanguageString = updatedSelection.join(",");
+    
+    // 1. Update Context State
+    setLanguage(newLanguageString);
+    // 2. Save to Cache
+    localStorage.setItem("preferredLanguages", newLanguageString);
   };
+
+  // Prevent UI flickering/hydration errors on Next.js
+  if (!mounted) {
+    return <div className="min-h-screen bg-[#060B19]" />;
+  }
 
   return (
     <div className="min-h-screen bg-[#060B19] bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-[#112048] via-[#060B19] to-[#040710] p-4 pt-12 pb-24 text-white">
