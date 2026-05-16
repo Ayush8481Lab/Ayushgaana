@@ -6,7 +6,7 @@ const extractArtistsText = (data: any) => {
   if (!data) return "Unknown Artist";
   if (typeof data === "string") return data;
   
-  let names: string[] =[];
+  let names: string[] = [];
   if (Array.isArray(data.artist)) names = data.artist.map((a: any) => a.name || a);
   else if (Array.isArray(data.singers)) names = data.singers.map((a: any) => a.name || a);
   else if (Array.isArray(data.artists)) names = data.artists.map((a: any) => a.name || a);
@@ -40,21 +40,37 @@ type AppContextType = {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: ReactNode }) {
-  const[language, setLanguage] = useState("Bhojpuri");
+  // Default fallback changed to comma-separated multi-language format
+  const [language, setLanguage] = useState("Hindi,English"); 
   const [currentSong, setCurrentSong] = useState<any>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   
-  const[queue, setQueue] = useState<any[]>([]);
+  const [queue, setQueue] = useState<any[]>([]);
   const [upcomingQueue, setUpcomingQueue] = useState<any[]>([]);
   const [historyQueue, setHistoryQueue] = useState<any[]>([]);
   
-  const[playContext, setPlayContext] = useState({ type: "Home", name: "Gaana Selection" });
+  const [playContext, setPlayContext] = useState({ type: "Home", name: "Gaana Selection" });
 
-  const[likedSongs, setLikedSongs] = useState<any[]>([]);
+  const [likedSongs, setLikedSongs] = useState<any[]>([]);
   const [likedPlaylists, setLikedPlaylists] = useState<any[]>([]);
+
+  // Globally handle language saving
+  const handleSetLanguage = (lang: string) => {
+    setLanguage(lang);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem("preferredLanguages", lang);
+    }
+  };
 
   useEffect(() => {
     try {
+       // 1. Load Preferred Languages
+       const cachedLanguages = localStorage.getItem("preferredLanguages");
+       if (cachedLanguages) {
+         setLanguage(cachedLanguages);
+       }
+
+       // 2. Load History & Likes
        const recent = JSON.parse(localStorage.getItem('recent_songs') || '[]').filter(Boolean);
        if (recent.length > 0) setHistoryQueue(recent);
        
@@ -63,15 +79,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
        const storedLikedPlaylists = JSON.parse(localStorage.getItem('liked_playlists') || '[]').filter(Boolean);
        if (storedLikedPlaylists.length > 0) setLikedPlaylists(storedLikedPlaylists);
-    } catch(e) {}
-  },[]);
+    } catch(e) {
+       console.error("Failed to load local storage data:", e);
+    }
+  }, []);
 
   // Deduplicate queue based on Gaana track_id / entity_id / id
   useEffect(() => {
     setUpcomingQueue(prev => prev.filter((v, i, a) => 
       a.findIndex(t => (t.track_id || t.id || t.entity_id) === (v.track_id || v.id || v.entity_id)) === i
     ));
-  },[upcomingQueue.length]);
+  }, [upcomingQueue.length]);
 
   const toggleLikeSong = (song: any) => {
     if (!song || (!song.id && !song.track_id && !song.entity_id)) return;
@@ -90,7 +108,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!playlist || (!playlist.id && !playlist.entity_id)) return;
     setLikedPlaylists(prev => {
       const exists = prev.find(p => p && (p.id || p.entity_id) === (playlist.id || playlist.entity_id));
-      const newList = exists ? prev.filter(p => p && (p.id || p.entity_id) !== (playlist.id || playlist.entity_id)) :[playlist, ...prev];
+      const newList = exists ? prev.filter(p => p && (p.id || p.entity_id) !== (playlist.id || playlist.entity_id)) : [playlist, ...prev];
       localStorage.setItem('liked_playlists', JSON.stringify(newList));
       return newList;
     });
@@ -98,7 +116,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   return (
     <AppContext.Provider value={{ 
-      language, setLanguage, 
+      language, 
+      setLanguage: handleSetLanguage, // Use our global save wrapper
       currentSong, setCurrentSong, 
       isPlaying, setIsPlaying, 
       queue, setQueue,
