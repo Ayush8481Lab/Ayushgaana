@@ -280,7 +280,7 @@ export default function Home() {
       sessionStorage.removeItem('homeState_viewAll');
       sessionStorage.removeItem('homeScrollY');
       sessionStorage.removeItem('viewAllScrollY');
-      sessionStorage.setItem('homeState_lang', language || 'hindi');
+      sessionStorage.setItem('homeState_lang', language || 'Hindi');
       setSections([]);
       setViewAll(null);
       nextIndexRef.current = 0;
