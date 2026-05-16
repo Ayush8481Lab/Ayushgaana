@@ -41,7 +41,7 @@ const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   // Default fallback changed to comma-separated multi-language format
-  const [language, setLanguage] = useState("Hindi,English"); 
+  const [language, setLanguage] = useState("Hindi"); 
   const [currentSong, setCurrentSong] = useState<any>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   
