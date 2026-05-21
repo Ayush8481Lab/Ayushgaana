@@ -10,21 +10,28 @@ export default function PlaySongClient({ slug, id, token, signature }: any) {
   const { setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   
   const [songDetails, setSongDetails] = useState<any>(null);
-  const[errorMsg, setErrorMsg] = useState("");
+  const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
     const fetchAndPlay = async () => {
       try {
         // Strip out any extra characters attached to the ID
         const cleanId = id.split("?")[0].split("&")[0];
-        const link = `https://www.jiosaavn.com/song/${slug}/${cleanId}`;
         
-        const res = await fetch(`https://ayushm-psi.vercel.app/api/songs?link=${encodeURIComponent(link)}`);
+        // UPDATED: Directly using Gaana V2 API
+        const res = await fetch(`https://apiv2.gaana.com/track/info?track_id=${cleanId}`);
         const json = await res.json();
         
-        let song = json?.data?.[0] || json?.[0] || json?.data || json;
+        // Gaana returns data directly in the root JSON block
+        const song = json;
 
-        if (song && song.name) {
+        // Check if Gaana responded successfully (status: 1)
+        if (song && song.status === 1 && song.track_title) {
+          
+          // Force Entity Type for Global Player (Ensures app knows it's a song)
+          song.type = "TR";
+          song.entity_type = "TR";
+
           // Attach YouTube Token so audio actually plays!
           if (token) song.prefetchedYtId = token;
           if (signature) {
@@ -58,7 +65,7 @@ export default function PlaySongClient({ slug, id, token, signature }: any) {
     if (id && slug) {
       fetchAndPlay();
     }
-  },[id, slug, token, signature, setCurrentSong, setIsPlaying, setPlayContext, setQueue, router]);
+  }, [id, slug, token, signature, setCurrentSong, setIsPlaying, setPlayContext, setQueue, router]);
 
   // Visual Error Feedback
   if (errorMsg) {
@@ -75,17 +82,12 @@ export default function PlaySongClient({ slug, id, token, signature }: any) {
     );
   }
 
-  // Helper variable to safely pull the image regardless of how the API formats it
+  // Helper variable to safely pull the image using Gaana's properties
   let displayImg = "";
   if (songDetails) {
-    if (Array.isArray(songDetails.image)) {
-      const bestImg = songDetails.image[songDetails.image.length - 1] || songDetails.image[0];
-      displayImg = bestImg?.url || bestImg?.link || "";
-    } else if (typeof songDetails.image === "object") {
-      displayImg = songDetails.image.url || songDetails.image.link || "";
-    } else if (typeof songDetails.image === "string") {
-      displayImg = songDetails.image;
-    }
+    displayImg = songDetails.artwork_large || songDetails.artwork_web || songDetails.atw || songDetails.artwork || songDetails.album_artwork || "";
+    // Upgrade image resolution format just like your homepage helper
+    displayImg = displayImg.replace("http://", "https://").replace(/size_[ms]/g, "size_l").replace("150x150", "500x500");
   }
 
   // Visual Success/Loading Feedback
@@ -99,7 +101,7 @@ export default function PlaySongClient({ slug, id, token, signature }: any) {
             className="w-48 h-48 rounded-2xl shadow-2xl shadow-[#1db954]/20 object-cover"
           />
           <h2 className="text-2xl font-bold text-[#1db954] text-center px-4">
-            {songDetails.name}
+            {songDetails.track_title}
           </h2>
           <div className="flex items-center gap-2 mt-2">
             <Loader2 className="animate-spin text-white/50" size={20} />
