@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAppContext } from "../../../../../context/AppContext";
 import { Loader2 } from "lucide-react";
 
-export default function PlaySongClient({ slug, id, token, signature }: any) {
+export default function PlaySongClient({ slug, id, token, signature, initialSongData }: any) {
   const router = useRouter();
   const { setCurrentSong, setIsPlaying, setPlayContext, setQueue } = useAppContext();
   
@@ -13,59 +13,40 @@ export default function PlaySongClient({ slug, id, token, signature }: any) {
   const [errorMsg, setErrorMsg] = useState("");
 
   useEffect(() => {
-    const fetchAndPlay = async () => {
-      try {
-        // Strip out any extra characters attached to the ID
-        const cleanId = id.split("?")[0].split("&")[0];
-        
-        // UPDATED: Directly using Gaana V2 API
-        const res = await fetch(`https://apiv2.gaana.com/track/info?track_id=${cleanId}`);
-        const json = await res.json();
-        
-        // Gaana returns data directly in the root JSON block
-        const song = json;
+    // If the server successfully fetched and passed the data, play it immediately!
+    if (initialSongData && initialSongData.track_title) {
+      
+      const song = { ...initialSongData };
+      
+      // Force Entity Type for Global Player (Ensures app knows it's a song)
+      song.type = "TR";
+      song.entity_type = "TR";
 
-        // Check if Gaana responded successfully (status: 1)
-        if (song && song.status === 1 && song.track_title) {
-          
-          // Force Entity Type for Global Player (Ensures app knows it's a song)
-          song.type = "TR";
-          song.entity_type = "TR";
-
-          // Attach YouTube Token so audio actually plays!
-          if (token) song.prefetchedYtId = token;
-          if (signature) {
-            song.spotifyId = signature;
-            song.spotifyUrl = `https://open.spotify.com/track/${signature}`;
-          }
-
-          // Visually show the album art on the screen
-          setSongDetails(song);
-
-          // Start the Global Player in Context
-          setPlayContext({ type: "External Link", name: "Shared Track" });
-          setQueue([song]); 
-          setCurrentSong(song);
-          setIsPlaying(true);
-
-          // Wait 2 seconds for the audio player to register natively, then smoothly redirect home
-          setTimeout(() => {
-             router.push("/");
-          }, 2000);
-
-        } else {
-          setErrorMsg("Could not load song details from API.");
-        }
-      } catch (err) {
-        console.error(err);
-        setErrorMsg("Network error connecting to API.");
+      // Attach YouTube Token so audio actually plays!
+      if (token) song.prefetchedYtId = token;
+      if (signature) {
+        song.spotifyId = signature;
+        song.spotifyUrl = `https://open.spotify.com/track/${signature}`;
       }
-    };
 
-    if (id && slug) {
-      fetchAndPlay();
+      // Visually show the album art on the screen
+      setSongDetails(song);
+
+      // Start the Global Player in Context
+      setPlayContext({ type: "External Link", name: "Shared Track" });
+      setQueue([song]); 
+      setCurrentSong(song);
+      setIsPlaying(true);
+
+      // Wait 2 seconds for the audio player to register natively, then smoothly redirect home
+      setTimeout(() => {
+         router.push("/");
+      }, 2000);
+
+    } else {
+      setErrorMsg("Could not load song details from API. Link might be invalid.");
     }
-  }, [id, slug, token, signature, setCurrentSong, setIsPlaying, setPlayContext, setQueue, router]);
+  }, [initialSongData, token, signature, setCurrentSong, setIsPlaying, setPlayContext, setQueue, router]);
 
   // Visual Error Feedback
   if (errorMsg) {
@@ -86,7 +67,6 @@ export default function PlaySongClient({ slug, id, token, signature }: any) {
   let displayImg = "";
   if (songDetails) {
     displayImg = songDetails.artwork_large || songDetails.artwork_web || songDetails.atw || songDetails.artwork || songDetails.album_artwork || "";
-    // Upgrade image resolution format just like your homepage helper
     displayImg = displayImg.replace("http://", "https://").replace(/size_[ms]/g, "size_l").replace("150x150", "500x500");
   }
 
