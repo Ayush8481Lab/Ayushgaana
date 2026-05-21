@@ -8,59 +8,41 @@ export async function generateMetadata({ params }: any): Promise<Metadata> {
   
   cleanId = cleanId.split("?")[0].split("&")[0];
 
-  const link = `https://www.jiosaavn.com/song/${slug}/${cleanId}`;
-  
   // The default image for fallback and when no song image is available
   const defaultImage = "https://raw.githubusercontent.com/Ayush8481Lab/musicayush/refs/heads/main/app/android-chrome-512x512.png";
   
   try {
-    const res = await fetch(`https://ayushm-psi.vercel.app/api/songs?link=${encodeURIComponent(link)}`, {
+    // UPDATED: Using Gaana API directly
+    const res = await fetch(`https://apiv2.gaana.com/track/info?track_id=${cleanId}`, {
       headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" },
       cache: "no-store" 
     });
     const json = await res.json();
     
-    let song = json?.data?.[0] || json?.[0] || json?.data || json;
+    // Gaana returns object directly, status 1 means success
+    const song = json;
 
-    if (song && song.name) {
+    if (song && song.status === 1 && song.track_title) {
       
-      // 1. EXTRACT ALL ARTISTS (Comma separated)
+      // 1. EXTRACT ALL ARTISTS (Comma separated) from Gaana 'singers' array
       let artists = "Unknown Artist";
-      if (song.artists && Array.isArray(song.artists.primary)) {
-        artists = song.artists.primary.map((a: any) => a.name).join(", ");
-      } else if (Array.isArray(song.primaryArtists)) {
-        artists = song.primaryArtists.map((a: any) => a.name).join(", ");
-      } else if (typeof song.primaryArtists === "string" && song.primaryArtists) {
-        artists = song.primaryArtists;
-      } else if (typeof song.singers === "string" && song.singers) {
-        artists = song.singers;
+      if (Array.isArray(song.singers) && song.singers.length > 0) {
+        artists = song.singers.map((a: any) => a.name).join(", ");
+      } else if (Array.isArray(song.cast) && song.cast.length > 0) {
+        artists = song.cast.map((a: any) => a.name).join(", ");
       }
 
-      // 2. EXTRACT LANGUAGE AND ALBUM
+      // 2. EXTRACT LANGUAGE AND ALBUM from Gaana response
       const lang = song.language ? song.language.charAt(0).toUpperCase() + song.language.slice(1) : "Unknown";
-      
-      let albumName = "Unknown Album";
-      if (song.album && typeof song.album === "object" && song.album.name) {
-        albumName = song.album.name;
-      } else if (typeof song.album === "string") {
-        albumName = song.album;
-      }
+      const albumName = song.album_title || "Unknown Album";
 
       // 3. YOUR CUSTOM FORMATTED TITLE AND DESCRIPTION
-      const title = `${song.name} ● Song  - ${artists} - ● Listen on Music@8481`;
-      const description = `Listen to ${song.name} on ● ${lang} Music album ● ${albumName} by ${artists} - play or Download only Music@8481 Developed By ● Ayush@8481`;
+      const title = `${song.track_title} ● Song  - ${artists} - ● Listen on Music@8481`;
+      const description = `Listen to ${song.track_title} on ● ${lang} Music album ● ${albumName} by ${artists} - play or Download only Music@8481 Developed By ● Ayush@8481`;
       
-      // Extract highest quality image, using your provided default as a fallback
-      let imgUrl = defaultImage;
-      if (Array.isArray(song.image) && song.image.length > 0) {
-        const bestImg = song.image[song.image.length - 1];
-        imgUrl = bestImg?.url || bestImg?.link || imgUrl;
-      } else if (song.image && typeof song.image === "object") {
-        imgUrl = song.image.url || song.image.link || imgUrl;
-      } else if (typeof song.image === "string") {
-        imgUrl = song.image;
-      }
-      imgUrl = imgUrl.replace("http://", "https://");
+      // Extract highest quality image from Gaana properties and force highest resolution
+      let imgUrl = song.artwork_large || song.artwork_web || song.atw || song.artwork || song.album_artwork || defaultImage;
+      imgUrl = imgUrl.replace("http://", "https://").replace(/size_[ms]/g, "size_l").replace("150x150", "500x500");
 
       return {
         title,
