@@ -1504,12 +1504,9 @@ export default function MiniPlayer() {
       if (streamBaseUrl) {['16', '64', '128', '320'].forEach(q => {
               let sizeStr = "";
               if (durSecs > 0) {
-                  let multiplier = 0;
-                  if (q === '320') multiplier = 0.0416666667;
-                  else if (q === '128') multiplier = 0.0166666667;
-                  else if (q === '64') multiplier = 0.0083333333;
-                  else if (q === '16') multiplier = 0.0041666667;
-                  if (multiplier > 0) sizeStr = `${(durSecs * multiplier).toFixed(1)}MB`;
+                  const bitrate = parseInt(q);
+                  const sizeMB = (durSecs * bitrate) / 8 / 1024;
+                  sizeStr = `${sizeMB.toFixed(1)}MB`;
               }
               opts.push({ 
                   url: streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${q}.mp4.master.m3u8`), 
@@ -1531,14 +1528,10 @@ export default function MiniPlayer() {
                      const numStr = (u.quality || "").replace(/\D/g, '');
                      const qNum = parseInt(numStr) || 128;
                      let sStr = "";
-                     if (durSecs > 0) {
-                         let m = 0;
-                         if (qNum === 320) m = 0.0416666667;
-                         else if (qNum === 128) m = 0.0166666667;
-                         else if (qNum === 64) m = 0.0083333333;
-                         else if (qNum === 16) m = 0.0041666667;
-                         if (m > 0) sStr = `${(durSecs * m).toFixed(1)}MB`;
-                     }
+                     if (durSecs > 0 && qNum > 0) {
+                         const sizeMB = (durSecs * qNum) / 8 / 1024;
+                         sStr = `${sizeMB.toFixed(1)}MB`;
+                }
                      return { url: u.url, quality: u.quality, label: u.quality, num: qNum, size: sStr };
                  });
              }
