@@ -561,7 +561,7 @@ export default function MiniPlayer() {
     setShowSettingsMenu(false); 
     try {
       const songTitleSlug = decodeEntities(displayTitle).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-      const sId = currentSong.track_id || currentSong.id || '';
+      const sId = currentSong.track_id || currentSong.id || currentSong.entity_id || '';
       const shareUrl = `https://ayushgaana.vercel.app/play/song/${songTitleSlug}/${sId}`;
 
       if (navigator.share) {
