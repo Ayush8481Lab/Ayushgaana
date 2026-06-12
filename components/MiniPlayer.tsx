@@ -1,5 +1,3 @@
-
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -562,11 +560,9 @@ export default function MiniPlayer() {
   const handleShareSong = async () => {
     setShowSettingsMenu(false); 
     try {
-      let path = currentSong.perma_url || currentSong.url || "";
-      if (path && path.includes('jiosaavn.com')) path = new URL(path).pathname;
-      const vId = ytVideoId || currentSong.prefetchedYtId || '';
-      const sId = spotifyId || currentSong.spotifyId || '';
-      const shareUrl = `${window.location.origin}/play${path}?token=${vId}&signature=${sId}`;
+      const songTitleSlug = decodeEntities(displayTitle).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      const sId = currentSong.track_id || currentSong.id || '';
+      const shareUrl = `https://ayushgaana.vercel.app/play/song/${songTitleSlug}/${sId}`;
 
       if (navigator.share) {
         try { await navigator.share({ url: shareUrl }); } 
@@ -1476,21 +1472,75 @@ export default function MiniPlayer() {
     }
   };
 
+  const executeApiMusicDownload = (optUrl: string) => {
+      setDlState({ type: "music", status: "downloading", progress: 100, packStep: "Starting Download via Server..." });
+      try {
+          const cleanTitle = encodeURIComponent(decodeEntities(displayTitle));
+          const cleanArtist = encodeURIComponent(decodeEntities(displayArtists));
+          const cleanAlbum = encodeURIComponent(decodeEntities(songDetails?.album_title || displayTitle));
+          const cleanImg = encodeURIComponent(displayImage || "https://via.placeholder.com/500");
+          const m3u8Safe = encodeURIComponent(optUrl);
+
+          const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}`;
+
+          const a = document.createElement("a");
+          a.href = downloadApiUrl;
+          document.body.appendChild(a);
+          a.click();
+          document.body.removeChild(a);
+
+          setTimeout(() => setDlState({ type: null, status: "idle" }), 1500);
+      } catch (e) {
+          console.error("Download API failed", e);
+          setDlState({ type: null, status: "idle" });
+      }
+  };
+
   const handleDownloadMusicInit = async () => { 
       setShowSettingsMenu(false);
       let opts: any[] =[];
+      const durSecs = duration > 0 ? duration : (Number(songDetails?.duration) || 0);
+
       if (streamBaseUrl) {['16', '64', '128', '320'].forEach(q => {
-              opts.push({ url: streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${q}.mp4.master.m3u8`), quality: `${q}kbps`, label: QUALITY_MAP[q] || `${q}kbps`, num: parseInt(q) });
+              let sizeStr = "";
+              if (durSecs > 0) {
+                  let multiplier = 0;
+                  if (q === '320') multiplier = 0.0416666667;
+                  else if (q === '128') multiplier = 0.0166666667;
+                  else if (q === '64') multiplier = 0.0083333333;
+                  else if (q === '16') multiplier = 0.0041666667;
+                  if (multiplier > 0) sizeStr = `${(durSecs * multiplier).toFixed(1)}MB`;
+              }
+              opts.push({ 
+                  url: streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${q}.mp4.master.m3u8`), 
+                  quality: `${q}kbps`, 
+                  label: QUALITY_MAP[q] || `${q}kbps`, 
+                  num: parseInt(q),
+                  size: sizeStr
+              });
           });
       } else if (audioUrl && !audioUrl.includes('.m3u8')) {
-          opts.push({ url: audioUrl, quality: `128kbps`, label: `128kbps`, num: 128 });
+          opts.push({ url: audioUrl, quality: `128kbps`, label: `128kbps`, num: 128, size: "" });
       } else {
           try {
              const fetchLink = encodeURIComponent(currentSong.url || currentSong.perma_url || "");
              const res = await fetchProtected(`https://ayushm-psi.vercel.app/api/songs?link=${fetchLink}`, { referrerPolicy: "no-referrer" });
              const json = await res.json();
              if (json.data?.[0]?.downloadUrl) {
-                 opts = json.data[0].downloadUrl.map((u:any) => ({ url: u.url, quality: u.quality, label: u.quality, num: parseInt(u.quality) }));
+                 opts = json.data[0].downloadUrl.map((u:any) => {
+                     const numStr = (u.quality || "").replace(/\D/g, '');
+                     const qNum = parseInt(numStr) || 128;
+                     let sStr = "";
+                     if (durSecs > 0) {
+                         let m = 0;
+                         if (qNum === 320) m = 0.0416666667;
+                         else if (qNum === 128) m = 0.0166666667;
+                         else if (qNum === 64) m = 0.0083333333;
+                         else if (qNum === 16) m = 0.0041666667;
+                         if (m > 0) sStr = `${(durSecs * m).toFixed(1)}MB`;
+                     }
+                     return { url: u.url, quality: u.quality, label: u.quality, num: qNum, size: sStr };
+                 });
              }
           } catch(e) {}
       }
@@ -2005,8 +2055,12 @@ export default function MiniPlayer() {
                 <div className="flex flex-col gap-2 max-h-[40vh] overflow-y-auto scrollbar-hide">
                   <p className="text-xs text-white/50 mb-2 text-center">Download true MP3 with injected Cover Art & Metadata.</p>
                   {dlState.options?.map((opt:any, i:number) => (
-                    <button key={i} onClick={() => executeMp3PackerDownload(opt.url, opt.num.toString())} className="w-full flex items-center justify-between p-3 rounded-lg bg-[#282828] hover:bg-[#333] transition-colors border border-white/5 active:scale-95 text-left">
-                        <div className="flex flex-col"><span className="text-white font-bold text-sm">Download {opt.label}</span></div><Download size={18} className="text-[#1db954]" />
+                    <button key={i} onClick={() => executeApiMusicDownload(opt.url)} className="w-full flex items-center justify-between p-3 rounded-lg bg-[#282828] hover:bg-[#333] transition-colors border border-white/5 active:scale-95 text-left">
+                        <div className="flex flex-col">
+                            <span className="text-white font-bold text-sm">Download {opt.label}</span>
+                            {opt.size && <span className="text-white/50 text-xs">{opt.size}</span>}
+                        </div>
+                        <Download size={18} className="text-[#1db954]" />
                     </button>
                   ))}
                 </div>
