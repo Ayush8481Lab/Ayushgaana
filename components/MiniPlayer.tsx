@@ -1472,7 +1472,7 @@ export default function MiniPlayer() {
     }
   };
 const downloadLrcFile = () => {
-    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return;
+    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
 
     const cleanTitle = decodeEntities(displayTitle);
     const cleanArtist = decodeEntities(displayArtists);
@@ -1490,22 +1490,21 @@ const downloadLrcFile = () => {
         lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
     });
 
-    // FIX 1: Use 'application/octet-stream' so mobile browsers DO NOT append '.txt'
-    const blob = new Blob([lrcContent], { type: 'application/octet-stream' });
+    // FIX 1: 'application/lrc' prevents Android from appending ".txt"
+    const blob = new Blob([lrcContent], { type: 'application/lrc' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
 
-    // Strict formatting
-    const safeFileName = `${cleanTitle}`.replace(/[/\\:*?<>|]/g, "").trim();
+    const safeFileName = `${cleanTitle} - ${cleanArtist}`.replace(/[/\\:*?<>|]/g, "").trim();
     a.download = `${safeFileName}.lrc`;
 
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     
-    // Clean up memory after a slight delay
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    return true; // Used to tell the next function to delay
   };
 const executeApiMusicDownload = (optUrl: string) => {
       setDlState({ type: "music", status: "downloading", progress: 100, packStep: "Starting Download via Server..." });
@@ -1518,25 +1517,27 @@ const executeApiMusicDownload = (optUrl: string) => {
 
           const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}`;
 
-          const a = document.createElement("a");
-          a.href = downloadApiUrl;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          // FIX 2: Download LRC FIRST.
+          const hasLrc = downloadLrcFile();
 
-          // FIX 2: Delay the LRC download by 800ms. 
-          // This prevents Android Download Manager from throwing the second file into a random directory (like /Movies) to avoid a race condition.
+          // FIX 3: Apply a 1.5-second delay to completely separate the MP3 from the LRC download.
+          const delayTime = hasLrc ? 3000 : 0;
+
           setTimeout(() => {
-              downloadLrcFile();
-          }, 800);
+              const a = document.createElement("a");
+              a.href = downloadApiUrl;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
 
-          setTimeout(() => setDlState({ type: null, status: "idle" }), 1500);
+              setTimeout(() => setDlState({ type: null, status: "idle" }), 1500);
+          }, delayTime);
+
       } catch (e) {
           console.error("Download API failed", e);
           setDlState({ type: null, status: "idle" });
       }
   };
-
   const handleDownloadMusicInit = async () => { 
       setShowSettingsMenu(false);
       let opts: any[] =[];
