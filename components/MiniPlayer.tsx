@@ -1471,7 +1471,44 @@ export default function MiniPlayer() {
       setDlState({ type: null, status: "idle" });
     }
   };
+const downloadLrcFile = () => {
+    // Only generate if the track has synced lyrics
+    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return;
 
+    const cleanTitle = decodeEntities(displayTitle);
+    const cleanArtist = decodeEntities(displayArtists);
+    const cleanAlbum = decodeEntities(songDetails?.album_title || displayTitle);
+    const lenStr = formatTime(duration > 0 ? duration : (Number(songDetails?.duration) || 0));
+
+    // Construct the Header tags
+    let lrcContent = `[ar:${cleanArtist}]\n[al:${cleanAlbum}]\n[ti:${cleanTitle}]\n[au:${cleanArtist}]\n[length:${lenStr}]\n`;
+
+    // Construct the timestamped lyrics body
+    lyrics.forEach(line => {
+        const t = Number(line.time) || 0;
+        // safely extract seconds and exact two-digit milliseconds
+        const [secPart, msPart] = t.toFixed(2).split('.');
+        const mins = Math.floor(Number(secPart) / 60).toString().padStart(2, '0');
+        const secs = (Number(secPart) % 60).toString().padStart(2, '0');
+        
+        lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
+    });
+
+    // Create a physical file out of the string data and force a download
+    const blob = new Blob([lrcContent], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+
+    // Same safe-name filtering your MP3 downloader uses
+    const safeFileName = `${cleanTitle} - ${cleanArtist}`.replace(/[/\\:*?<>|]/g, "").trim();
+    a.download = `${safeFileName}.lrc`;
+
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
   const executeApiMusicDownload = (optUrl: string) => {
       setDlState({ type: "music", status: "downloading", progress: 100, packStep: "Starting Download via Server..." });
       try {
@@ -1488,6 +1525,9 @@ export default function MiniPlayer() {
           document.body.appendChild(a);
           a.click();
           document.body.removeChild(a);
+
+          // ---> NEW: TRIGGER LRC DOWNLOAD ALONGSIDE MP3 <---
+          downloadLrcFile();
 
           setTimeout(() => setDlState({ type: null, status: "idle" }), 1500);
       } catch (e) {
