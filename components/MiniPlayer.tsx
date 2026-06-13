@@ -1528,22 +1528,82 @@ const downloadLrcFile = () => {
           const cleanTitle = encodeURIComponent(decodeEntities(displayTitle));
           const cleanArtist = encodeURIComponent(decodeEntities(displayArtists));
           const cleanAlbum = encodeURIComponent(decodeEntities(songDetails?.album_title || displayTitle));
+const downloadLrcFile = () => {
+    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
+
+    const cleanTitle = decodeEntities(displayTitle);
+    const cleanArtist = decodeEntities(displayArtists);
+    const cleanAlbum = decodeEntities(songDetails?.album_title || displayTitle);
+    const lenStr = formatTime(duration > 0 ? duration : (Number(songDetails?.duration) || 0));
+
+    let lrcContent = `[ar:${cleanArtist}]\n[al:${cleanAlbum}]\n[ti:${cleanTitle}]\n[au:${cleanArtist}]\n[length:${lenStr}]\n`;
+
+    lyrics.forEach(line => {
+        const t = Number(line.time) || 0;
+        const [secPart, msPart] = t.toFixed(2).split('.');
+        const mins = Math.floor(Number(secPart) / 60).toString().padStart(2, '0');
+        const secs = (Number(secPart) % 60).toString().padStart(2, '0');
+        
+        lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
+    });
+
+    const filename = `${cleanTitle} - ${cleanArtist}`.replace(/[/\\:*?<>|]/g, "").trim();
+
+    // ==========================================
+    // EXACT MEGALOBIZ IMPLEMENTATION
+    // ==========================================
+    const data = [];
+    data.push(lrcContent);
+    const properties = { type: 'plain/text' }; 
+    
+    let file;
+    try {
+        // Specify the filename using the File constructor
+        file = new File(data, filename + ".lrc", properties);
+    } catch (e) {
+        // Fall back to the Blob constructor if that isn't supported
+        file = new Blob(data, properties);
+    }
+
+    // Safely create object URL covering all browsers
+    const url = (window.URL || window.webkitURL).createObjectURL(file);
+
+    // Create anchor element
+    const anchor = document.createElement('a');
+    anchor.setAttribute('target', '_blank');
+    anchor.setAttribute('download', filename + ".lrc");
+    anchor.href = url;
+
+    // Trigger download WITHOUT appending to the document body!
+    // This bypasses the strict Android OS Download Manager MIME sniff.
+    anchor.click();
+    
+    setTimeout(() => (window.URL || window.webkitURL).revokeObjectURL(url), 3000);
+    return true; 
+  };
+
+
+  const executeApiMusicDownload = (optUrl: string) => {
+      setDlState({ type: "music", status: "downloading", progress: 100, packStep: "Starting Download via Server..." });
+      try {
+          const cleanTitle = encodeURIComponent(decodeEntities(displayTitle));
+          const cleanArtist = encodeURIComponent(decodeEntities(displayArtists));
+          const cleanAlbum = encodeURIComponent(decodeEntities(songDetails?.album_title || displayTitle));
           const cleanImg = encodeURIComponent(displayImage || "https://via.placeholder.com/500");
           const m3u8Safe = encodeURIComponent(optUrl);
 
           const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}`;
 
-          // TRIGGER 1: Download LRC FIRST using the Megalobiz logic.
+          // TRIGGER 1: Download LRC EXACTLY like Megalobiz
           const hasLrc = downloadLrcFile();
 
-          // TRIGGER 2: Apply the 3-second delay to completely separate the MP3 from the LRC download.
-          // This delay is what saves you from the "Movies/" folder bug.
+          // TRIGGER 2: 3-second delay (Keeps Android from throwing the MP3 in the Movies folder)
           const delayTime = hasLrc ? 3000 : 0;
 
           setTimeout(() => {
               const a = document.createElement("a");
               a.href = downloadApiUrl;
-              document.body.appendChild(a);
+              document.body.appendChild(a); // Appending is fine for external API links
               a.click();
               document.body.removeChild(a);
 
