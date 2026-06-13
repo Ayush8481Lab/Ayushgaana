@@ -1471,41 +1471,6 @@ export default function MiniPlayer() {
       setDlState({ type: null, status: "idle" });
     }
   };
-const downloadLrcFile = () => {
-    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
-
-    const cleanTitle = decodeEntities(displayTitle);
-    const cleanArtist = decodeEntities(displayArtists);
-    const cleanAlbum = decodeEntities(songDetails?.album_title || displayTitle);
-    const lenStr = formatTime(duration > 0 ? duration : (Number(songDetails?.duration) || 0));
-
-    let lrcContent = `[ar:${cleanArtist}]\n[al:${cleanAlbum}]\n[ti:${cleanTitle}]\n[au:${cleanArtist}]\n[length:${lenStr}]\n`;
-
-    lyrics.forEach(line => {
-        const t = Number(line.time) || 0;
-        const [secPart, msPart] = t.toFixed(2).split('.');
-        const mins = Math.floor(Number(secPart) / 60).toString().padStart(2, '0');
-        const secs = (Number(secPart) % 60).toString().padStart(2, '0');
-        
-        lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
-    });
-
-    // FIX 1: 'application/lrc' prevents Android from appending ".txt"
-    const blob = new Blob([lrcContent], { type: 'application/lrc' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-
-    const safeFileName = `${cleanTitle} - ${cleanArtist}`.replace(/[/\\:*?<>|]/g, "").trim();
-    a.download = `${safeFileName}.lrc`;
-
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    
-    setTimeout(() => URL.revokeObjectURL(url), 3000);
-    return true; // Used to tell the next function to delay
-  };
 const executeApiMusicDownload = (optUrl: string) => {
       setDlState({ type: "music", status: "downloading", progress: 100, packStep: "Starting Download via Server..." });
       try {
@@ -1514,25 +1479,33 @@ const executeApiMusicDownload = (optUrl: string) => {
           const cleanAlbum = encodeURIComponent(decodeEntities(songDetails?.album_title || displayTitle));
           const cleanImg = encodeURIComponent(displayImage || "https://via.placeholder.com/500");
           const m3u8Safe = encodeURIComponent(optUrl);
+          
+          // You must pass the track id for lyrics!
+          const trackId = currentSong.track_id || currentSong.id || spotifyId || "";
 
-          const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}`;
+          // The base API URL
+          const baseApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&trackid=${trackId}`;
 
-          // FIX 2: Download LRC FIRST.
-          const hasLrc = downloadLrcFile();
+          // 1. DOWNLOAD THE MP3
+          const aMp3 = document.createElement("a");
+          aMp3.href = baseApiUrl;
+          document.body.appendChild(aMp3);
+          aMp3.click();
+          document.body.removeChild(aMp3);
 
-          // FIX 3: Apply a 1.5-second delay to completely separate the MP3 from the LRC download.
-          const delayTime = hasLrc ? 3000 : 0;
+          // 2. DOWNLOAD THE LRC FILE (1.5 seconds later to prevent Android glitches)
+          if (trackId) {
+              setTimeout(() => {
+                  const aLrc = document.createElement("a");
+                  // Adding &filetype=lrc tells the API to return the text file instead of MP3!
+                  aLrc.href = `${baseApiUrl}&filetype=lrc`;
+                  document.body.appendChild(aLrc);
+                  aLrc.click();
+                  document.body.removeChild(aLrc);
+              }, 1500);
+          }
 
-          setTimeout(() => {
-              const a = document.createElement("a");
-              a.href = downloadApiUrl;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-
-              setTimeout(() => setDlState({ type: null, status: "idle" }), 1500);
-          }, delayTime);
-
+          setTimeout(() => setDlState({ type: null, status: "idle" }), 2000);
       } catch (e) {
           console.error("Download API failed", e);
           setDlState({ type: null, status: "idle" });
