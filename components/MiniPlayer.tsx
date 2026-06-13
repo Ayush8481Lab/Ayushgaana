@@ -1472,7 +1472,6 @@ export default function MiniPlayer() {
     }
   };
 const downloadLrcFile = () => {
-    // Only generate if the track has synced lyrics
     if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return;
 
     const cleanTitle = decodeEntities(displayTitle);
@@ -1480,13 +1479,10 @@ const downloadLrcFile = () => {
     const cleanAlbum = decodeEntities(songDetails?.album_title || displayTitle);
     const lenStr = formatTime(duration > 0 ? duration : (Number(songDetails?.duration) || 0));
 
-    // Construct the Header tags
     let lrcContent = `[ar:${cleanArtist}]\n[al:${cleanAlbum}]\n[ti:${cleanTitle}]\n[au:${cleanArtist}]\n[length:${lenStr}]\n`;
 
-    // Construct the timestamped lyrics body
     lyrics.forEach(line => {
         const t = Number(line.time) || 0;
-        // safely extract seconds and exact two-digit milliseconds
         const [secPart, msPart] = t.toFixed(2).split('.');
         const mins = Math.floor(Number(secPart) / 60).toString().padStart(2, '0');
         const secs = (Number(secPart) % 60).toString().padStart(2, '0');
@@ -1494,22 +1490,24 @@ const downloadLrcFile = () => {
         lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
     });
 
-    // Create a physical file out of the string data and force a download
-    const blob = new Blob([lrcContent], { type: 'text/plain;charset=utf-8' });
+    // FIX 1: Use 'application/octet-stream' so mobile browsers DO NOT append '.txt'
+    const blob = new Blob([lrcContent], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
 
-    // Same safe-name filtering your MP3 downloader uses
+    // Strict formatting
     const safeFileName = `${cleanTitle}`.replace(/[/\\:*?<>|]/g, "").trim();
     a.download = `${safeFileName}.lrc`;
 
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    
+    // Clean up memory after a slight delay
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   };
-  const executeApiMusicDownload = (optUrl: string) => {
+const executeApiMusicDownload = (optUrl: string) => {
       setDlState({ type: "music", status: "downloading", progress: 100, packStep: "Starting Download via Server..." });
       try {
           const cleanTitle = encodeURIComponent(decodeEntities(displayTitle));
@@ -1526,8 +1524,11 @@ const downloadLrcFile = () => {
           a.click();
           document.body.removeChild(a);
 
-          // ---> NEW: TRIGGER LRC DOWNLOAD ALONGSIDE MP3 <---
-          downloadLrcFile();
+          // FIX 2: Delay the LRC download by 800ms. 
+          // This prevents Android Download Manager from throwing the second file into a random directory (like /Movies) to avoid a race condition.
+          setTimeout(() => {
+              downloadLrcFile();
+          }, 800);
 
           setTimeout(() => setDlState({ type: null, status: "idle" }), 1500);
       } catch (e) {
