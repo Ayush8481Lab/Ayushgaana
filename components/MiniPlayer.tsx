@@ -1501,7 +1501,7 @@ const downloadLrcFile = () => {
     a.href = url;
 
     // Same safe-name filtering your MP3 downloader uses
-    const safeFileName = `${cleanTitle} - ${cleanArtist}`.replace(/[/\\:*?<>|]/g, "").trim();
+    const safeFileName = `${cleanTitle}`.replace(/[/\\:*?<>|]/g, "").trim();
     a.download = `${safeFileName}.lrc`;
 
     document.body.appendChild(a);
