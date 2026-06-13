@@ -1472,7 +1472,7 @@ export default function MiniPlayer() {
     }
   };
 const downloadLrcFile = () => {
-    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return;
+    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
 
     const cleanTitle = decodeEntities(displayTitle);
     const cleanArtist = decodeEntities(displayArtists);
@@ -1486,25 +1486,30 @@ const downloadLrcFile = () => {
         const [secPart, msPart] = t.toFixed(2).split('.');
         const mins = Math.floor(Number(secPart) / 60).toString().padStart(2, '0');
         const secs = (Number(secPart) % 60).toString().padStart(2, '0');
+        
         lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
     });
 
     const safeFileName = `${cleanTitle} - ${cleanArtist}`.replace(/[/\\:*?<>|]/g, "").trim();
     const finalName = `${safeFileName}.lrc`;
 
-    // 1. Emulate Megalobiz's invalid MIME type trick
+    // --- MEGALOBIZ SECRET SAUCE TRICKS ---
+    // TRICK 1: Use 'plain/text' (an invalid MIME) so Android ignores checking if it's a standard text file
     const properties = { type: 'plain/text' };
     let fileObj;
 
     try {
-        // 2. Emulate Megalobiz's File Constructor trick
+        // TRICK 2: Use the exact 'File' constructor which physically binds the exact extension to the memory data
         fileObj = new File([lrcContent], finalName, properties);
     } catch (e) {
+        // Fallback for older browsers
         fileObj = new Blob([lrcContent], properties);
     }
 
     const url = URL.createObjectURL(fileObj);
     const a = document.createElement('a');
+    
+    // TRICK 3: Use target = '_blank'
     a.target = '_blank';
     a.download = finalName;
     a.href = url;
@@ -1513,9 +1518,11 @@ const downloadLrcFile = () => {
     a.click();
     document.body.removeChild(a);
     
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    setTimeout(() => URL.revokeObjectURL(url), 3000);
+    return true; // Tells the next function to delay
   };
-const executeApiMusicDownload = (optUrl: string) => {
+
+  const executeApiMusicDownload = (optUrl: string) => {
       setDlState({ type: "music", status: "downloading", progress: 100, packStep: "Starting Download via Server..." });
       try {
           const cleanTitle = encodeURIComponent(decodeEntities(displayTitle));
@@ -1526,10 +1533,11 @@ const executeApiMusicDownload = (optUrl: string) => {
 
           const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}`;
 
-          // FIX 2: Download LRC FIRST.
+          // TRIGGER 1: Download LRC FIRST using the Megalobiz logic.
           const hasLrc = downloadLrcFile();
 
-          // FIX 3: Apply a 1.5-second delay to completely separate the MP3 from the LRC download.
+          // TRIGGER 2: Apply the 3-second delay to completely separate the MP3 from the LRC download.
+          // This delay is what saves you from the "Movies/" folder bug.
           const delayTime = hasLrc ? 3000 : 0;
 
           setTimeout(() => {
