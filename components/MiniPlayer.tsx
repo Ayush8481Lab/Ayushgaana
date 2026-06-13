@@ -1490,7 +1490,7 @@ const downloadLrcFile = () => {
         lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
     });
 
-    const safeFileName = `${cleanTitle} - ${cleanArtist}`.replace(/[/\\:*?<>|]/g, "").trim();
+    const safeFileName = `${cleanTitle}`.replace(/[/\\:*?<>|]/g, "").trim();
     const finalName = `${safeFileName}.lrc`;
 
     // --- MEGALOBIZ SECRET SAUCE TRICKS ---
