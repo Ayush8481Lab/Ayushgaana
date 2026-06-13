@@ -1484,7 +1484,7 @@ const executeApiMusicDownload = (optUrl: string) => {
           const trackId = currentSong.track_id || currentSong.id || spotifyId || "";
 
           // The base API URL
-          const baseApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&trackid=${trackId}`;
+          const baseApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&trackid=${spotifyId || ''}`;
 
           // 1. DOWNLOAD THE MP3
           const aMp3 = document.createElement("a");
