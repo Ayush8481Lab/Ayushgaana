@@ -1541,7 +1541,7 @@ const downloadLrcFile = () => {
           const cleanGenre = encodeURIComponent(decodeEntities(genreStr));
 
           // 3. Append them to the final API URL
-          const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&composer=${cleanComposer}&year=${cleanYear}&genre=${cleanGenre}`;
+          const downloadApiUrl = `https://ayushdownload.vercel.app/api/dl?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&composer=${cleanComposer}&year=${cleanYear}&genre=${cleanGenre}`;
           // TRIGGER 1: Download LRC EXACTLY like Megalobiz
           const hasLrc = downloadLrcFile();
 
