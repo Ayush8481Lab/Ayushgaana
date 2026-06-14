@@ -1527,8 +1527,21 @@ const downloadLrcFile = () => {
           const cleanImg = encodeURIComponent(displayImage || "https://via.placeholder.com/500");
           const m3u8Safe = encodeURIComponent(optUrl);
 
-          const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}`;
+          // 1. Extract new metadata with fallback for composer
+          const composerStr = (songDetails?.composers && songDetails.composers.length > 0) 
+              ? songDetails.composers.map((c: any) => c.name).join(", ") 
+              : "Ayush Kumar Yadav"; // Fallback if composer is missing
+          
+          const yearStr = songDetails?.release_date ? songDetails.release_date.split("-")[0] : "";
+          const genreStr = songDetails?.tags?.[0]?.tag_name || "";
 
+          // 2. Encode the new fields safely
+          const cleanComposer = encodeURIComponent(decodeEntities(composerStr));
+          const cleanYear = encodeURIComponent(yearStr);
+          const cleanGenre = encodeURIComponent(decodeEntities(genreStr));
+
+          // 3. Append them to the final API URL
+          const downloadApiUrl = `https://ayushdownload.vercel.app/api/download?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&composer=${cleanComposer}&year=${cleanYear}&genre=${cleanGenre}`;
           // TRIGGER 1: Download LRC EXACTLY like Megalobiz
           const hasLrc = downloadLrcFile();
 
