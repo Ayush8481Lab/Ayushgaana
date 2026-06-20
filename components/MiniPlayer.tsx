@@ -1,5 +1,4 @@
 
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -323,7 +322,6 @@ const loadHlsJS = (): Promise<any> => new Promise((resolve, reject) => {
     document.head.appendChild(script);
 });
 
-// Dynamic CDN Loader for Ably API
 const loadAblyJS = (): Promise<any> => new Promise((resolve, reject) => {
     if ((window as any).Ably) return resolve((window as any).Ably);
     const script = document.createElement('script');
@@ -415,7 +413,7 @@ export default function MiniPlayer() {
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
 
-  // --- JIM JAM CORE STATE ENGINE (HOST IS SOURCE OF TRUTH) ---
+  // --- JIM JAM CORE STATE ENGINE ---
   const JAM_STORAGE_KEY = 'jim_jam_session';
   const [showJamMenu, setShowJamMenu] = useState(false);
   const [jamRoomId, setJamRoomId] = useState<string | null>(null);
@@ -427,7 +425,6 @@ export default function MiniPlayer() {
   const [jamLogs, setJamLogs] = useState<any[]>([]);
   const [jamPlayBlocked, setJamPlayBlocked] = useState(false);
 
-  // Refs for stable callbacks
   const ablyClientRef = useRef<any>(null);
   const ablyChannelRef = useRef<any>(null);
   const isPlayingRef = useRef(isPlaying);
@@ -435,11 +432,13 @@ export default function MiniPlayer() {
   const jamPlayBlockedRef = useRef(jamPlayBlocked);
   const isSystemSongChangeRef = useRef(false);
   
+  // High-performance payload broadcast tracking
+  const songStartTrackingRef = useRef<number>(Date.now());
+  const lastFetchedTrackIdRef = useRef<string | null>(null);
+  
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { jamRoleRef.current = jamRole; }, [jamRole]);
   useEffect(() => { jamPlayBlockedRef.current = jamPlayBlocked; }, [jamPlayBlocked]);
-
-  const lastFetchedTrackIdRef = useRef<string | null>(null);
 
   const[dominantColor, setDominantColor] = useState("rgb(83, 83, 83)");
   const[isScrolledPastMain, setIsScrolledPastMain] = useState(false);
@@ -498,7 +497,6 @@ export default function MiniPlayer() {
   const videoStartTimeRef = useRef<number>(0);    
   const[isVideoLoading, setIsVideoLoading] = useState(false);
   const videoIframeRef = useRef<HTMLIFrameElement>(null);
-  const toggleVideoModeRef = useRef<any>(null); // For Jam Trigger
 
   const fetchingRecsRef = useRef(false);
   const[isFetchingRecsUI, setIsFetchingRecsUI] = useState(false);
@@ -540,8 +538,10 @@ export default function MiniPlayer() {
   const handleLikeClick = (e: any) => { e.stopPropagation(); toggleLikeSong(currentSong); };
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen;
+  
+  const isGuestLocked = jamRole === 'guest' && jamStatus === 'connected';
 
-  // --- SILENT AUTOPLAY BYPASS (Global interaction unlocks audio without popup) ---
+  // --- SILENT AUTOPLAY BYPASS ---
   useEffect(() => {
       const unlockAudio = () => {
           if (jamPlayBlockedRef.current && audioRef.current) {
@@ -579,24 +579,37 @@ export default function MiniPlayer() {
       });
   }, []);
 
-  // When Host's media officially resolves, automatically deep-sync all listeners.
   useEffect(() => {
       if (jamRole === 'host' && jamStatus === 'connected' && audioUrl) {
           broadcastFullSync();
       }
   }, [audioUrl, isVideoMode, broadcastFullSync]);
 
-  // --- 2-SECOND AUTOMATION HEARTBEAT ---
+  // --- 2-SECOND AUTOMATION HEARTBEAT + METADATA CARRIER ---
   useEffect(() => {
       if (jamRole === 'host' && jamStatus === 'connected') {
           const interval = setInterval(() => {
               if (!ablyChannelRef.current) return;
+              
+              // Beam metadata for 20 seconds to guarantee perfect async payload loading on Guests
+              const timeSinceStart = Date.now() - (songStartTrackingRef.current || 0);
+              const shouldCarry = timeSinceStart < 20000;
+
               ablyChannelRef.current.publish('sync', {
                   type: 'HEARTBEAT',
                   trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
                   isPlaying: isPlayingRef.current,
                   time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
-                  isVideoMode: isVideoModeRef.current
+                  isVideoMode: isVideoModeRef.current,
+                  carryPayload: shouldCarry ? {
+                      audioUrl: audioUrlRef.current,
+                      streamBaseUrl: streamBaseUrlRef.current,
+                      lyrics: lyricsRef.current,
+                      syncType: syncTypeRef.current,
+                      canvasData: canvasDataRef.current,
+                      songDetails: songDetailsRef.current,
+                      ytVideoId: ytVideoIdRef.current
+                  } : null
               });
           }, 2000);
           return () => clearInterval(interval);
@@ -684,37 +697,13 @@ export default function MiniPlayer() {
                   return;
               }
 
-              // HOST LOGIC: Process requests from Guests
+              // HOST LOGIC
               if (currentRole === 'host') {
-                  if (data.type === 'request_sync') {
-                      broadcastFullSync();
-                  } else if (data.type === 'GUEST_SONG_REQUEST') {
-                      setCurrentSong(data.song); // Host dictates track change
-                  } else if (data.type === 'GUEST_ACTION') {
-                      if (data.action === 'STATE') {
-                          setIsPlaying(data.isPlaying);
-                          if (audioRef.current) {
-                              audioRef.current.currentTime = data.time;
-                              if (data.isPlaying) audioRef.current.play().catch(()=>{}); else audioRef.current.pause();
-                          }
-                          if (videoIframeRef.current?.contentWindow) {
-                              videoIframeRef.current.contentWindow.postMessage({ type: data.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
-                          }
-                          channel.publish('sync', { type: 'STATE', isPlaying: data.isPlaying, time: data.time, isVideoMode: isVideoModeRef.current });
-                      } else if (data.action === 'TIME') {
-                          if (audioRef.current) audioRef.current.currentTime = data.time;
-                          if (videoIframeRef.current?.contentWindow) {
-                              videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: data.time }, '*');
-                          }
-                          channel.publish('sync', { type: 'TIME', time: data.time, isVideoMode: isVideoModeRef.current });
-                      } else if (data.action === 'VIDEO_MODE') {
-                          if (toggleVideoModeRef.current) toggleVideoModeRef.current(); 
-                      }
-                  }
+                  if (data.type === 'request_sync') broadcastFullSync();
                   return;
               }
 
-              // GUEST LOGIC: Blindly Follow Host
+              // GUEST LOGIC: Pure Synchronization Engine (+0.6s offset perfectly implemented)
               if (currentRole === 'guest') {
                   if (data.type === 'FULL_SYNC') {
                       const p = data.payload;
@@ -729,7 +718,10 @@ export default function MiniPlayer() {
                       setYtVideoId(p.ytVideoId);
                       
                       if (p.isVideoMode !== isVideoModeRef.current) setIsVideoMode(p.isVideoMode);
-                      iframeInitialTimeRef.current = p.time;
+
+                      let targetTime = p.time;
+                      if (p.isPlaying) targetTime += 0.6; // +0.6s Analysis Offset
+                      iframeInitialTimeRef.current = targetTime;
 
                       if (p.song && p.song.id !== currentTrackRef.current?.id) {
                           setCurrentSong(p.song);
@@ -737,11 +729,11 @@ export default function MiniPlayer() {
 
                       setIsPlaying(p.isPlaying);
                       if (p.isVideoMode && videoIframeRef.current?.contentWindow) {
-                          videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: p.time }, '*');
+                          videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
                           videoIframeRef.current.contentWindow.postMessage({ type: p.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
                       } else if (!p.isVideoMode && audioRef.current) {
-                          audioRef.current.currentTime = p.time;
-                          setCurrentTime(p.time);
+                          audioRef.current.currentTime = targetTime;
+                          setCurrentTime(targetTime);
                           if (p.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
                           else audioRef.current.pause();
                       }
@@ -752,13 +744,24 @@ export default function MiniPlayer() {
                               channel.publish('request_sync', {});
                               return;
                           }
+                          if (data.carryPayload) {
+                              const cp = data.carryPayload;
+                              if (cp.audioUrl && cp.audioUrl !== audioUrlRef.current) setAudioUrl(cp.audioUrl);
+                              if (cp.streamBaseUrl && cp.streamBaseUrl !== streamBaseUrlRef.current) setStreamBaseUrl(cp.streamBaseUrl);
+                              if (cp.lyrics && cp.lyrics.length !== lyricsRef.current.length) setLyrics(cp.lyrics);
+                              if (cp.syncType && cp.syncType !== syncTypeRef.current) setSyncType(cp.syncType);
+                              if (cp.canvasData && cp.canvasData.canvasUrl !== canvasDataRef.current?.canvasUrl) setCanvasData(cp.canvasData);
+                              if (cp.songDetails && !songDetailsRef.current) setSongDetails(cp.songDetails);
+                              if (cp.ytVideoId && cp.ytVideoId !== ytVideoIdRef.current) setYtVideoId(cp.ytVideoId);
+                          }
                       }
 
                       if (data.isVideoMode !== undefined && data.isVideoMode !== isVideoModeRef.current) {
                           setIsVideoMode(data.isVideoMode);
                       }
 
-                      const targetTime = data.time;
+                      let targetTime = data.time;
+                      if (data.isPlaying) targetTime += 0.6; // +0.6s Analysis Offset
                       
                       if (data.isVideoMode || isVideoModeRef.current) {
                           if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && Math.abs(videoStartTimeRef.current - targetTime) > 2.5)) {
@@ -835,7 +838,6 @@ export default function MiniPlayer() {
       sessionStorage.removeItem(JAM_STORAGE_KEY);
   };
 
-  // Restore Session on Refresh
   useEffect(() => {
       const session = sessionStorage.getItem(JAM_STORAGE_KEY);
       if (session) {
@@ -1044,16 +1046,25 @@ export default function MiniPlayer() {
 
   useEffect(() => {
     if (!currentSong) return;
+    songStartTrackingRef.current = Date.now();
     
-    // GUEST BYPASS: Never fetch APIs. Wait for Host FULL_SYNC payload.
+    // GUEST BYPASS: Guest Cannot Make API calls or explicitly route song selections.
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') {
         if (!isSystemSongChangeRef.current) {
-            // Guest manually clicked a song. Route to Host.
-            ablyChannelRef.current?.publish('sync', { type: 'GUEST_SONG_REQUEST', song: currentSong });
-            setCurrentSong(currentTrackRef.current); // Revert UI
+            // Revert track UI immediately to respect Host locks
+            setCurrentSong(currentTrackRef.current);
         } else {
             isSystemSongChangeRef.current = false;
             currentTrackRef.current = currentSong;
+
+            // Deep purge of local properties to guarantee Canvas builds appropriately
+            setYtVideoId(currentSong.ytVideoId || null);
+            setSpotifyId(null); setSpotifyUrl(null); setLyrics([]); setSyncType(null); setCanvasData(null);
+            setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
+            setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
+            iframeInitialTimeRef.current = 0;
+            setStreamBaseUrl(null);
+            setBuffered(0);
         }
         return;
     }
@@ -1359,24 +1370,11 @@ export default function MiniPlayer() {
 
   const handlePlayPauseToggle = (e?: any) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-    const newState = !isPlaying;
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     
-    // Guest Routes action to Host
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', { 
-            type: 'GUEST_ACTION', action: 'STATE', isPlaying: newState, time: audioRef.current?.currentTime || 0 
-        });
-        setIsPlaying(newState);
-        if (audioRef.current && !isVideoModeRef.current) {
-            if (newState) audioRef.current.play().catch(()=>setJamPlayBlocked(true));
-            else audioRef.current.pause();
-        }
-        return;
-    }
-
+    const newState = !isPlaying;
     setIsPlaying(newState);
     
-    // Host broadcasts immediately
     if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
         ablyChannelRef.current.publish('sync', {
             type: 'STATE',
@@ -1400,11 +1398,7 @@ export default function MiniPlayer() {
 
   const toggleVideoMode = async (e?: React.MouseEvent) => {
     if (e && e.stopPropagation) e.stopPropagation();
-    
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') {
-        ablyChannelRef.current?.publish('sync', { type: 'GUEST_ACTION', action: 'VIDEO_MODE', isVideoMode: !isVideoModeRef.current });
-        return;
-    }
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
 
     if (isVideoMode) {
       setIsVideoMode(false);
@@ -1431,7 +1425,6 @@ export default function MiniPlayer() {
     else if (audioRef.current) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); setIsPlaying(true); }
     setIsVideoLoading(false);
   };
-  useEffect(() => { toggleVideoModeRef.current = toggleVideoMode; }, [isVideoMode, ytVideoId, displayTitle, displayArtists]);
 
   useEffect(() => {
     if (!displayImage || displayImage.includes('via.placeholder.com')) {
@@ -1473,6 +1466,7 @@ export default function MiniPlayer() {
   },[isPlaying, isScrolledPastMain, isCanvasLoaded, isExpanded, showQueue, isVideoMode, isLyricsFullScreen, isCanvasEnabled, canvasData]);
 
   const playNext = () => {
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     if (sleepTimer === 'end') { setIsPlaying(false); setSleepTimer(null); if (audioRef.current) audioRef.current.pause(); return; }
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
     
@@ -1492,6 +1486,7 @@ export default function MiniPlayer() {
   };
 
   const playPrev = () => {
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
     if (audioRef.current && audioRef.current.currentTime > 3) { audioRef.current.currentTime = 0; return; }
     if (historyQueue.length > 0) {
@@ -1667,11 +1662,17 @@ export default function MiniPlayer() {
   },[activeLyricIndex, isLyricsFullScreen, isExpanded, customSmoothScroll]);
 
   const handleLyricClick = (time: number) => {
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: time }, '*');
     else if (audioRef.current && duration > 0) { audioRef.current.currentTime = time; setCurrentTime(time); syncPosition(); }
   };
 
+  const handleSeekStart = (e?: any) => { 
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') { if (e?.preventDefault) e.preventDefault(); return; }
+    isSeekingRef.current = true; 
+  };
   const handleSeekChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     const val = parseFloat(e.target.value); setProgress(val);
     const newTime = (val / 100) * duration; setCurrentTime(newTime);
     if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0) {
@@ -1682,17 +1683,11 @@ export default function MiniPlayer() {
     }
   };
 
-  const handleSeekStart = () => { isSeekingRef.current = true; };
   const handleSeekEnd = (e: React.SyntheticEvent<HTMLInputElement>) => {
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     isSeekingRef.current = false;
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
     
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', { type: 'GUEST_ACTION', action: 'TIME', time: newTime });
-        if (audioRef.current && !isVideoModeRef.current) audioRef.current.currentTime = newTime;
-        return;
-    }
-
     if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
         ablyChannelRef.current.publish('sync', { type: 'TIME', time: newTime, isVideoMode: isVideoModeRef.current });
     }
@@ -1728,7 +1723,7 @@ export default function MiniPlayer() {
   },[upcomingQueue.length]);
 
   const handleDragStart = (e: React.TouchEvent | React.MouseEvent, index: number) => {
-    if (isQueueEditMode) return;
+    if (isQueueEditMode || isGuestLocked) return;
     const clientY = 'touches' in e ? e.touches[0].clientY : (e as React.MouseEvent).clientY;
     dragRef.current = { activeIndex: index, startY: clientY, currentY: clientY, startScrollTop: queueContainerRef.current?.scrollTop || 0, scrollSpeed: 0, rafId: 0, targetIndex: index };
     setDragActiveIndex(index);
@@ -2133,6 +2128,7 @@ const downloadLrcFile = () => {
 
           <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0" onClick={() => { 
              if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]); return; }
+             if (isGuestLocked) return;
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
           }}>
             <div className="w-[44px] h-[44px] flex-shrink-0 rounded-[4px] bg-[#282828] overflow-hidden"><img draggable={false} src={getImageUrl(track) || "https://via.placeholder.com/150"} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" /></div>
@@ -2140,12 +2136,12 @@ const downloadLrcFile = () => {
           </div>
 
           {!isQueueEditMode && (
-             <div className="flex-shrink-0 px-3 py-2 cursor-grab active:cursor-grabbing text-white/50 touch-none" onPointerDown={(e) => { e.stopPropagation(); handleDragStart(e, index); }}><Menu size={20} /></div>
+             <div className={`flex-shrink-0 px-3 py-2 text-white/50 touch-none ${isGuestLocked ? 'opacity-20 cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'}`} onPointerDown={(e) => { e.stopPropagation(); handleDragStart(e, index); }}><Menu size={20} /></div>
           )}
         </div>
       );
     });
-  },[upcomingQueue, selectedQueueItems, isQueueEditMode, setCurrentSong, setUpcomingQueue, setIsPlaying]);
+  },[upcomingQueue, selectedQueueItems, isQueueEditMode, setCurrentSong, setUpcomingQueue, setIsPlaying, isGuestLocked]);
 
   const formatSleepTimerStr = (secs: number) => { const m = Math.floor(secs / 60); const s = secs % 60; return `${m}:${s < 10 ? '0' : ''}${s}`; };
 
@@ -2250,24 +2246,24 @@ const downloadLrcFile = () => {
               </div>
 
               <div className={`w-full flex flex-col gap-1 relative drop-shadow-md ${isLyricsFullScreen ? 'mb-2 scale-[0.95] origin-bottom' : (isCanvasActive ? 'mb-3' : 'mb-5')}`}>
-                <input type="range" min="0" max="100" value={duration > 0 ? progress : 0} onChange={handleSeekChange} onPointerDown={handleSeekStart} onPointerUp={handleSeekEnd} onTouchStart={handleSeekStart} onTouchEnd={handleSeekEnd} className="w-full mobile-slider relative z-10 pointer-events-auto" style={{ background: `linear-gradient(to right, #fff ${progress}%, rgba(255,255,255,0.3) ${progress}%, rgba(255,255,255,0.3) ${buffered}%, rgba(255,255,255,0.1) ${buffered}%)` }} />
+                <input type="range" min="0" max="100" value={duration > 0 ? progress : 0} onChange={handleSeekChange} onPointerDown={handleSeekStart} onPointerUp={handleSeekEnd} onTouchStart={handleSeekStart} onTouchEnd={handleSeekEnd} className={`w-full mobile-slider relative z-10 ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`} style={{ background: `linear-gradient(to right, #fff ${progress}%, rgba(255,255,255,0.3) ${progress}%, rgba(255,255,255,0.3) ${buffered}%, rgba(255,255,255,0.1) ${buffered}%)` }} />
                 <div className="flex items-center justify-between text-[11px] font-medium text-[#a7a7a7] mt-1 w-full pointer-events-none no-select-text"><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
               </div>
 
               <div className={`flex flex-col w-full transition-all duration-[450ms] ease-[cubic-bezier(0.32,0.72,0,1)] overflow-hidden ${isUiHidden && !isVideoMode ? 'max-h-0 opacity-0 translate-y-6 pointer-events-none' : (isLyricsFullScreen ? 'max-h-[64px] opacity-100 translate-y-0 pointer-events-auto scale-[0.85] origin-bottom' : 'max-h-[140px] opacity-100 translate-y-0 pointer-events-auto')}`}>
                 <div className={`flex items-center justify-between w-full px-1 drop-shadow-md no-select-text ${isLyricsFullScreen ? 'mb-0' : (isCanvasActive ? 'mb-2' : 'mb-5')}`}>
                   <button onClick={() => { setIsShuffle(!isShuffle); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 pointer-events-auto ${isShuffle ? 'text-[#1db954]' : 'text-white'}`}><Shuffle size={24} /></button>
-                  <button onClick={playPrev} className="text-white active:opacity-50 pointer-events-auto"><SkipBack size={36} fill="white" stroke="white" /></button>
-                  <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className="w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg pointer-events-auto">
+                  <button onClick={playPrev} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipBack size={36} fill="white" stroke="white" /></button>
+                  <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
                      {(loading || isVideoLoading) ? <Loader2 size={26} className="animate-spin text-black" /> : (isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />)}
                   </button>
-                  <button id="next-song-btn" onClick={playNext} className="text-white active:opacity-50 pointer-events-auto"><SkipForward size={36} fill="white" stroke="white" /></button>
+                  <button id="next-song-btn" onClick={playNext} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipForward size={36} fill="white" stroke="white" /></button>
                   <button onClick={() => { setRepeatMode((prev) => (prev + 1) % 3); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 relative pointer-events-auto ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}><Repeat size={24} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</button>
                 </div>
                 {!isLyricsFullScreen && (
                   <div className={`flex items-center justify-between text-[#b3b3b3] w-full px-1 drop-shadow-md pointer-events-auto ${isCanvasActive ? 'mt-2 mb-1' : ''}`}>
                     <div className="flex items-center gap-4">
-                        <button onClick={toggleVideoMode} className={`active:opacity-50 transition-colors ${isVideoMode ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}>{isVideoLoading ? <Loader2 size={20} className="animate-spin" /> : <MonitorPlay size={20} />}</button>
+                        <button onClick={toggleVideoMode} className={`active:opacity-50 transition-colors ${isVideoMode ? 'text-[#1db954]' : 'text-[#b3b3b3]'} ${isGuestLocked ? 'pointer-events-none opacity-50' : ''}`}>{isVideoLoading ? <Loader2 size={20} className="animate-spin" /> : <MonitorPlay size={20} />}</button>
                         <button onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }} className={`active:opacity-50 transition-colors ${jamStatus === 'connected' ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}>
                             <Users size={20} className={jamStatus === 'connected' ? "animate-pulse" : ""} />
                         </button>
