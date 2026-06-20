@@ -23,7 +23,7 @@ const fetchProtected = async (url: string, options: any = {}) => {
   return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
 };
 
-// Advanced Parser for r.jina.ai to properly extract JSON from Markdown wrap
+// Advanced Parser for r.jina.ai
 const fetchJina = async (targetUrl: string, options: any = {}) => {
   const res = await fetch(`https://r.jina.ai/${targetUrl}`, {
       ...options,
@@ -48,8 +48,7 @@ const fetchJina = async (targetUrl: string, options: any = {}) => {
   return result;
 };
 
-
-// --- 30-MINUTE INDEXEDDB CACHE ENGINE (Audio & APIs) ---
+// --- 30-MINUTE INDEXEDDB CACHE ENGINE ---
 const DB_NAME = "GrooveCacheDB";
 const STORE_NAME = "caches";
 const CACHE_EXPIRY_MS = 30 * 60 * 1000;
@@ -416,7 +415,7 @@ export default function MiniPlayer() {
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
 
-  // --- JIM JAM CORE STATE ENGINE ---
+  // --- JIM JAM CORE STATE ENGINE (HOST IS SOURCE OF TRUTH) ---
   const JAM_STORAGE_KEY = 'jim_jam_session';
   const [showJamMenu, setShowJamMenu] = useState(false);
   const [jamRoomId, setJamRoomId] = useState<string | null>(null);
@@ -499,6 +498,7 @@ export default function MiniPlayer() {
   const videoStartTimeRef = useRef<number>(0);    
   const[isVideoLoading, setIsVideoLoading] = useState(false);
   const videoIframeRef = useRef<HTMLIFrameElement>(null);
+  const toggleVideoModeRef = useRef<any>(null); // For Jam Trigger
 
   const fetchingRecsRef = useRef(false);
   const[isFetchingRecsUI, setIsFetchingRecsUI] = useState(false);
@@ -574,8 +574,7 @@ export default function MiniPlayer() {
               isVideoMode: isVideoModeRef.current,
               ytVideoId: ytVideoIdRef.current,
               isPlaying: isPlayingRef.current,
-              time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
-              timestamp: Date.now()
+              time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0)
           }
       });
   }, []);
@@ -597,8 +596,7 @@ export default function MiniPlayer() {
                   trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
                   isPlaying: isPlayingRef.current,
                   time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
-                  isVideoMode: isVideoModeRef.current,
-                  timestamp: Date.now()
+                  isVideoMode: isVideoModeRef.current
               });
           }, 2000);
           return () => clearInterval(interval);
@@ -675,70 +673,118 @@ export default function MiniPlayer() {
               isHost: role === 'host'
           });
 
+          // CENTRALIZED SYNC RECEIVER
           channel.subscribe('sync', (msg: any) => {
               const data = msg.data;
+              const currentRole = jamRoleRef.current;
               
-              if (data.type === 'ROOM_CLOSED' && role === 'guest') {
+              if (data.type === 'ROOM_CLOSED' && currentRole === 'guest') {
                   alert("The host has ended the Jam.");
                   disconnectJam();
                   return;
               }
 
-              if (data.type === 'request_sync' && role === 'host') {
-                  broadcastFullSync();
+              // HOST LOGIC: Process requests from Guests
+              if (currentRole === 'host') {
+                  if (data.type === 'request_sync') {
+                      broadcastFullSync();
+                  } else if (data.type === 'GUEST_SONG_REQUEST') {
+                      setCurrentSong(data.song); // Host dictates track change
+                  } else if (data.type === 'GUEST_ACTION') {
+                      if (data.action === 'STATE') {
+                          setIsPlaying(data.isPlaying);
+                          if (audioRef.current) {
+                              audioRef.current.currentTime = data.time;
+                              if (data.isPlaying) audioRef.current.play().catch(()=>{}); else audioRef.current.pause();
+                          }
+                          if (videoIframeRef.current?.contentWindow) {
+                              videoIframeRef.current.contentWindow.postMessage({ type: data.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
+                          }
+                          channel.publish('sync', { type: 'STATE', isPlaying: data.isPlaying, time: data.time, isVideoMode: isVideoModeRef.current });
+                      } else if (data.action === 'TIME') {
+                          if (audioRef.current) audioRef.current.currentTime = data.time;
+                          if (videoIframeRef.current?.contentWindow) {
+                              videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: data.time }, '*');
+                          }
+                          channel.publish('sync', { type: 'TIME', time: data.time, isVideoMode: isVideoModeRef.current });
+                      } else if (data.action === 'VIDEO_MODE') {
+                          if (toggleVideoModeRef.current) toggleVideoModeRef.current(); 
+                      }
+                  }
                   return;
               }
 
-              if (data.type === 'FULL_SYNC' && role === 'guest') {
-                  const p = data.payload;
-                  isSystemSongChangeRef.current = true;
-                  
-                  setSongDetails(p.songDetails);
-                  setAudioUrl(p.audioUrl);
-                  setStreamBaseUrl(p.streamBaseUrl);
-                  setLyrics(p.lyrics);
-                  setSyncType(p.syncType);
-                  setCanvasData(p.canvasData);
-                  setYtVideoId(p.ytVideoId);
-                  setIsVideoMode(p.isVideoMode);
-                  
-                  if (p.song && p.song.id !== currentTrackRef.current?.id) {
-                      setCurrentSong(p.song);
-                  }
+              // GUEST LOGIC: Blindly Follow Host
+              if (currentRole === 'guest') {
+                  if (data.type === 'FULL_SYNC') {
+                      const p = data.payload;
+                      isSystemSongChangeRef.current = true;
+                      
+                      setSongDetails(p.songDetails);
+                      setAudioUrl(p.audioUrl);
+                      setStreamBaseUrl(p.streamBaseUrl);
+                      setLyrics(p.lyrics);
+                      setSyncType(p.syncType);
+                      setCanvasData(p.canvasData);
+                      setYtVideoId(p.ytVideoId);
+                      
+                      if (p.isVideoMode !== isVideoModeRef.current) setIsVideoMode(p.isVideoMode);
+                      iframeInitialTimeRef.current = p.time;
 
-                  setIsPlaying(p.isPlaying);
-                  
-                  if (audioRef.current && !p.isVideoMode) {
-                      const latency = (Date.now() - p.timestamp) / 1000;
-                      const target = p.time + (p.isPlaying ? latency : 0);
-                      audioRef.current.currentTime = target;
-                      setCurrentTime(target);
-                      if (p.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
-                      else audioRef.current.pause();
-                  }
-              } else if (data.type === 'HEARTBEAT' && role === 'guest') {
-                  const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
-                  if (data.trackId !== currentId) {
-                      channel.publish('request_sync', {});
-                      return;
-                  }
+                      if (p.song && p.song.id !== currentTrackRef.current?.id) {
+                          setCurrentSong(p.song);
+                      }
 
-                  const latency = (Date.now() - data.timestamp) / 1000;
-                  const target = data.time + (data.isPlaying ? latency : 0);
-
-                  if (data.isVideoMode !== isVideoModeRef.current) setIsVideoMode(data.isVideoMode);
-
-                  if (data.isPlaying !== isPlayingRef.current) {
-                      setIsPlaying(data.isPlaying);
-                      if (!data.isVideoMode && audioRef.current) {
-                          if (data.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
+                      setIsPlaying(p.isPlaying);
+                      if (p.isVideoMode && videoIframeRef.current?.contentWindow) {
+                          videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: p.time }, '*');
+                          videoIframeRef.current.contentWindow.postMessage({ type: p.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
+                      } else if (!p.isVideoMode && audioRef.current) {
+                          audioRef.current.currentTime = p.time;
+                          setCurrentTime(p.time);
+                          if (p.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
                           else audioRef.current.pause();
                       }
-                  }
+                  } else if (data.type === 'HEARTBEAT' || data.type === 'TIME' || data.type === 'STATE') {
+                      if (data.type === 'HEARTBEAT') {
+                          const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
+                          if (data.trackId !== currentId) {
+                              channel.publish('request_sync', {});
+                              return;
+                          }
+                      }
 
-                  if (!data.isVideoMode && audioRef.current && Math.abs(audioRef.current.currentTime - target) > 0.5) {
-                      audioRef.current.currentTime = target;
-                      setCurrentTime(target);
+                      if (data.isVideoMode !== undefined && data.isVideoMode !== isVideoModeRef.current) {
+                          setIsVideoMode(data.isVideoMode);
+                      }
+
+                      const targetTime = data.time;
+                      
+                      if (data.isVideoMode || isVideoModeRef.current) {
+                          if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && Math.abs(videoStartTimeRef.current - targetTime) > 2.5)) {
+                              videoIframeRef.current?.contentWindow?.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
+                          }
+                          if (data.type === 'STATE' || data.type === 'HEARTBEAT') {
+                              if (data.isPlaying !== isPlayingRef.current) {
+                                  setIsPlaying(data.isPlaying);
+                                  videoIframeRef.current?.contentWindow?.postMessage({ type: data.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
+                              }
+                          }
+                      } else {
+                          if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && audioRef.current && Math.abs(audioRef.current.currentTime - targetTime) > 2.5)) {
+                              if (audioRef.current) {
+                                  audioRef.current.currentTime = targetTime;
+                                  setCurrentTime(targetTime);
+                              }
+                          }
+                          if (data.type === 'STATE' || data.type === 'HEARTBEAT') {
+                              if (data.isPlaying !== isPlayingRef.current) {
+                                  setIsPlaying(data.isPlaying);
+                                  if (data.isPlaying) audioRef.current?.play().catch(() => setJamPlayBlocked(true));
+                                  else audioRef.current?.pause();
+                              }
+                          }
+                      }
                   }
               }
           });
@@ -999,10 +1045,15 @@ export default function MiniPlayer() {
   useEffect(() => {
     if (!currentSong) return;
     
-    // IF GUEST, BYPASS FETCHING. RELY ENTIRELY ON HOST PAYLOAD.
-    if (jamRole === 'guest' && jamStatus === 'connected') {
-        if (isSystemSongChangeRef.current) {
+    // GUEST BYPASS: Never fetch APIs. Wait for Host FULL_SYNC payload.
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') {
+        if (!isSystemSongChangeRef.current) {
+            // Guest manually clicked a song. Route to Host.
+            ablyChannelRef.current?.publish('sync', { type: 'GUEST_SONG_REQUEST', song: currentSong });
+            setCurrentSong(currentTrackRef.current); // Revert UI
+        } else {
             isSystemSongChangeRef.current = false;
+            currentTrackRef.current = currentSong;
         }
         return;
     }
@@ -1309,16 +1360,29 @@ export default function MiniPlayer() {
   const handlePlayPauseToggle = (e?: any) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     const newState = !isPlaying;
+    
+    // Guest Routes action to Host
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && ablyChannelRef.current) {
+        ablyChannelRef.current.publish('sync', { 
+            type: 'GUEST_ACTION', action: 'STATE', isPlaying: newState, time: audioRef.current?.currentTime || 0 
+        });
+        setIsPlaying(newState);
+        if (audioRef.current && !isVideoModeRef.current) {
+            if (newState) audioRef.current.play().catch(()=>setJamPlayBlocked(true));
+            else audioRef.current.pause();
+        }
+        return;
+    }
+
     setIsPlaying(newState);
     
+    // Host broadcasts immediately
     if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
         ablyChannelRef.current.publish('sync', {
-            type: 'HEARTBEAT',
-            trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+            type: 'STATE',
             isPlaying: newState,
             time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
-            isVideoMode: isVideoModeRef.current,
-            timestamp: Date.now()
+            isVideoMode: isVideoModeRef.current
         });
     }
 
@@ -1336,6 +1400,12 @@ export default function MiniPlayer() {
 
   const toggleVideoMode = async (e?: React.MouseEvent) => {
     if (e && e.stopPropagation) e.stopPropagation();
+    
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') {
+        ablyChannelRef.current?.publish('sync', { type: 'GUEST_ACTION', action: 'VIDEO_MODE', isVideoMode: !isVideoModeRef.current });
+        return;
+    }
+
     if (isVideoMode) {
       setIsVideoMode(false);
       if (audioRef.current) { 
@@ -1361,6 +1431,7 @@ export default function MiniPlayer() {
     else if (audioRef.current) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); setIsPlaying(true); }
     setIsVideoLoading(false);
   };
+  useEffect(() => { toggleVideoModeRef.current = toggleVideoMode; }, [isVideoMode, ytVideoId, displayTitle, displayArtists]);
 
   useEffect(() => {
     if (!displayImage || displayImage.includes('via.placeholder.com')) {
@@ -1616,15 +1687,14 @@ export default function MiniPlayer() {
     isSeekingRef.current = false;
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
     
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && ablyChannelRef.current) {
+        ablyChannelRef.current.publish('sync', { type: 'GUEST_ACTION', action: 'TIME', time: newTime });
+        if (audioRef.current && !isVideoModeRef.current) audioRef.current.currentTime = newTime;
+        return;
+    }
+
     if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', {
-            type: 'HEARTBEAT',
-            trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
-            isPlaying: isPlayingRef.current,
-            time: newTime,
-            isVideoMode: isVideoModeRef.current,
-            timestamp: Date.now()
-        });
+        ablyChannelRef.current.publish('sync', { type: 'TIME', time: newTime, isVideoMode: isVideoModeRef.current });
     }
 
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
