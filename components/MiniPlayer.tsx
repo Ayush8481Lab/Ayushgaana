@@ -1,3 +1,5 @@
+
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -10,7 +12,7 @@ import {
   Play, Pause, SkipForward, SkipBack, Loader2, ChevronDown, 
   MoreHorizontal, Shuffle, Repeat, Heart, ListMusic, 
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles,
-  Users, LogOut, Copy, Radio // Added Icons for Jim Jam
+  Users, LogOut, Copy, Radio, Activity
 } from "lucide-react";
 
 // --- VERCEL PROTECTION BYPASS ENGINE ---
@@ -322,7 +324,7 @@ const loadHlsJS = (): Promise<any> => new Promise((resolve, reject) => {
     document.head.appendChild(script);
 });
 
-// Dynamic CDN Loader for Ably API to ensure zero build errors
+// Dynamic CDN Loader for Ably API
 const loadAblyJS = (): Promise<any> => new Promise((resolve, reject) => {
     if ((window as any).Ably) return resolve((window as any).Ably);
     const script = document.createElement('script');
@@ -414,14 +416,21 @@ export default function MiniPlayer() {
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
 
-  // --- JIM JAM STATES ---
+  // --- JIM JAM STATES (Advanced real-time sync with Latency compensation) ---
   const [showJamMenu, setShowJamMenu] = useState(false);
   const [jamRoomId, setJamRoomId] = useState<string | null>(null);
   const [jamRole, setJamRole] = useState<'host' | 'guest' | null>(null);
   const [jamInputId, setJamInputId] = useState("");
+  const [jamName, setJamName] = useState("");
   const [jamStatus, setJamStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const [jamParticipants, setJamParticipants] = useState<any[]>([]);
+  const [jamLogs, setJamLogs] = useState<any[]>([]);
+  const [jamPlayBlocked, setJamPlayBlocked] = useState(false);
+
   const ablyClientRef = useRef<any>(null);
   const ablyChannelRef = useRef<any>(null);
+  const jamSyncDataRef = useRef<{time: number, timestamp: number} | null>(null);
+  const isSystemSongChangeRef = useRef(false);
   const isPlayingRef = useRef(isPlaying);
   
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
@@ -510,71 +519,146 @@ export default function MiniPlayer() {
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen;
 
-  // --- JIM JAM ENGINE ---
+  // --- JIM JAM ENGINE (Advanced Async Presence & Sync) ---
   const connectToAbly = async (roomId: string, role: 'host' | 'guest') => {
       try {
           setJamStatus('connecting');
           const Ably = await loadAblyJS();
+          const ABLY_KEY: string = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
           
-          // 🚨 REPLACE THIS WITH YOUR FREE ABLY API KEY 🚨
-          const ABLY_KEY = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
+          const clientId = 'jam_' + Math.random().toString(36).substr(2, 9);
+          const ably = new Ably.Realtime({ key: ABLY_KEY, clientId });
           
-          
-
-          const ably = new Ably.Realtime({ key: ABLY_KEY });
-          
-          ably.connection.on('connected', () => setJamStatus('connected'));
           ably.connection.on('failed', () => {
               setJamStatus('disconnected');
-              alert("Jim Jam connection failed. Please check the Ably API key.");
+              alert("Jim Jam connection failed.");
           });
 
           const channel = ably.channels.get(`jim-jam-${roomId}`);
+
+          // Validate Ghost Room for Guests
+          if (role === 'guest') {
+              const presenceSet = await channel.presence.get();
+              const hasHost = presenceSet.some((p: any) => p.data.isHost);
+              if (!hasHost) {
+                  alert("Invalid Room ID or Host has left.");
+                  ably.close();
+                  setJamStatus('disconnected');
+                  setJamRole(null);
+                  setJamRoomId(null);
+                  return;
+              }
+          }
+
           ablyClientRef.current = ably;
           ablyChannelRef.current = channel;
 
-          if (role === 'guest') {
-              channel.subscribe('sync', (msg: any) => {
-                  const data = msg.data;
-                  if (data.type === 'FULL_SYNC') {
-                      if (data.song && data.song.id !== currentTrackRef.current?.id) setCurrentSong(data.song);
-                      setIsPlaying(data.isPlaying);
-                      if (audioRef.current && data.time !== undefined) {
-                          audioRef.current.currentTime = data.time;
-                          setCurrentTime(data.time);
-                          syncPosition();
-                      }
-                  } else if (data.type === 'SONG') {
-                      setCurrentSong(data.song);
-                  } else if (data.type === 'STATE') {
-                      setIsPlaying(data.isPlaying);
-                      if (audioRef.current && !isVideoModeRef.current) {
-                          if (data.isPlaying) audioRef.current.play().catch(()=>{});
-                          else audioRef.current.pause();
-                      }
-                  } else if (data.type === 'TIME') {
-                      if (audioRef.current) {
-                          audioRef.current.currentTime = data.time;
-                          setCurrentTime(data.time);
-                          syncPosition();
-                      }
-                  }
+          const defaultName = jamName.trim() || (role === 'host' ? 'Host' : `Groover_${Math.floor(Math.random()*1000)}`);
+
+          // Subscribe to Presence Events (Who is joining/leaving)
+          channel.presence.subscribe(['enter', 'leave'], (msg: any) => {
+              const p = msg.data;
+              const isEnter = msg.action === 'enter';
+              
+              setJamLogs(prev => {
+                  const newLogs = [...prev, { id: Date.now(), text: `${p.name} ${isEnter ? 'joined the Jam.' : 'left.'}`}];
+                  return newLogs.slice(-10); // Keep last 10 logs
               });
-              // Briefly wait then request the master state from Host
-              setTimeout(() => channel.publish('request_sync', {}), 500);
-          } else {
-              channel.subscribe('request_sync', () => {
+
+              channel.presence.get().then((members: any[]) => {
+                  setJamParticipants(members.map(m => m.data));
+              });
+
+              // Host deep syncs new user
+              if (role === 'host' && isEnter && !p.isHost) {
                   channel.publish('sync', {
                       type: 'FULL_SYNC',
                       song: currentTrackRef.current,
                       isPlaying: isPlayingRef.current,
-                      time: audioRef.current?.currentTime || 0
+                      time: audioRef.current?.currentTime || 0,
+                      timestamp: Date.now()
                   });
-              });
+              }
+          });
+
+          await channel.presence.enter({
+              clientId,
+              name: defaultName,
+              isHost: role === 'host'
+          });
+
+          // Handle Action Events
+          channel.subscribe('sync', (msg: any) => {
+              const data = msg.data;
+              
+              if (data.type === 'ROOM_CLOSED' && role === 'guest') {
+                  alert("The host has ended the Jam.");
+                  disconnectJam();
+                  return;
+              }
+
+              if (data.type === 'FULL_SYNC') {
+                  if (data.song && data.song.id !== currentTrackRef.current?.id) {
+                      jamSyncDataRef.current = { time: data.time, timestamp: data.timestamp };
+                      isSystemSongChangeRef.current = true;
+                      setCurrentSong(data.song);
+                  } else if (audioRef.current) {
+                      const latency = (Date.now() - data.timestamp) / 1000;
+                      const target = data.time + (data.isPlaying ? latency : 0);
+                      if (Math.abs(audioRef.current.currentTime - target) > 0.5) {
+                          audioRef.current.currentTime = target;
+                          setCurrentTime(target);
+                      }
+                  }
+                  setIsPlaying(data.isPlaying);
+                  if (data.isPlaying && audioRef.current) {
+                      audioRef.current.play().catch(() => setJamPlayBlocked(true));
+                  }
+              } else if (data.type === 'SONG') {
+                  jamSyncDataRef.current = { time: 0, timestamp: Date.now() };
+                  isSystemSongChangeRef.current = true;
+                  setCurrentSong(data.song);
+              } else if (data.type === 'STATE') {
+                  setIsPlaying(data.isPlaying);
+                  if (audioRef.current && !isVideoModeRef.current) {
+                      if (data.isPlaying) {
+                          const latency = data.timestamp ? (Date.now() - data.timestamp) / 1000 : 0;
+                          if (data.time !== undefined && Math.abs(audioRef.current.currentTime - (data.time + latency)) > 0.5) {
+                              audioRef.current.currentTime = data.time + latency;
+                          }
+                          audioRef.current.play().catch(()=>setJamPlayBlocked(true));
+                      } else {
+                          if (data.time !== undefined) audioRef.current.currentTime = data.time;
+                          audioRef.current.pause();
+                      }
+                  }
+              } else if (data.type === 'TIME') {
+                  if (audioRef.current) {
+                      const latency = (Date.now() - data.timestamp) / 1000;
+                      const target = data.time + (isPlayingRef.current ? latency : 0);
+                      if (Math.abs(audioRef.current.currentTime - target) > 0.5) {
+                          audioRef.current.currentTime = target;
+                          setCurrentTime(target);
+                          syncPosition();
+                      }
+                  }
+              }
+          });
+
+          ably.connection.on('connected', () => setJamStatus('connected'));
+          if (ably.connection.state === 'connected') {
+              setJamStatus('connected');
+              // Setup initial participants list instantly
+              const members = await channel.presence.get();
+              setJamParticipants(members.map((m: any) => m.data));
           }
+
       } catch (e) {
+          console.error(e);
           setJamStatus('disconnected');
           setJamRole(null);
+          setJamRoomId(null);
+          alert("Failed to connect to Jam server.");
       }
   };
 
@@ -593,24 +677,38 @@ export default function MiniPlayer() {
   };
 
   const disconnectJam = () => {
+      if (jamRole === 'host' && ablyChannelRef.current) {
+          ablyChannelRef.current.publish('sync', { type: 'ROOM_CLOSED' });
+      }
+      if (ablyChannelRef.current) ablyChannelRef.current.presence.leave();
       if (ablyClientRef.current) ablyClientRef.current.close();
       ablyClientRef.current = null;
       ablyChannelRef.current = null;
       setJamStatus('disconnected');
       setJamRole(null);
       setJamRoomId(null);
+      setJamParticipants([]);
+      setJamLogs([]);
   };
 
   useEffect(() => {
       return () => disconnectJam();
   }, []);
 
-  // Sync Song Changes (Host => Guest)
+  // Sync Collaborative Song Changes safely avoiding infinite loops
   useEffect(() => {
-      if (jamRole === 'host' && jamStatus === 'connected' && ablyChannelRef.current && currentSong) {
-          ablyChannelRef.current.publish('sync', { type: 'SONG', song: currentSong });
+      if (isSystemSongChangeRef.current) {
+          isSystemSongChangeRef.current = false;
+          return;
       }
-  }, [currentSong, jamRole, jamStatus]);
+      if (jamStatus === 'connected' && ablyChannelRef.current && currentSong) {
+          ablyChannelRef.current.publish('sync', { 
+              type: 'SONG', 
+              song: currentSong,
+              timestamp: Date.now()
+          });
+      }
+  }, [currentSong?.id, currentSong?.track_id]);
 
   const customSmoothScroll = useCallback((container: HTMLElement, targetPos: number, duration: number) => {
       if ((container as any)._scrollRaf) cancelAnimationFrame((container as any)._scrollRaf);
@@ -661,12 +759,12 @@ export default function MiniPlayer() {
                       hlsRef.current = hls;
                       if (isPlaying && !isVideoMode) {
                           const p = audioRef.current.play();
-                          if (p !== undefined) p.catch(() => {});
+                          if (p !== undefined) p.catch(() => setJamPlayBlocked(true));
                       }
                   } else if (audioRef.current.canPlayType('application/vnd.apple.mpegurl')) {
                       audioRef.current.src = audioUrl;
                       if (isPlaying && !isVideoMode) {
-                          audioRef.current.play().catch(()=>{});
+                          audioRef.current.play().catch(()=>setJamPlayBlocked(true));
                       }
                   }
               } catch(e) {}
@@ -674,7 +772,7 @@ export default function MiniPlayer() {
               if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
               audioRef.current.src = audioUrl;
               if (isPlaying && !isVideoMode) {
-                  audioRef.current.play().catch(()=>{});
+                  audioRef.current.play().catch(()=>setJamPlayBlocked(true));
               }
           }
       };
@@ -1111,9 +1209,14 @@ export default function MiniPlayer() {
     const newState = !isPlaying;
     setIsPlaying(newState);
     
-    // Broadcast State change to Jim Jam Room
+    // Broadcast State change to Jim Jam Room with Timestamp
     if (jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', { type: 'STATE', isPlaying: newState });
+        ablyChannelRef.current.publish('sync', { 
+            type: 'STATE', 
+            isPlaying: newState,
+            time: audioRef.current?.currentTime || 0,
+            timestamp: Date.now()
+        });
     }
 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = newState ? 'playing' : 'paused';
@@ -1410,9 +1513,13 @@ export default function MiniPlayer() {
     isSeekingRef.current = false;
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
     
-    // Broadcast Time to Jim Jam
+    // Broadcast Time to Jim Jam natively correcting Latency Drift
     if (jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', { type: 'TIME', time: newTime });
+        ablyChannelRef.current.publish('sync', { 
+            type: 'TIME', 
+            time: newTime,
+            timestamp: Date.now()
+        });
     }
 
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
@@ -1891,11 +1998,28 @@ const downloadLrcFile = () => {
         .lyric-word-sync { background: linear-gradient(to right, #ffffff calc(var(--p, 0%) - 15%), rgba(255,255,255,0.2) var(--p, 0%)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; color: transparent; will-change: background; transform: translateZ(0); }
       `}} />
 
+      {/* --- JAM AUTOPLAY BYPASS UI --- */}
+      {jamPlayBlocked && (
+         <div className="fixed top-12 left-0 right-0 z-[100000] flex justify-center pointer-events-none">
+             <button onClick={() => { audioRef.current?.play(); setJamPlayBlocked(false); }} className="bg-[#1db954] text-black font-extrabold px-6 py-3 rounded-full shadow-2xl animate-bounce pointer-events-auto flex items-center gap-2">
+                 <Radio size={20} className="animate-pulse" /> Tap to Sync Jam Audio
+             </button>
+         </div>
+      )}
+
       <audio 
         ref={audioRef} autoPlay={isPlaying && !isVideoMode} onEnded={playNext} onTimeUpdate={handleTimeUpdate} crossOrigin="anonymous" 
         onLoadedMetadata={() => { 
            const dur = audioRef.current?.duration || 0; setDuration(dur); 
-           if (restoreTimeRef.current !== null && restoreTimeRef.current > 0) { audioRef.current!.currentTime = restoreTimeRef.current; setCurrentTime(restoreTimeRef.current); restoreTimeRef.current = null; } 
+           if (jamSyncDataRef.current) {
+               const latency = (Date.now() - jamSyncDataRef.current.timestamp) / 1000;
+               const target = jamSyncDataRef.current.time + (isPlayingRef.current ? latency : 0);
+               audioRef.current!.currentTime = target;
+               setCurrentTime(target);
+               jamSyncDataRef.current = null;
+           } else if (restoreTimeRef.current !== null && restoreTimeRef.current > 0) { 
+               audioRef.current!.currentTime = restoreTimeRef.current; setCurrentTime(restoreTimeRef.current); restoreTimeRef.current = null; 
+           } 
            syncPosition();
         }} 
       />
@@ -1986,7 +2110,9 @@ const downloadLrcFile = () => {
                   <div className={`flex items-center justify-between text-[#b3b3b3] w-full px-1 drop-shadow-md pointer-events-auto ${isCanvasActive ? 'mt-2 mb-1' : ''}`}>
                     <div className="flex items-center gap-4">
                         <button onClick={toggleVideoMode} className={`active:opacity-50 transition-colors ${isVideoMode ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}>{isVideoLoading ? <Loader2 size={20} className="animate-spin" /> : <MonitorPlay size={20} />}</button>
-                        <button onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }} className={`active:opacity-50 transition-colors ${jamStatus === 'connected' ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}><Users size={20} /></button>
+                        <button onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }} className={`active:opacity-50 transition-colors ${jamStatus === 'connected' ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}>
+                            <Users size={20} className={jamStatus === 'connected' ? "animate-pulse" : ""} />
+                        </button>
                     </div>
                     <div className="flex items-center gap-6"><button onClick={openQueue} className="active:opacity-50 text-white"><ListMusic size={20} /></button></div>
                   </div>
@@ -2096,10 +2222,10 @@ const downloadLrcFile = () => {
           </div>
         </div>
 
-        {/* --- JIM JAM MODAL MENU --- */}
+        {/* --- JIM JAM MODAL MENU (Live Audio Room) --- */}
         {showJamMenu && (
           <div className="absolute inset-0 z-[100010] bg-black/60 flex items-center justify-center p-6 backdrop-blur-sm pointer-events-auto" onClick={() => setShowJamMenu(false)}>
-             <div className="w-full max-w-sm bg-[#282828] rounded-3xl p-6 shadow-2xl flex flex-col gap-4 animate-in fade-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
+             <div className="w-full max-w-sm bg-[#121212] border border-white/10 rounded-3xl p-6 shadow-2xl flex flex-col gap-4 animate-in fade-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
                 <div className="flex justify-between items-center mb-2">
                     <h4 className="text-white font-black text-xl flex items-center gap-2"><Radio size={24} className="text-[#1db954]"/> Jim Jam</h4>
                     <button onClick={() => setShowJamMenu(false)} className="text-white/50 hover:text-white bg-white/5 rounded-full p-1"><X size={20}/></button>
@@ -2108,8 +2234,14 @@ const downloadLrcFile = () => {
                 {jamStatus === 'disconnected' ? (
                     <div className="flex flex-col gap-4 mt-2">
                         <p className="text-white/60 text-sm font-medium text-center mb-2">Listen together with friends in real-time. Synced seamlessly.</p>
-                        <button onClick={createJamRoom} className="w-full py-3.5 px-4 rounded-xl bg-[#1db954] text-black font-extrabold text-[15px] active:scale-95 transition-transform shadow-lg shadow-[#1db954]/20 flex items-center justify-center gap-2">
-                            <Radio size={20} /> Create a Jim Jam
+                        
+                        <div className="flex flex-col gap-2">
+                            <span className="text-white/50 text-[10px] font-bold uppercase tracking-widest ml-1">Your Name (Optional)</span>
+                            <input type="text" placeholder="e.g. Ayush" value={jamName} onChange={e => setJamName(e.target.value)} className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white font-bold text-center focus:outline-none focus:border-[#1db954] transition-colors" maxLength={15} />
+                        </div>
+
+                        <button onClick={createJamRoom} className="w-full py-3.5 px-4 rounded-xl bg-[#1db954] text-black font-extrabold text-[15px] active:scale-95 transition-transform shadow-lg shadow-[#1db954]/20 flex items-center justify-center gap-2 mt-2">
+                            <Radio size={20} /> Create a Jam Room
                         </button>
                         
                         <div className="relative flex py-2 items-center">
@@ -2120,34 +2252,60 @@ const downloadLrcFile = () => {
                         
                         <div className="flex flex-col gap-2">
                             <div className="flex gap-2">
-                                <input type="text" placeholder="Room ID" value={jamInputId} onChange={e => setJamInputId(e.target.value.toUpperCase())} className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white font-black tracking-[0.2em] text-center focus:outline-none focus:border-[#1db954] transition-colors" maxLength={6} />
-                                <button onClick={joinJamRoom} disabled={jamInputId.length < 6} className="bg-white/10 text-white font-bold px-5 py-3 rounded-xl disabled:opacity-50 hover:bg-white/20 transition-colors">Join</button>
+                                <input type="text" placeholder="ROOM CODE" value={jamInputId} onChange={e => setJamInputId(e.target.value.toUpperCase())} className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white font-black tracking-[0.2em] text-center focus:outline-none focus:border-[#1db954] transition-colors uppercase" maxLength={6} />
+                                <button onClick={joinJamRoom} disabled={jamInputId.length < 6} className="bg-white/10 text-[#1db954] font-bold px-5 py-3 rounded-xl disabled:opacity-50 hover:bg-[#1db954] hover:text-black transition-colors">Join</button>
                             </div>
                         </div>
                     </div>
                 ) : (
-                    <div className="flex flex-col gap-4 items-center py-4">
-                        <div className="w-20 h-20 rounded-full bg-[#1db954]/10 flex items-center justify-center mb-2 relative">
-                            <div className="absolute inset-0 rounded-full border-2 border-[#1db954]/30 animate-ping"></div>
-                            <Users size={36} className={jamStatus === 'connected' ? "text-[#1db954]" : "text-white/50"} />
-                        </div>
-                        
+                    <div className="flex flex-col gap-4 items-center py-2">
                         {jamStatus === 'connecting' ? (
-                            <p className="text-white/70 font-medium animate-pulse text-center">Tuning into frequency...</p>
+                            <div className="flex flex-col items-center gap-4 py-8">
+                                <Loader2 size={36} className="text-[#1db954] animate-spin" />
+                                <p className="text-white/70 font-medium animate-pulse text-center">Tuning into frequency...</p>
+                            </div>
                         ) : (
-                            <div className="flex flex-col items-center gap-3 w-full">
-                                <div className="bg-black/40 border border-white/5 rounded-2xl w-full p-4 flex flex-col items-center gap-2">
-                                    <p className="text-white/50 text-xs font-bold uppercase tracking-widest">Room ID</p>
+                            <div className="flex flex-col items-center gap-4 w-full">
+                                <div className="bg-[#181818] border border-white/5 shadow-inner rounded-2xl w-full p-4 flex flex-col items-center gap-1">
+                                    <p className="text-[#1db954] text-[10px] font-bold uppercase tracking-widest flex items-center gap-1">
+                                        <span className="w-2 h-2 rounded-full bg-[#1db954] animate-pulse"></span> Live Room
+                                    </p>
                                     <p className="text-white font-black text-3xl tracking-[0.2em] drop-shadow-md">{jamRoomId}</p>
+                                    <p className="text-white/50 text-xs font-medium mt-1">Share this code with friends</p>
                                 </div>
                                 
-                                <p className="text-white/70 text-sm font-medium">You are <span className="text-white font-bold">{jamRole === 'host' ? 'Hosting' : 'Listening'}</span></p>
+                                <div className="w-full flex flex-col gap-2 mt-2">
+                                    <span className="text-white/50 text-[10px] font-bold uppercase tracking-widest ml-1 flex justify-between">Participants <span>{jamParticipants.length} Online</span></span>
+                                    <div className="flex flex-col gap-2 max-h-32 overflow-y-auto scrollbar-hide">
+                                        {jamParticipants.map((p, i) => (
+                                            <div key={i} className="flex items-center justify-between bg-white/5 p-3 rounded-xl border border-white/5">
+                                                <div className="flex items-center gap-3">
+                                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${p.isHost ? 'bg-[#1db954]/20 text-[#1db954]' : 'bg-white/10 text-white'}`}>{p.name.charAt(0).toUpperCase()}</div>
+                                                    <span className="text-white font-bold text-sm">{p.name}</span>
+                                                </div>
+                                                {p.isHost && <span className="text-[#1db954] text-[10px] font-black uppercase tracking-widest bg-[#1db954]/10 px-2 py-1 rounded">Host</span>}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="w-full bg-black/40 rounded-xl p-3 h-24 overflow-y-auto flex flex-col gap-1 border border-white/5 font-mono text-[10px]">
+                                    {jamLogs.map((log) => (
+                                        <div key={log.id} className="flex items-center gap-2 text-white/50">
+                                            <Activity size={10} className="text-[#1db954]" /> <span>{log.text}</span>
+                                        </div>
+                                    ))}
+                                </div>
                                 
-                                <div className="flex w-full gap-2 mt-4">
-                                    {jamRole === 'host' && (
-                                        <button onClick={() => { navigator.clipboard.writeText(jamRoomId!); alert("Room ID Copied!"); }} className="flex-1 flex items-center justify-center gap-2 text-white font-bold text-sm bg-white/10 hover:bg-white/20 py-3 rounded-xl transition-colors"><Copy size={18}/> Copy</button>
+                                <div className="flex w-full gap-2 mt-2">
+                                    {jamRole === 'host' ? (
+                                        <>
+                                            <button onClick={() => { navigator.clipboard.writeText(jamRoomId!); alert("Room ID Copied!"); }} className="flex-1 flex items-center justify-center gap-2 text-white font-bold text-sm bg-white/10 hover:bg-white/20 py-3.5 rounded-xl transition-colors"><Copy size={18}/> Copy</button>
+                                            <button onClick={disconnectJam} className="flex-1 py-3.5 rounded-xl bg-[#ff4444]/10 hover:bg-[#ff4444]/20 text-[#ff4444] font-bold text-sm transition-colors flex justify-center items-center gap-2"><LogOut size={18}/> End Jam</button>
+                                        </>
+                                    ) : (
+                                        <button onClick={disconnectJam} className="w-full py-3.5 rounded-xl bg-[#ff4444]/10 hover:bg-[#ff4444]/20 text-[#ff4444] font-bold text-sm transition-colors flex justify-center items-center gap-2"><LogOut size={18}/> Leave Jam</button>
                                     )}
-                                    <button onClick={disconnectJam} className="flex-1 py-3 rounded-xl bg-[#ff4444]/10 hover:bg-[#ff4444]/20 text-[#ff4444] font-bold text-sm transition-colors flex justify-center items-center gap-2"><LogOut size={18}/> Leave</button>
                                 </div>
                             </div>
                         )}
