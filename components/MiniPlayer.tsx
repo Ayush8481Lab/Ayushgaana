@@ -519,12 +519,7 @@ export default function MiniPlayer() {
           // 🚨 REPLACE THIS WITH YOUR FREE ABLY API KEY 🚨
           const ABLY_KEY = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
           
-          if (ABLY_KEY === "YOUR_ABLY_API_KEY_HERE") {
-              alert("⚠️ Missing Ably API Key! Please replace 'YOUR_ABLY_API_KEY_HERE' in the source code to use Jim Jam.");
-              setJamStatus('disconnected');
-              setJamRole(null);
-              return;
-          }
+          
 
           const ably = new Ably.Realtime({ key: ABLY_KEY });
           
