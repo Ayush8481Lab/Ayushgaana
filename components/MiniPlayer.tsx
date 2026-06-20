@@ -9,7 +9,8 @@ import { useAppContext } from "../context/AppContext";
 import { 
   Play, Pause, SkipForward, SkipBack, Loader2, ChevronDown, 
   MoreHorizontal, Shuffle, Repeat, Heart, ListMusic, 
-  MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles
+  MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles,
+  Users, LogOut, Copy, Radio // Added Icons for Jim Jam
 } from "lucide-react";
 
 // --- VERCEL PROTECTION BYPASS ENGINE ---
@@ -321,6 +322,16 @@ const loadHlsJS = (): Promise<any> => new Promise((resolve, reject) => {
     document.head.appendChild(script);
 });
 
+// Dynamic CDN Loader for Ably API to ensure zero build errors
+const loadAblyJS = (): Promise<any> => new Promise((resolve, reject) => {
+    if ((window as any).Ably) return resolve((window as any).Ably);
+    const script = document.createElement('script');
+    script.src = "https://cdn.ably.com/lib/ably.min-1.js";
+    script.onload = () => resolve((window as any).Ably);
+    script.onerror = reject;
+    document.head.appendChild(script);
+});
+
 const MarqueeText = React.memo(({ text, className = "" }: { text: string, className?: string }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
@@ -402,7 +413,19 @@ export default function MiniPlayer() {
   const[showQueue, setShowQueue] = useState(false);
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
+
+  // --- JIM JAM STATES ---
+  const [showJamMenu, setShowJamMenu] = useState(false);
+  const [jamRoomId, setJamRoomId] = useState<string | null>(null);
+  const [jamRole, setJamRole] = useState<'host' | 'guest' | null>(null);
+  const [jamInputId, setJamInputId] = useState("");
+  const [jamStatus, setJamStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const ablyClientRef = useRef<any>(null);
+  const ablyChannelRef = useRef<any>(null);
+  const isPlayingRef = useRef(isPlaying);
   
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+
   const lastFetchedTrackIdRef = useRef<string | null>(null);
 
   const[dominantColor, setDominantColor] = useState("rgb(83, 83, 83)");
@@ -486,6 +509,113 @@ export default function MiniPlayer() {
   const handleLikeClick = (e: any) => { e.stopPropagation(); toggleLikeSong(currentSong); };
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen;
+
+  // --- JIM JAM ENGINE ---
+  const connectToAbly = async (roomId: string, role: 'host' | 'guest') => {
+      try {
+          setJamStatus('connecting');
+          const Ably = await loadAblyJS();
+          
+          // 🚨 REPLACE THIS WITH YOUR FREE ABLY API KEY 🚨
+          const ABLY_KEY = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
+          
+          if (ABLY_KEY === "YOUR_ABLY_API_KEY_HERE") {
+              alert("⚠️ Missing Ably API Key! Please replace 'YOUR_ABLY_API_KEY_HERE' in the source code to use Jim Jam.");
+              setJamStatus('disconnected');
+              setJamRole(null);
+              return;
+          }
+
+          const ably = new Ably.Realtime({ key: ABLY_KEY });
+          
+          ably.connection.on('connected', () => setJamStatus('connected'));
+          ably.connection.on('failed', () => {
+              setJamStatus('disconnected');
+              alert("Jim Jam connection failed. Please check the Ably API key.");
+          });
+
+          const channel = ably.channels.get(`jim-jam-${roomId}`);
+          ablyClientRef.current = ably;
+          ablyChannelRef.current = channel;
+
+          if (role === 'guest') {
+              channel.subscribe('sync', (msg: any) => {
+                  const data = msg.data;
+                  if (data.type === 'FULL_SYNC') {
+                      if (data.song && data.song.id !== currentTrackRef.current?.id) setCurrentSong(data.song);
+                      setIsPlaying(data.isPlaying);
+                      if (audioRef.current && data.time !== undefined) {
+                          audioRef.current.currentTime = data.time;
+                          setCurrentTime(data.time);
+                          syncPosition();
+                      }
+                  } else if (data.type === 'SONG') {
+                      setCurrentSong(data.song);
+                  } else if (data.type === 'STATE') {
+                      setIsPlaying(data.isPlaying);
+                      if (audioRef.current && !isVideoModeRef.current) {
+                          if (data.isPlaying) audioRef.current.play().catch(()=>{});
+                          else audioRef.current.pause();
+                      }
+                  } else if (data.type === 'TIME') {
+                      if (audioRef.current) {
+                          audioRef.current.currentTime = data.time;
+                          setCurrentTime(data.time);
+                          syncPosition();
+                      }
+                  }
+              });
+              // Briefly wait then request the master state from Host
+              setTimeout(() => channel.publish('request_sync', {}), 500);
+          } else {
+              channel.subscribe('request_sync', () => {
+                  channel.publish('sync', {
+                      type: 'FULL_SYNC',
+                      song: currentTrackRef.current,
+                      isPlaying: isPlayingRef.current,
+                      time: audioRef.current?.currentTime || 0
+                  });
+              });
+          }
+      } catch (e) {
+          setJamStatus('disconnected');
+          setJamRole(null);
+      }
+  };
+
+  const createJamRoom = () => {
+      const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
+      setJamRoomId(newRoomId);
+      setJamRole('host');
+      connectToAbly(newRoomId, 'host');
+  };
+
+  const joinJamRoom = () => {
+      if (jamInputId.length < 6) return;
+      setJamRoomId(jamInputId);
+      setJamRole('guest');
+      connectToAbly(jamInputId, 'guest');
+  };
+
+  const disconnectJam = () => {
+      if (ablyClientRef.current) ablyClientRef.current.close();
+      ablyClientRef.current = null;
+      ablyChannelRef.current = null;
+      setJamStatus('disconnected');
+      setJamRole(null);
+      setJamRoomId(null);
+  };
+
+  useEffect(() => {
+      return () => disconnectJam();
+  }, []);
+
+  // Sync Song Changes (Host => Guest)
+  useEffect(() => {
+      if (jamRole === 'host' && jamStatus === 'connected' && ablyChannelRef.current && currentSong) {
+          ablyChannelRef.current.publish('sync', { type: 'SONG', song: currentSong });
+      }
+  }, [currentSong, jamRole, jamStatus]);
 
   const customSmoothScroll = useCallback((container: HTMLElement, targetPos: number, duration: number) => {
       if ((container as any)._scrollRaf) cancelAnimationFrame((container as any)._scrollRaf);
@@ -679,9 +809,6 @@ export default function MiniPlayer() {
     }
   },[streamBaseUrl, selectedQuality]);
 
-  // ----------------------------------------------------------------------
-  // --- STRICT ORDER API WORKFLOW (ABORTABLE & DDOS SAFE)
-  // ----------------------------------------------------------------------
   useEffect(() => {
     if (!currentSong) return;
     let isCurrent = true;
@@ -842,7 +969,6 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
-               // DO NOT USE fetchJina on ak47ayush! Strictly fetchProtected.
                const authRes = await fetchProtected(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
                if (authRes.ok) {
                    const authJson = await authRes.json();
@@ -902,7 +1028,6 @@ export default function MiniPlayer() {
         const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
 
         if (isVideoModeRef.current) {
-            // VIDEO PRIORITY WORKFLOW
             setIsVideoLoading(true);
             const vid = await prefetchVideoId(searchTitle, searchArtist);
             if (vid && isCurrent && !signal.aborted) setYtVideoId(vid);
@@ -922,7 +1047,6 @@ export default function MiniPlayer() {
             await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
 
         } else {
-            // STANDARD WORKFLOW - Instantly call ayushvid video prefetch concurrently
             const p1 = fetchStreamTask();
             const p2 = fetchInfoTask();
             const p3 = getAuthData();
@@ -991,6 +1115,12 @@ export default function MiniPlayer() {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     const newState = !isPlaying;
     setIsPlaying(newState);
+    
+    // Broadcast State change to Jim Jam Room
+    if (jamStatus === 'connected' && ablyChannelRef.current) {
+        ablyChannelRef.current.publish('sync', { type: 'STATE', isPlaying: newState });
+    }
+
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = newState ? 'playing' : 'paused';
     
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
@@ -1284,6 +1414,12 @@ export default function MiniPlayer() {
   const handleSeekEnd = (e: React.SyntheticEvent<HTMLInputElement>) => {
     isSeekingRef.current = false;
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
+    
+    // Broadcast Time to Jim Jam
+    if (jamStatus === 'connected' && ablyChannelRef.current) {
+        ablyChannelRef.current.publish('sync', { type: 'TIME', time: newTime });
+    }
+
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: newTime }, '*');
       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
@@ -1471,6 +1607,7 @@ export default function MiniPlayer() {
       setDlState({ type: null, status: "idle" });
     }
   };
+
 const downloadLrcFile = () => {
     if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
 
@@ -1493,7 +1630,6 @@ const downloadLrcFile = () => {
     const safeFileName = `${cleanTitle}`.replace(/[/\\:*?<>|]/g, "").trim();
     const finalName = `${safeFileName}.lrc`;
 
-    // --- MEGALOBIZ SECRET SAUCE TRICKS ---
     const data: any[] = [];
     data.push(lrcContent);
     const properties = { type: 'plain/text' }; 
@@ -1527,25 +1663,20 @@ const downloadLrcFile = () => {
           const cleanImg = encodeURIComponent(displayImage || "https://via.placeholder.com/500");
           const m3u8Safe = encodeURIComponent(optUrl);
 
-          // 1. Extract new metadata with fallback for composer
           const composerStr = (songDetails?.composers && songDetails.composers.length > 0) 
               ? songDetails.composers.map((c: any) => c.name).join(", ") 
-              : "Ayush Kumar Yadav"; // Fallback if composer is missing
+              : "Ayush Kumar Yadav"; 
           
           const yearStr = songDetails?.release_date ? songDetails.release_date.split("-")[0] : "";
           const genreStr = songDetails?.tags?.[0]?.tag_name || "";
 
-          // 2. Encode the new fields safely
           const cleanComposer = encodeURIComponent(decodeEntities(composerStr));
           const cleanYear = encodeURIComponent(yearStr);
           const cleanGenre = encodeURIComponent(decodeEntities(genreStr));
 
-          // 3. Append them to the final API URL
           const downloadApiUrl = `https://ayushdownload.vercel.app/api/dl?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&composer=${cleanComposer}&year=${cleanYear}&genre=${cleanGenre}`;
-          // TRIGGER 1: Download LRC EXACTLY like Megalobiz
           const hasLrc = downloadLrcFile();
 
-          // TRIGGER 2: 3-second delay 
           const delayTime = hasLrc ? 3000 : 0;
 
           setTimeout(() => {
@@ -1858,7 +1989,10 @@ const downloadLrcFile = () => {
                 </div>
                 {!isLyricsFullScreen && (
                   <div className={`flex items-center justify-between text-[#b3b3b3] w-full px-1 drop-shadow-md pointer-events-auto ${isCanvasActive ? 'mt-2 mb-1' : ''}`}>
-                    <button onClick={toggleVideoMode} className={`active:opacity-50 transition-colors ${isVideoMode ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}>{isVideoLoading ? <Loader2 size={20} className="animate-spin" /> : <MonitorPlay size={20} />}</button>
+                    <div className="flex items-center gap-4">
+                        <button onClick={toggleVideoMode} className={`active:opacity-50 transition-colors ${isVideoMode ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}>{isVideoLoading ? <Loader2 size={20} className="animate-spin" /> : <MonitorPlay size={20} />}</button>
+                        <button onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }} className={`active:opacity-50 transition-colors ${jamStatus === 'connected' ? 'text-[#1db954]' : 'text-[#b3b3b3]'}`}><Users size={20} /></button>
+                    </div>
                     <div className="flex items-center gap-6"><button onClick={openQueue} className="active:opacity-50 text-white"><ListMusic size={20} /></button></div>
                   </div>
                 )}
@@ -1966,6 +2100,67 @@ const downloadLrcFile = () => {
             )}
           </div>
         </div>
+
+        {/* --- JIM JAM MODAL MENU --- */}
+        {showJamMenu && (
+          <div className="absolute inset-0 z-[100010] bg-black/60 flex items-center justify-center p-6 backdrop-blur-sm pointer-events-auto" onClick={() => setShowJamMenu(false)}>
+             <div className="w-full max-w-sm bg-[#282828] rounded-3xl p-6 shadow-2xl flex flex-col gap-4 animate-in fade-in zoom-in duration-200" onClick={e => e.stopPropagation()}>
+                <div className="flex justify-between items-center mb-2">
+                    <h4 className="text-white font-black text-xl flex items-center gap-2"><Radio size={24} className="text-[#1db954]"/> Jim Jam</h4>
+                    <button onClick={() => setShowJamMenu(false)} className="text-white/50 hover:text-white bg-white/5 rounded-full p-1"><X size={20}/></button>
+                </div>
+
+                {jamStatus === 'disconnected' ? (
+                    <div className="flex flex-col gap-4 mt-2">
+                        <p className="text-white/60 text-sm font-medium text-center mb-2">Listen together with friends in real-time. Synced seamlessly.</p>
+                        <button onClick={createJamRoom} className="w-full py-3.5 px-4 rounded-xl bg-[#1db954] text-black font-extrabold text-[15px] active:scale-95 transition-transform shadow-lg shadow-[#1db954]/20 flex items-center justify-center gap-2">
+                            <Radio size={20} /> Create a Jim Jam
+                        </button>
+                        
+                        <div className="relative flex py-2 items-center">
+                            <div className="flex-grow border-t border-white/10"></div>
+                            <span className="flex-shrink-0 mx-4 text-white/40 text-xs font-bold uppercase tracking-widest">Or join existing</span>
+                            <div className="flex-grow border-t border-white/10"></div>
+                        </div>
+                        
+                        <div className="flex flex-col gap-2">
+                            <div className="flex gap-2">
+                                <input type="text" placeholder="Room ID" value={jamInputId} onChange={e => setJamInputId(e.target.value.toUpperCase())} className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white font-black tracking-[0.2em] text-center focus:outline-none focus:border-[#1db954] transition-colors" maxLength={6} />
+                                <button onClick={joinJamRoom} disabled={jamInputId.length < 6} className="bg-white/10 text-white font-bold px-5 py-3 rounded-xl disabled:opacity-50 hover:bg-white/20 transition-colors">Join</button>
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="flex flex-col gap-4 items-center py-4">
+                        <div className="w-20 h-20 rounded-full bg-[#1db954]/10 flex items-center justify-center mb-2 relative">
+                            <div className="absolute inset-0 rounded-full border-2 border-[#1db954]/30 animate-ping"></div>
+                            <Users size={36} className={jamStatus === 'connected' ? "text-[#1db954]" : "text-white/50"} />
+                        </div>
+                        
+                        {jamStatus === 'connecting' ? (
+                            <p className="text-white/70 font-medium animate-pulse text-center">Tuning into frequency...</p>
+                        ) : (
+                            <div className="flex flex-col items-center gap-3 w-full">
+                                <div className="bg-black/40 border border-white/5 rounded-2xl w-full p-4 flex flex-col items-center gap-2">
+                                    <p className="text-white/50 text-xs font-bold uppercase tracking-widest">Room ID</p>
+                                    <p className="text-white font-black text-3xl tracking-[0.2em] drop-shadow-md">{jamRoomId}</p>
+                                </div>
+                                
+                                <p className="text-white/70 text-sm font-medium">You are <span className="text-white font-bold">{jamRole === 'host' ? 'Hosting' : 'Listening'}</span></p>
+                                
+                                <div className="flex w-full gap-2 mt-4">
+                                    {jamRole === 'host' && (
+                                        <button onClick={() => { navigator.clipboard.writeText(jamRoomId!); alert("Room ID Copied!"); }} className="flex-1 flex items-center justify-center gap-2 text-white font-bold text-sm bg-white/10 hover:bg-white/20 py-3 rounded-xl transition-colors"><Copy size={18}/> Copy</button>
+                                    )}
+                                    <button onClick={disconnectJam} className="flex-1 py-3 rounded-xl bg-[#ff4444]/10 hover:bg-[#ff4444]/20 text-[#ff4444] font-bold text-sm transition-colors flex justify-center items-center gap-2"><LogOut size={18}/> Leave</button>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+             </div>
+          </div>
+        )}
 
         <div className={`absolute inset-0 z-[100000] bg-black/60 backdrop-blur-sm transition-opacity duration-300 pointer-events-auto flex flex-col justify-end ${showSettingsMenu ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setShowSettingsMenu(false)}>
           <div className={`w-full bg-[#121212] rounded-t-[28px] transition-transform duration-400 ease-[cubic-bezier(0.32,0.72,0,1)] shadow-2xl border-t border-white/10 flex flex-col max-h-[85vh] ${showSettingsMenu ? 'translate-y-0' : 'translate-y-full'}`} onClick={e => e.stopPropagation()}>
@@ -2212,6 +2407,7 @@ const downloadLrcFile = () => {
           </div>
           <div className="flex flex-col flex-1 min-w-0 pr-3 justify-center"><MarqueeText text={displayTitle} className="text-[13px] font-bold text-white leading-tight mb-[2px] w-full" /><MarqueeText text={displayArtists} className="text-[12px] font-medium text-white/70 leading-tight w-full" /></div>
           <div className="flex items-center gap-4 flex-shrink-0 pr-2 text-white">
+            <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }}><Users size={20} className={jamStatus === 'connected' ? "text-[#1db954]" : ""} /></button>
             <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={toggleVideoMode}><MonitorPlay size={20} className={isVideoMode ? "text-[#1db954]" : ""} /></button>
             <button className="active:scale-75 transition-transform flex items-center justify-center w-[24px] h-[24px]" onClick={handlePlayPauseToggle}>
                {(loading || isVideoLoading) ? <Loader2 size={24} className="animate-spin text-white" /> : (isPlaying ? <Pause fill="white" stroke="white" size={24} /> : <Play fill="white" stroke="white" size={24} className="translate-x-[1px]" />)}
