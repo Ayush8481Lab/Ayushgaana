@@ -524,22 +524,34 @@ export default function MiniPlayer() {
       try {
           setJamStatus('connecting');
           const Ably = await loadAblyJS();
+          
+          // Your Ably Key
           const ABLY_KEY: string = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
           
           const clientId = 'jam_' + Math.random().toString(36).substr(2, 9);
-          const ably = new Ably.Realtime({ key: ABLY_KEY, clientId });
+          const ably = new Ably.Realtime.Promise({ key: ABLY_KEY, clientId });
           
           ably.connection.on('failed', () => {
               setJamStatus('disconnected');
               alert("Jim Jam connection failed.");
           });
 
+          // Wait for successful connection before proceeding
+          await new Promise<void>((resolve, reject) => {
+              ably.connection.once('connected', () => resolve());
+              ably.connection.once('failed', () => reject(new Error("Connection Failed")));
+          });
+
           const channel = ably.channels.get(`jim-jam-${roomId}`);
+          await channel.attach(); // Ensure channel is fully attached
 
           // Validate Ghost Room for Guests
           if (role === 'guest') {
               const presenceSet = await channel.presence.get();
-              const hasHost = presenceSet.some((p: any) => p.data.isHost);
+              // SAFELY handle both Array and PaginatedResult formats from Ably
+              const members = Array.isArray(presenceSet) ? presenceSet : (presenceSet.items || []);
+              
+              const hasHost = members.some((p: any) => p.data && p.data.isHost);
               if (!hasHost) {
                   alert("Invalid Room ID or Host has left.");
                   ably.close();
@@ -565,8 +577,9 @@ export default function MiniPlayer() {
                   return newLogs.slice(-10); // Keep last 10 logs
               });
 
-              channel.presence.get().then((members: any[]) => {
-                  setJamParticipants(members.map(m => m.data));
+              channel.presence.get().then((result: any) => {
+                  const members = Array.isArray(result) ? result : (result.items || []);
+                  setJamParticipants(members.map((m: any) => m.data));
               });
 
               // Host deep syncs new user
@@ -645,23 +658,21 @@ export default function MiniPlayer() {
               }
           });
 
-          ably.connection.on('connected', () => setJamStatus('connected'));
-          if (ably.connection.state === 'connected') {
-              setJamStatus('connected');
-              // Setup initial participants list instantly
-              const members = await channel.presence.get();
-              setJamParticipants(members.map((m: any) => m.data));
-          }
+          // Fetch initial participants explicitly on connect
+          setJamStatus('connected');
+          const result = await channel.presence.get();
+          const members = Array.isArray(result) ? result : (result.items || []);
+          setJamParticipants(members.map((m: any) => m.data));
 
       } catch (e) {
-          console.error(e);
+          console.error("Jam Connect Error:", e);
           setJamStatus('disconnected');
           setJamRole(null);
           setJamRoomId(null);
-          alert("Failed to connect to Jam server.");
+          alert("Failed to connect to Jam server. Check Room ID.");
       }
-  };
-
+  };              
+          
   const createJamRoom = () => {
       const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
       setJamRoomId(newRoomId);
