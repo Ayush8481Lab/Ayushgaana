@@ -416,7 +416,8 @@ export default function MiniPlayer() {
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
 
-  // --- JIM JAM STATES (Advanced real-time sync with Latency compensation) ---
+  // --- JIM JAM CORE STATE ENGINE ---
+  const JAM_STORAGE_KEY = 'jim_jam_session';
   const [showJamMenu, setShowJamMenu] = useState(false);
   const [jamRoomId, setJamRoomId] = useState<string | null>(null);
   const [jamRole, setJamRole] = useState<'host' | 'guest' | null>(null);
@@ -427,13 +428,17 @@ export default function MiniPlayer() {
   const [jamLogs, setJamLogs] = useState<any[]>([]);
   const [jamPlayBlocked, setJamPlayBlocked] = useState(false);
 
+  // Refs for stable callbacks
   const ablyClientRef = useRef<any>(null);
   const ablyChannelRef = useRef<any>(null);
-  const jamSyncDataRef = useRef<{time: number, timestamp: number} | null>(null);
-  const isSystemSongChangeRef = useRef(false);
   const isPlayingRef = useRef(isPlaying);
+  const jamRoleRef = useRef(jamRole);
+  const jamPlayBlockedRef = useRef(jamPlayBlocked);
+  const isSystemSongChangeRef = useRef(false);
   
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  useEffect(() => { jamRoleRef.current = jamRole; }, [jamRole]);
+  useEffect(() => { jamPlayBlockedRef.current = jamPlayBlocked; }, [jamPlayBlocked]);
 
   const lastFetchedTrackIdRef = useRef<string | null>(null);
 
@@ -512,6 +517,23 @@ export default function MiniPlayer() {
   const isCanvasEnabledRef = useRef(true);
   const isLyricsEnabledRef = useRef(true);
 
+  // Deep refs for Host payload building
+  const songDetailsRef = useRef(songDetails);
+  const audioUrlRef = useRef(audioUrl);
+  const streamBaseUrlRef = useRef(streamBaseUrl);
+  const lyricsRef = useRef(lyrics);
+  const syncTypeRef = useRef(syncType);
+  const canvasDataRef = useRef(canvasData);
+  const ytVideoIdRef = useRef(ytVideoId);
+
+  useEffect(() => { songDetailsRef.current = songDetails; }, [songDetails]);
+  useEffect(() => { audioUrlRef.current = audioUrl; }, [audioUrl]);
+  useEffect(() => { streamBaseUrlRef.current = streamBaseUrl; }, [streamBaseUrl]);
+  useEffect(() => { lyricsRef.current = lyrics; }, [lyrics]);
+  useEffect(() => { syncTypeRef.current = syncType; }, [syncType]);
+  useEffect(() => { canvasDataRef.current = canvasData; }, [canvasData]);
+  useEffect(() => { ytVideoIdRef.current = ytVideoId; }, [ytVideoId]);
+
   const[dlState, setDlState] = useState<{type: "music" | "video" | null, status: string, options?: any[], progress?: number, packStep?: string, server?: number}>({type: null, status: "idle", progress: 0, server: 1});
 
   const isSongLiked = likedSongs.some((s: any) => s && (s.id || s.track_id) === (currentSong?.id || currentSong?.track_id));
@@ -519,13 +541,75 @@ export default function MiniPlayer() {
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen;
 
-  // --- JIM JAM ENGINE (Advanced Async Presence & Sync) ---
-  const connectToAbly = async (roomId: string, role: 'host' | 'guest') => {
+  // --- SILENT AUTOPLAY BYPASS (Global interaction unlocks audio without popup) ---
+  useEffect(() => {
+      const unlockAudio = () => {
+          if (jamPlayBlockedRef.current && audioRef.current) {
+              audioRef.current.play().then(() => {
+                  setJamPlayBlocked(false);
+              }).catch(() => {});
+          }
+      };
+      window.addEventListener('click', unlockAudio);
+      window.addEventListener('touchstart', unlockAudio);
+      return () => {
+          window.removeEventListener('click', unlockAudio);
+          window.removeEventListener('touchstart', unlockAudio);
+      };
+  }, []);
+
+  // --- HOST SYNC BROADCASTER ---
+  const broadcastFullSync = useCallback(() => {
+      if (jamRoleRef.current !== 'host' || !ablyChannelRef.current) return;
+      ablyChannelRef.current.publish('sync', {
+          type: 'FULL_SYNC',
+          payload: {
+              song: currentTrackRef.current,
+              songDetails: songDetailsRef.current,
+              audioUrl: audioUrlRef.current,
+              streamBaseUrl: streamBaseUrlRef.current,
+              lyrics: lyricsRef.current,
+              syncType: syncTypeRef.current,
+              canvasData: canvasDataRef.current,
+              isVideoMode: isVideoModeRef.current,
+              ytVideoId: ytVideoIdRef.current,
+              isPlaying: isPlayingRef.current,
+              time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
+              timestamp: Date.now()
+          }
+      });
+  }, []);
+
+  // When Host's media officially resolves, automatically deep-sync all listeners.
+  useEffect(() => {
+      if (jamRole === 'host' && jamStatus === 'connected' && audioUrl) {
+          broadcastFullSync();
+      }
+  }, [audioUrl, isVideoMode, broadcastFullSync]);
+
+  // --- 2-SECOND AUTOMATION HEARTBEAT ---
+  useEffect(() => {
+      if (jamRole === 'host' && jamStatus === 'connected') {
+          const interval = setInterval(() => {
+              if (!ablyChannelRef.current) return;
+              ablyChannelRef.current.publish('sync', {
+                  type: 'HEARTBEAT',
+                  trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+                  isPlaying: isPlayingRef.current,
+                  time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
+                  isVideoMode: isVideoModeRef.current,
+                  timestamp: Date.now()
+              });
+          }, 2000);
+          return () => clearInterval(interval);
+      }
+  }, [jamRole, jamStatus]);
+
+  // --- JIM JAM CONNECTION LOGIC ---
+  const connectToAbly = async (roomId: string, role: 'host' | 'guest', customName: string) => {
       try {
           setJamStatus('connecting');
           const Ably = await loadAblyJS();
-          
-          // Your Ably Key
           const ABLY_KEY: string = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
           
           const clientId = 'jam_' + Math.random().toString(36).substr(2, 9);
@@ -536,19 +620,16 @@ export default function MiniPlayer() {
               alert("Jim Jam connection failed.");
           });
 
-          // Wait for successful connection before proceeding
           await new Promise<void>((resolve, reject) => {
               ably.connection.once('connected', () => resolve());
               ably.connection.once('failed', () => reject(new Error("Connection Failed")));
           });
 
           const channel = ably.channels.get(`jim-jam-${roomId}`);
-          await channel.attach(); // Ensure channel is fully attached
+          await channel.attach();
 
-          // Validate Ghost Room for Guests
           if (role === 'guest') {
               const presenceSet = await channel.presence.get();
-              // SAFELY handle both Array and PaginatedResult formats from Ably
               const members = Array.isArray(presenceSet) ? presenceSet : (presenceSet.items || []);
               
               const hasHost = members.some((p: any) => p.data && p.data.isHost);
@@ -558,23 +639,24 @@ export default function MiniPlayer() {
                   setJamStatus('disconnected');
                   setJamRole(null);
                   setJamRoomId(null);
+                  sessionStorage.removeItem(JAM_STORAGE_KEY);
                   return;
               }
           }
 
           ablyClientRef.current = ably;
           ablyChannelRef.current = channel;
+          sessionStorage.setItem(JAM_STORAGE_KEY, JSON.stringify({ roomId, role, name: customName }));
 
-          const defaultName = jamName.trim() || (role === 'host' ? 'Host' : `Groover_${Math.floor(Math.random()*1000)}`);
+          const defaultName = customName.trim() || (role === 'host' ? 'Host' : `Groover_${Math.floor(Math.random()*1000)}`);
 
-          // Subscribe to Presence Events (Who is joining/leaving)
           channel.presence.subscribe(['enter', 'leave'], (msg: any) => {
               const p = msg.data;
               const isEnter = msg.action === 'enter';
               
               setJamLogs(prev => {
                   const newLogs = [...prev, { id: Date.now(), text: `${p.name} ${isEnter ? 'joined the Jam.' : 'left.'}`}];
-                  return newLogs.slice(-10); // Keep last 10 logs
+                  return newLogs.slice(-10);
               });
 
               channel.presence.get().then((result: any) => {
@@ -582,15 +664,8 @@ export default function MiniPlayer() {
                   setJamParticipants(members.map((m: any) => m.data));
               });
 
-              // Host deep syncs new user
               if (role === 'host' && isEnter && !p.isHost) {
-                  channel.publish('sync', {
-                      type: 'FULL_SYNC',
-                      song: currentTrackRef.current,
-                      isPlaying: isPlayingRef.current,
-                      time: audioRef.current?.currentTime || 0,
-                      timestamp: Date.now()
-                  });
+                  broadcastFullSync();
               }
           });
 
@@ -600,7 +675,6 @@ export default function MiniPlayer() {
               isHost: role === 'host'
           });
 
-          // Handle Action Events
           channel.subscribe('sync', (msg: any) => {
               const data = msg.data;
               
@@ -610,55 +684,65 @@ export default function MiniPlayer() {
                   return;
               }
 
-              if (data.type === 'FULL_SYNC') {
-                  if (data.song && data.song.id !== currentTrackRef.current?.id) {
-                      jamSyncDataRef.current = { time: data.time, timestamp: data.timestamp };
-                      isSystemSongChangeRef.current = true;
-                      setCurrentSong(data.song);
-                  } else if (audioRef.current) {
-                      const latency = (Date.now() - data.timestamp) / 1000;
-                      const target = data.time + (data.isPlaying ? latency : 0);
-                      if (Math.abs(audioRef.current.currentTime - target) > 0.5) {
-                          audioRef.current.currentTime = target;
-                          setCurrentTime(target);
-                      }
-                  }
-                  setIsPlaying(data.isPlaying);
-                  if (data.isPlaying && audioRef.current) {
-                      audioRef.current.play().catch(() => setJamPlayBlocked(true));
-                  }
-              } else if (data.type === 'SONG') {
-                  jamSyncDataRef.current = { time: 0, timestamp: Date.now() };
+              if (data.type === 'request_sync' && role === 'host') {
+                  broadcastFullSync();
+                  return;
+              }
+
+              if (data.type === 'FULL_SYNC' && role === 'guest') {
+                  const p = data.payload;
                   isSystemSongChangeRef.current = true;
-                  setCurrentSong(data.song);
-              } else if (data.type === 'STATE') {
-                  setIsPlaying(data.isPlaying);
-                  if (audioRef.current && !isVideoModeRef.current) {
-                      if (data.isPlaying) {
-                          const latency = data.timestamp ? (Date.now() - data.timestamp) / 1000 : 0;
-                          if (data.time !== undefined && Math.abs(audioRef.current.currentTime - (data.time + latency)) > 0.5) {
-                              audioRef.current.currentTime = data.time + latency;
-                          }
-                          audioRef.current.play().catch(()=>setJamPlayBlocked(true));
-                      } else {
-                          if (data.time !== undefined) audioRef.current.currentTime = data.time;
-                          audioRef.current.pause();
+                  
+                  setSongDetails(p.songDetails);
+                  setAudioUrl(p.audioUrl);
+                  setStreamBaseUrl(p.streamBaseUrl);
+                  setLyrics(p.lyrics);
+                  setSyncType(p.syncType);
+                  setCanvasData(p.canvasData);
+                  setYtVideoId(p.ytVideoId);
+                  setIsVideoMode(p.isVideoMode);
+                  
+                  if (p.song && p.song.id !== currentTrackRef.current?.id) {
+                      setCurrentSong(p.song);
+                  }
+
+                  setIsPlaying(p.isPlaying);
+                  
+                  if (audioRef.current && !p.isVideoMode) {
+                      const latency = (Date.now() - p.timestamp) / 1000;
+                      const target = p.time + (p.isPlaying ? latency : 0);
+                      audioRef.current.currentTime = target;
+                      setCurrentTime(target);
+                      if (p.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
+                      else audioRef.current.pause();
+                  }
+              } else if (data.type === 'HEARTBEAT' && role === 'guest') {
+                  const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
+                  if (data.trackId !== currentId) {
+                      channel.publish('request_sync', {});
+                      return;
+                  }
+
+                  const latency = (Date.now() - data.timestamp) / 1000;
+                  const target = data.time + (data.isPlaying ? latency : 0);
+
+                  if (data.isVideoMode !== isVideoModeRef.current) setIsVideoMode(data.isVideoMode);
+
+                  if (data.isPlaying !== isPlayingRef.current) {
+                      setIsPlaying(data.isPlaying);
+                      if (!data.isVideoMode && audioRef.current) {
+                          if (data.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
+                          else audioRef.current.pause();
                       }
                   }
-              } else if (data.type === 'TIME') {
-                  if (audioRef.current) {
-                      const latency = (Date.now() - data.timestamp) / 1000;
-                      const target = data.time + (isPlayingRef.current ? latency : 0);
-                      if (Math.abs(audioRef.current.currentTime - target) > 0.5) {
-                          audioRef.current.currentTime = target;
-                          setCurrentTime(target);
-                          syncPosition();
-                      }
+
+                  if (!data.isVideoMode && audioRef.current && Math.abs(audioRef.current.currentTime - target) > 0.5) {
+                      audioRef.current.currentTime = target;
+                      setCurrentTime(target);
                   }
               }
           });
 
-          // Fetch initial participants explicitly on connect
           setJamStatus('connected');
           const result = await channel.presence.get();
           const members = Array.isArray(result) ? result : (result.items || []);
@@ -669,22 +753,23 @@ export default function MiniPlayer() {
           setJamStatus('disconnected');
           setJamRole(null);
           setJamRoomId(null);
+          sessionStorage.removeItem(JAM_STORAGE_KEY);
           alert("Failed to connect to Jam server. Check Room ID.");
       }
-  };              
-          
+  };
+
   const createJamRoom = () => {
       const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
       setJamRoomId(newRoomId);
       setJamRole('host');
-      connectToAbly(newRoomId, 'host');
+      connectToAbly(newRoomId, 'host', jamName);
   };
 
   const joinJamRoom = () => {
       if (jamInputId.length < 6) return;
       setJamRoomId(jamInputId);
       setJamRole('guest');
-      connectToAbly(jamInputId, 'guest');
+      connectToAbly(jamInputId, 'guest', jamName);
   };
 
   const disconnectJam = () => {
@@ -693,6 +778,7 @@ export default function MiniPlayer() {
       }
       if (ablyChannelRef.current) ablyChannelRef.current.presence.leave();
       if (ablyClientRef.current) ablyClientRef.current.close();
+      
       ablyClientRef.current = null;
       ablyChannelRef.current = null;
       setJamStatus('disconnected');
@@ -700,26 +786,24 @@ export default function MiniPlayer() {
       setJamRoomId(null);
       setJamParticipants([]);
       setJamLogs([]);
+      sessionStorage.removeItem(JAM_STORAGE_KEY);
   };
 
+  // Restore Session on Refresh
   useEffect(() => {
-      return () => disconnectJam();
+      const session = sessionStorage.getItem(JAM_STORAGE_KEY);
+      if (session) {
+          try {
+              const { roomId, role, name } = JSON.parse(session);
+              if (roomId && role) {
+                  setJamRoomId(roomId);
+                  setJamRole(role);
+                  setJamName(name || '');
+                  connectToAbly(roomId, role, name || '');
+              }
+          } catch (e) {}
+      }
   }, []);
-
-  // Sync Collaborative Song Changes safely avoiding infinite loops
-  useEffect(() => {
-      if (isSystemSongChangeRef.current) {
-          isSystemSongChangeRef.current = false;
-          return;
-      }
-      if (jamStatus === 'connected' && ablyChannelRef.current && currentSong) {
-          ablyChannelRef.current.publish('sync', { 
-              type: 'SONG', 
-              song: currentSong,
-              timestamp: Date.now()
-          });
-      }
-  }, [currentSong?.id, currentSong?.track_id]);
 
   const customSmoothScroll = useCallback((container: HTMLElement, targetPos: number, duration: number) => {
       if ((container as any)._scrollRaf) cancelAnimationFrame((container as any)._scrollRaf);
@@ -894,7 +978,6 @@ export default function MiniPlayer() {
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      // Instantly call ayushvid search API natively with r.jina.ai!
       const data = await fetchJina(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
@@ -915,8 +998,16 @@ export default function MiniPlayer() {
 
   useEffect(() => {
     if (!currentSong) return;
-    let isCurrent = true;
     
+    // IF GUEST, BYPASS FETCHING. RELY ENTIRELY ON HOST PAYLOAD.
+    if (jamRole === 'guest' && jamStatus === 'connected') {
+        if (isSystemSongChangeRef.current) {
+            isSystemSongChangeRef.current = false;
+        }
+        return;
+    }
+
+    let isCurrent = true;
     const trackId = currentSong.track_id || currentSong.id || currentSong.entity_id;
     
     if (lastFetchedTrackIdRef.current === trackId) {
@@ -1220,12 +1311,13 @@ export default function MiniPlayer() {
     const newState = !isPlaying;
     setIsPlaying(newState);
     
-    // Broadcast State change to Jim Jam Room with Timestamp
-    if (jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', { 
-            type: 'STATE', 
+    if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
+        ablyChannelRef.current.publish('sync', {
+            type: 'HEARTBEAT',
+            trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
             isPlaying: newState,
-            time: audioRef.current?.currentTime || 0,
+            time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
+            isVideoMode: isVideoModeRef.current,
             timestamp: Date.now()
         });
     }
@@ -1237,7 +1329,7 @@ export default function MiniPlayer() {
     } else {
       if (newState) {
         const playPromise = audioRef.current?.play();
-        if (playPromise !== undefined) playPromise.catch(()=>{});
+        if (playPromise !== undefined) playPromise.catch(()=>setJamPlayBlocked(true));
       } else audioRef.current?.pause();
     }
   };
@@ -1251,7 +1343,7 @@ export default function MiniPlayer() {
         const safeTime = (audioDur > 0 && currentTime > audioDur) ? audioDur - 2 : currentTime;
         audioRef.current.currentTime = safeTime; setCurrentTime(safeTime);
         const playPromise = audioRef.current.play();
-        if (playPromise !== undefined) playPromise.catch(()=>{});
+        if (playPromise !== undefined) playPromise.catch(()=>setJamPlayBlocked(true));
         setIsPlaying(true);
       }
       return;
@@ -1266,7 +1358,7 @@ export default function MiniPlayer() {
     if (audioRef.current) audioRef.current.pause(); setIsPlaying(false);
     const newVid = await prefetchVideoId(displayTitle, displayArtists); 
     if (newVid) { setYtVideoId(newVid); setIsVideoMode(true); } 
-    else if (audioRef.current) { audioRef.current.play().catch(()=>{}); setIsPlaying(true); }
+    else if (audioRef.current) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); setIsPlaying(true); }
     setIsVideoLoading(false);
   };
 
@@ -1314,7 +1406,7 @@ export default function MiniPlayer() {
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
     
     if (repeatMode === 2 && audioRef.current) { 
-      audioRef.current.currentTime = 0; setRepeatMode(0); const p = audioRef.current.play(); if (p!==undefined) p.catch(()=>{}); return; 
+      audioRef.current.currentTime = 0; setRepeatMode(0); const p = audioRef.current.play(); if (p!==undefined) p.catch(()=>setJamPlayBlocked(true)); return; 
     }
     if (isShuffle && upcomingQueue.length > 0) {
       const randomIdx = Math.floor(Math.random() * upcomingQueue.length); const nextSong = upcomingQueue[randomIdx];
@@ -1362,7 +1454,7 @@ export default function MiniPlayer() {
        navigator.mediaSession.setActionHandler('play', () => {
           setIsPlaying(true); navigator.mediaSession.playbackState = 'playing';
           if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
-          else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
+          else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
        });
        navigator.mediaSession.setActionHandler('pause', () => {
           setIsPlaying(false); navigator.mediaSession.playbackState = 'paused';
@@ -1524,11 +1616,13 @@ export default function MiniPlayer() {
     isSeekingRef.current = false;
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
     
-    // Broadcast Time to Jim Jam natively correcting Latency Drift
-    if (jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', { 
-            type: 'TIME', 
+    if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
+        ablyChannelRef.current.publish('sync', {
+            type: 'HEARTBEAT',
+            trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+            isPlaying: isPlayingRef.current,
             time: newTime,
+            isVideoMode: isVideoModeRef.current,
             timestamp: Date.now()
         });
     }
@@ -1538,7 +1632,7 @@ export default function MiniPlayer() {
       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
     } else if (audioRef.current && duration > 0) {
       audioRef.current.currentTime = newTime; syncPosition();
-      if (isPlaying) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
+      if (isPlaying) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
     }
   };
 
@@ -2009,28 +2103,11 @@ const downloadLrcFile = () => {
         .lyric-word-sync { background: linear-gradient(to right, #ffffff calc(var(--p, 0%) - 15%), rgba(255,255,255,0.2) var(--p, 0%)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; color: transparent; will-change: background; transform: translateZ(0); }
       `}} />
 
-      {/* --- JAM AUTOPLAY BYPASS UI --- */}
-      {jamPlayBlocked && (
-         <div className="fixed top-12 left-0 right-0 z-[100000] flex justify-center pointer-events-none">
-             <button onClick={() => { audioRef.current?.play(); setJamPlayBlocked(false); }} className="bg-[#1db954] text-black font-extrabold px-6 py-3 rounded-full shadow-2xl animate-bounce pointer-events-auto flex items-center gap-2">
-                 <Radio size={20} className="animate-pulse" /> Tap to Sync Jam Audio
-             </button>
-         </div>
-      )}
-
       <audio 
         ref={audioRef} autoPlay={isPlaying && !isVideoMode} onEnded={playNext} onTimeUpdate={handleTimeUpdate} crossOrigin="anonymous" 
         onLoadedMetadata={() => { 
            const dur = audioRef.current?.duration || 0; setDuration(dur); 
-           if (jamSyncDataRef.current) {
-               const latency = (Date.now() - jamSyncDataRef.current.timestamp) / 1000;
-               const target = jamSyncDataRef.current.time + (isPlayingRef.current ? latency : 0);
-               audioRef.current!.currentTime = target;
-               setCurrentTime(target);
-               jamSyncDataRef.current = null;
-           } else if (restoreTimeRef.current !== null && restoreTimeRef.current > 0) { 
-               audioRef.current!.currentTime = restoreTimeRef.current; setCurrentTime(restoreTimeRef.current); restoreTimeRef.current = null; 
-           } 
+           if (restoreTimeRef.current !== null && restoreTimeRef.current > 0) { audioRef.current!.currentTime = restoreTimeRef.current; setCurrentTime(restoreTimeRef.current); restoreTimeRef.current = null; } 
            syncPosition();
         }} 
       />
