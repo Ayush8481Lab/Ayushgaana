@@ -1,4 +1,5 @@
 
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -11,7 +12,7 @@ import {
   Play, Pause, SkipForward, SkipBack, Loader2, ChevronDown, 
   MoreHorizontal, Shuffle, Repeat, Heart, ListMusic, 
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles,
-  Users, LogOut, Copy, Radio, Activity
+  Users, LogOut, Copy, Radio, Activity, ShieldUser, Crown
 } from "lucide-react";
 
 // --- VERCEL PROTECTION BYPASS ENGINE ---
@@ -322,6 +323,7 @@ const loadHlsJS = (): Promise<any> => new Promise((resolve, reject) => {
     document.head.appendChild(script);
 });
 
+// Dynamic CDN Loader for Ably API
 const loadAblyJS = (): Promise<any> => new Promise((resolve, reject) => {
     if ((window as any).Ably) return resolve((window as any).Ably);
     const script = document.createElement('script');
@@ -393,12 +395,17 @@ SongDnaCard.displayName = 'SongDnaCard';
 
 
 export default function MiniPlayer() {
+  // Safe extraction for robust context mapping
+  const appContext = useAppContext() as any;
   const { 
     currentSong, isPlaying, setIsPlaying, setCurrentSong, 
     queue, upcomingQueue, setUpcomingQueue, historyQueue, setHistoryQueue,
     playContext, likedSongs, toggleLikeSong 
-  } = useAppContext();
+  } = appContext;
   
+  const setQueue = appContext.setQueue;
+  const setPlayContext = appContext.setPlayContext;
+
   const[audioUrl, setAudioUrl] = useState("");
   const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
   const[loading, setLoading] = useState(false);
@@ -413,32 +420,46 @@ export default function MiniPlayer() {
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
 
-  // --- JIM JAM CORE STATE ENGINE ---
+  // --- JIM JAM CORE STATE ENGINE (HOST IS SOURCE OF TRUTH) ---
   const JAM_STORAGE_KEY = 'jim_jam_session';
   const [showJamMenu, setShowJamMenu] = useState(false);
   const [jamRoomId, setJamRoomId] = useState<string | null>(null);
   const [jamRole, setJamRole] = useState<'host' | 'guest' | null>(null);
+  const [jamMyClientId, setJamMyClientId] = useState<string>('');
   const [jamInputId, setJamInputId] = useState("");
   const [jamName, setJamName] = useState("");
   const [jamStatus, setJamStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const [jamParticipants, setJamParticipants] = useState<any[]>([]);
   const [jamLogs, setJamLogs] = useState<any[]>([]);
   const [jamPlayBlocked, setJamPlayBlocked] = useState(false);
+  
+  const [jamAdmins, setJamAdmins] = useState<string[]>([]);
+  const [jamAllAdmins, setJamAllAdmins] = useState(false);
 
+  // Refs for stable callbacks
   const ablyClientRef = useRef<any>(null);
   const ablyChannelRef = useRef<any>(null);
   const isPlayingRef = useRef(isPlaying);
   const jamRoleRef = useRef(jamRole);
+  const jamAdminsRef = useRef(jamAdmins);
+  const jamAllAdminsRef = useRef(jamAllAdmins);
   const jamPlayBlockedRef = useRef(jamPlayBlocked);
   const isSystemSongChangeRef = useRef(false);
   
-  // High-performance payload broadcast tracking
   const songStartTrackingRef = useRef<number>(Date.now());
   const lastFetchedTrackIdRef = useRef<string | null>(null);
   
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { jamRoleRef.current = jamRole; }, [jamRole]);
+  useEffect(() => { jamAdminsRef.current = jamAdmins; }, [jamAdmins]);
+  useEffect(() => { jamAllAdminsRef.current = jamAllAdmins; }, [jamAllAdmins]);
   useEffect(() => { jamPlayBlockedRef.current = jamPlayBlocked; }, [jamPlayBlocked]);
+
+  const isAdminRef = useRef(false);
+  useEffect(() => { isAdminRef.current = jamAllAdmins || jamAdmins.includes(jamMyClientId); }, [jamAllAdmins, jamAdmins, jamMyClientId]);
+
+  // Lock listeners from all interactions if they aren't Admins
+  const isGuestLocked = jamRole === 'guest' && jamStatus === 'connected' && !isAdminRef.current;
 
   const[dominantColor, setDominantColor] = useState("rgb(83, 83, 83)");
   const[isScrolledPastMain, setIsScrolledPastMain] = useState(false);
@@ -482,6 +503,7 @@ export default function MiniPlayer() {
   const playNextRef = useRef<() => void>(() => {});
   const playPrevRef = useRef<() => void>(() => {});
   const isVideoModeRef = useRef<boolean>(false);
+  const toggleVideoModeRef = useRef<() => void>(() => {});
   const[swipeX, setSwipeX] = useState(0);
   const touchStartX = useRef(0);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -523,6 +545,9 @@ export default function MiniPlayer() {
   const syncTypeRef = useRef(syncType);
   const canvasDataRef = useRef(canvasData);
   const ytVideoIdRef = useRef(ytVideoId);
+  const queueRef = useRef(queue);
+  const upcomingQueueRef = useRef(upcomingQueue);
+  const playContextRef = useRef(playContext);
 
   useEffect(() => { songDetailsRef.current = songDetails; }, [songDetails]);
   useEffect(() => { audioUrlRef.current = audioUrl; }, [audioUrl]);
@@ -531,6 +556,9 @@ export default function MiniPlayer() {
   useEffect(() => { syncTypeRef.current = syncType; }, [syncType]);
   useEffect(() => { canvasDataRef.current = canvasData; }, [canvasData]);
   useEffect(() => { ytVideoIdRef.current = ytVideoId; }, [ytVideoId]);
+  useEffect(() => { queueRef.current = queue; }, [queue]);
+  useEffect(() => { upcomingQueueRef.current = upcomingQueue; }, [upcomingQueue]);
+  useEffect(() => { playContextRef.current = playContext; }, [playContext]);
 
   const[dlState, setDlState] = useState<{type: "music" | "video" | null, status: string, options?: any[], progress?: number, packStep?: string, server?: number}>({type: null, status: "idle", progress: 0, server: 1});
 
@@ -538,8 +566,6 @@ export default function MiniPlayer() {
   const handleLikeClick = (e: any) => { e.stopPropagation(); toggleLikeSong(currentSong); };
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen;
-  
-  const isGuestLocked = jamRole === 'guest' && jamStatus === 'connected';
 
   // --- SILENT AUTOPLAY BYPASS ---
   useEffect(() => {
@@ -563,6 +589,7 @@ export default function MiniPlayer() {
       if (jamRoleRef.current !== 'host' || !ablyChannelRef.current) return;
       ablyChannelRef.current.publish('sync', {
           type: 'FULL_SYNC',
+          actionTs: Date.now(),
           payload: {
               song: currentTrackRef.current,
               songDetails: songDetailsRef.current,
@@ -574,7 +601,10 @@ export default function MiniPlayer() {
               isVideoMode: isVideoModeRef.current,
               ytVideoId: ytVideoIdRef.current,
               isPlaying: isPlayingRef.current,
-              time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0)
+              time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
+              queue: queueRef.current,
+              upcomingQueue: upcomingQueueRef.current,
+              playContext: playContextRef.current
           }
       });
   }, []);
@@ -591,16 +621,19 @@ export default function MiniPlayer() {
           const interval = setInterval(() => {
               if (!ablyChannelRef.current) return;
               
-              // Beam metadata for 20 seconds to guarantee perfect async payload loading on Guests
+              // Beam metadata for 20 seconds to guarantee perfect async payload loading
               const timeSinceStart = Date.now() - (songStartTrackingRef.current || 0);
               const shouldCarry = timeSinceStart < 20000;
 
               ablyChannelRef.current.publish('sync', {
                   type: 'HEARTBEAT',
+                  actionTs: Date.now(),
                   trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
                   isPlaying: isPlayingRef.current,
                   time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
                   isVideoMode: isVideoModeRef.current,
+                  jamAdmins: jamAdminsRef.current,
+                  jamAllAdmins: jamAllAdminsRef.current,
                   carryPayload: shouldCarry ? {
                       audioUrl: audioUrlRef.current,
                       streamBaseUrl: streamBaseUrlRef.current,
@@ -608,13 +641,31 @@ export default function MiniPlayer() {
                       syncType: syncTypeRef.current,
                       canvasData: canvasDataRef.current,
                       songDetails: songDetailsRef.current,
-                      ytVideoId: ytVideoIdRef.current
+                      ytVideoId: ytVideoIdRef.current,
+                      queue: queueRef.current,
+                      upcomingQueue: upcomingQueueRef.current,
+                      playContext: playContextRef.current
                   } : null
               });
           }, 2000);
           return () => clearInterval(interval);
       }
   }, [jamRole, jamStatus]);
+
+  // --- GUEST METADATA NEGOTIATOR ---
+  useEffect(() => {
+      let interval: any;
+      if (jamRole === 'guest' && jamStatus === 'connected' && currentSong) {
+          interval = setInterval(() => {
+              if (!lyricsRef.current?.length || !canvasDataRef.current) {
+                  ablyChannelRef.current?.publish('sync', { type: 'REQUEST_METADATA', trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id });
+              } else {
+                  clearInterval(interval);
+              }
+          }, 3000);
+      }
+      return () => clearInterval(interval);
+  }, [currentSong, jamStatus, jamRole]);
 
   // --- JIM JAM CONNECTION LOGIC ---
   const connectToAbly = async (roomId: string, role: 'host' | 'guest', customName: string) => {
@@ -624,6 +675,7 @@ export default function MiniPlayer() {
           const ABLY_KEY: string = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
           
           const clientId = 'jam_' + Math.random().toString(36).substr(2, 9);
+          setJamMyClientId(clientId);
           const ably = new Ably.Realtime.Promise({ key: ABLY_KEY, clientId });
           
           ably.connection.on('failed', () => {
@@ -672,16 +724,15 @@ export default function MiniPlayer() {
 
               channel.presence.get().then((result: any) => {
                   const members = Array.isArray(result) ? result : (result.items || []);
-                  setJamParticipants(members.map((m: any) => m.data));
+                  setJamParticipants(members.map((m: any) => ({ clientId: m.clientId, ...m.data })));
               });
 
-              if (role === 'host' && isEnter && !p.isHost) {
+              if (jamRoleRef.current === 'host' && isEnter && !p.isHost) {
                   broadcastFullSync();
               }
           });
 
           await channel.presence.enter({
-              clientId,
               name: defaultName,
               isHost: role === 'host'
           });
@@ -697,14 +748,77 @@ export default function MiniPlayer() {
                   return;
               }
 
-              // HOST LOGIC
+              // --- HOST LOGIC ---
               if (currentRole === 'host') {
                   if (data.type === 'request_sync') broadcastFullSync();
+                  
+                  if (data.type === 'REQUEST_METADATA') {
+                      const timeSinceStart = Date.now() - (songStartTrackingRef.current || 0);
+                      const definitivelyNoMetadata = timeSinceStart > 5000 && (!lyricsRef.current?.length || !canvasDataRef.current);
+                      
+                      if (lyricsRef.current?.length || canvasDataRef.current || definitivelyNoMetadata) {
+                          channel.publish('sync', {
+                              type: 'METADATA_RESPONSE',
+                              trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+                              lyrics: lyricsRef.current,
+                              canvasData: canvasDataRef.current,
+                              syncType: syncTypeRef.current,
+                              definitivelyNone: definitivelyNoMetadata
+                          });
+                      }
+                  }
+
+                  if (data.type === 'ADMIN_ACTION') {
+                      if (data.action === 'STATE') {
+                          setIsPlaying(data.isPlaying);
+                          if (audioRef.current) {
+                              if (data.isPlaying) audioRef.current.play().catch(()=>{});
+                              else audioRef.current.pause();
+                          }
+                          if (videoIframeRef.current?.contentWindow) {
+                              videoIframeRef.current.contentWindow.postMessage({ type: data.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
+                          }
+                          channel.publish('sync', { type: 'STATE', actionTs: Date.now(), isPlaying: data.isPlaying, time: audioRef.current?.currentTime || 0, isVideoMode: isVideoModeRef.current });
+                      } else if (data.action === 'TIME') {
+                          if (audioRef.current) audioRef.current.currentTime = data.time;
+                          if (videoIframeRef.current?.contentWindow) {
+                              videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: data.time }, '*');
+                          }
+                          channel.publish('sync', { type: 'TIME', actionTs: Date.now(), time: data.time, isVideoMode: isVideoModeRef.current });
+                      } else if (data.action === 'PLAY_NEXT') {
+                          playNextRef.current();
+                      } else if (data.action === 'PLAY_PREV') {
+                          playPrevRef.current();
+                      } else if (data.action === 'TOGGLE_VIDEO') {
+                          if (toggleVideoModeRef.current) toggleVideoModeRef.current(); 
+                      } else if (data.action === 'CHANGE_SONG') {
+                          setCurrentSong(data.song);
+                          if (data.upcomingQueue) setUpcomingQueue(data.upcomingQueue);
+                      }
+                  }
                   return;
               }
 
-              // GUEST LOGIC: Pure Synchronization Engine (+0.6s offset perfectly implemented)
+              // --- GUEST LOGIC ---
               if (currentRole === 'guest') {
+                  if (data.type === 'TRANSFER_HOST') {
+                      if (data.newHostId === jamMyClientId) {
+                          setJamRole('host');
+                          sessionStorage.setItem(JAM_STORAGE_KEY, JSON.stringify({ roomId: jamRoomId, role: 'host', name: jamName }));
+                          channel.presence.update({ isHost: true });
+                      }
+                  }
+
+                  if (data.type === 'METADATA_RESPONSE') {
+                      const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
+                      if (data.trackId === currentId) {
+                          if (data.lyrics && data.lyrics.length > 0) setLyrics(data.lyrics);
+                          if (data.canvasData) setCanvasData(data.canvasData);
+                          if (data.syncType) setSyncType(data.syncType);
+                          if (data.definitivelyNone) setIsCanvasLoaded(true);
+                      }
+                  }
+
                   if (data.type === 'FULL_SYNC') {
                       const p = data.payload;
                       isSystemSongChangeRef.current = true;
@@ -717,10 +831,20 @@ export default function MiniPlayer() {
                       setCanvasData(p.canvasData);
                       setYtVideoId(p.ytVideoId);
                       
+                      if (p.queue && setQueue) setQueue(p.queue);
+                      if (p.upcomingQueue) setUpcomingQueue(p.upcomingQueue);
+                      if (p.playContext && setPlayContext) setPlayContext(p.playContext);
+
                       if (p.isVideoMode !== isVideoModeRef.current) setIsVideoMode(p.isVideoMode);
 
+                      // Strict Latency Fix: (Current - ActionTs) + 0.6s 
                       let targetTime = p.time;
-                      if (p.isPlaying) targetTime += 0.6; // +0.6s Analysis Offset
+                      if (p.isPlaying && data.actionTs) {
+                          let diff = (Date.now() - data.actionTs) / 1000;
+                          if (diff < 0 || diff > 5) diff = 0.2; // Fallback safety bounds
+                          targetTime += (diff + 0.6);
+                      } else if (p.isPlaying) targetTime += 0.6;
+                      
                       iframeInitialTimeRef.current = targetTime;
 
                       if (p.song && p.song.id !== currentTrackRef.current?.id) {
@@ -744,6 +868,9 @@ export default function MiniPlayer() {
                               channel.publish('request_sync', {});
                               return;
                           }
+                          if (data.jamAdmins !== undefined) setJamAdmins(data.jamAdmins);
+                          if (data.jamAllAdmins !== undefined) setJamAllAdmins(data.jamAllAdmins);
+
                           if (data.carryPayload) {
                               const cp = data.carryPayload;
                               if (cp.audioUrl && cp.audioUrl !== audioUrlRef.current) setAudioUrl(cp.audioUrl);
@@ -753,6 +880,9 @@ export default function MiniPlayer() {
                               if (cp.canvasData && cp.canvasData.canvasUrl !== canvasDataRef.current?.canvasUrl) setCanvasData(cp.canvasData);
                               if (cp.songDetails && !songDetailsRef.current) setSongDetails(cp.songDetails);
                               if (cp.ytVideoId && cp.ytVideoId !== ytVideoIdRef.current) setYtVideoId(cp.ytVideoId);
+                              if (cp.queue && cp.queue.length !== queueRef.current?.length && setQueue) setQueue(cp.queue);
+                              if (cp.upcomingQueue && cp.upcomingQueue.length !== upcomingQueueRef.current?.length) setUpcomingQueue(cp.upcomingQueue);
+                              if (cp.playContext && cp.playContext.name !== playContextRef.current?.name && setPlayContext) setPlayContext(cp.playContext);
                           }
                       }
 
@@ -760,8 +890,13 @@ export default function MiniPlayer() {
                           setIsVideoMode(data.isVideoMode);
                       }
 
+                      // Strict Latency Fix: (Current - ActionTs) + 0.6s
                       let targetTime = data.time;
-                      if (data.isPlaying) targetTime += 0.6; // +0.6s Analysis Offset
+                      if (data.isPlaying && data.actionTs) {
+                          let diff = (Date.now() - data.actionTs) / 1000;
+                          if (diff < 0 || diff > 5) diff = 0.2; // Fallback safety bounds
+                          targetTime += (diff + 0.6);
+                      } else if (data.isPlaying) targetTime += 0.6;
                       
                       if (data.isVideoMode || isVideoModeRef.current) {
                           if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && Math.abs(videoStartTimeRef.current - targetTime) > 2.5)) {
@@ -795,7 +930,7 @@ export default function MiniPlayer() {
           setJamStatus('connected');
           const result = await channel.presence.get();
           const members = Array.isArray(result) ? result : (result.items || []);
-          setJamParticipants(members.map((m: any) => m.data));
+          setJamParticipants(members.map((m: any) => ({ clientId: m.clientId, ...m.data })));
 
       } catch (e) {
           console.error("Jam Connect Error:", e);
@@ -835,9 +970,39 @@ export default function MiniPlayer() {
       setJamRoomId(null);
       setJamParticipants([]);
       setJamLogs([]);
+      setJamAdmins([]);
+      setJamAllAdmins(false);
       sessionStorage.removeItem(JAM_STORAGE_KEY);
   };
 
+  const transferHost = (targetClientId: string) => {
+      if (ablyChannelRef.current && jamRole === 'host') {
+          ablyChannelRef.current.publish('sync', { type: 'TRANSFER_HOST', newHostId: targetClientId });
+          setJamRole('guest');
+          sessionStorage.setItem(JAM_STORAGE_KEY, JSON.stringify({ roomId: jamRoomId, role: 'guest', name: jamName }));
+          ablyChannelRef.current.presence.update({ isHost: false });
+      }
+  };
+
+  const toggleAdmin = (targetClientId: string) => {
+      if (jamRole === 'host') {
+          setJamAdmins(prev => {
+              const next = prev.includes(targetClientId) ? prev.filter(id => id !== targetClientId) : [...prev, targetClientId];
+              if (ablyChannelRef.current) ablyChannelRef.current.publish('sync', { type: 'HEARTBEAT', jamAdmins: next, jamAllAdmins });
+              return next;
+          });
+      }
+  };
+
+  const toggleAllAdmins = () => {
+      if (jamRole === 'host') {
+          const nextState = !jamAllAdmins;
+          setJamAllAdmins(nextState);
+          if (ablyChannelRef.current) ablyChannelRef.current.publish('sync', { type: 'HEARTBEAT', jamAdmins, jamAllAdmins: nextState });
+      }
+  };
+
+  // Restore Session on Refresh
   useEffect(() => {
       const session = sessionStorage.getItem(JAM_STORAGE_KEY);
       if (session) {
@@ -1048,16 +1213,13 @@ export default function MiniPlayer() {
     if (!currentSong) return;
     songStartTrackingRef.current = Date.now();
     
-    // GUEST BYPASS: Guest Cannot Make API calls or explicitly route song selections.
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') {
+    // GUEST BYPASS: Never fetch APIs if not Host or Admin
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && !isAdminRef.current) {
         if (!isSystemSongChangeRef.current) {
-            // Revert track UI immediately to respect Host locks
             setCurrentSong(currentTrackRef.current);
         } else {
             isSystemSongChangeRef.current = false;
             currentTrackRef.current = currentSong;
-
-            // Deep purge of local properties to guarantee Canvas builds appropriately
             setYtVideoId(currentSong.ytVideoId || null);
             setSpotifyId(null); setSpotifyUrl(null); setLyrics([]); setSyncType(null); setCanvasData(null);
             setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
@@ -1370,7 +1532,13 @@ export default function MiniPlayer() {
 
   const handlePlayPauseToggle = (e?: any) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
+    
+    // Admins Route Action
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && isAdminRef.current) {
+        ablyChannelRef.current?.publish('sync', { type: 'ADMIN_ACTION', action: 'STATE', isPlaying: !isPlayingRef.current });
+        return;
+    }
+    if (isGuestLocked) return;
     
     const newState = !isPlaying;
     setIsPlaying(newState);
@@ -1378,6 +1546,7 @@ export default function MiniPlayer() {
     if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
         ablyChannelRef.current.publish('sync', {
             type: 'STATE',
+            actionTs: Date.now(),
             isPlaying: newState,
             time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
             isVideoMode: isVideoModeRef.current
@@ -1398,7 +1567,11 @@ export default function MiniPlayer() {
 
   const toggleVideoMode = async (e?: React.MouseEvent) => {
     if (e && e.stopPropagation) e.stopPropagation();
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && isAdminRef.current) {
+        ablyChannelRef.current?.publish('sync', { type: 'ADMIN_ACTION', action: 'TOGGLE_VIDEO' });
+        return;
+    }
+    if (isGuestLocked) return;
 
     if (isVideoMode) {
       setIsVideoMode(false);
@@ -1425,6 +1598,7 @@ export default function MiniPlayer() {
     else if (audioRef.current) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); setIsPlaying(true); }
     setIsVideoLoading(false);
   };
+  useEffect(() => { toggleVideoModeRef.current = toggleVideoMode; }, [isVideoMode, ytVideoId, displayTitle, displayArtists]);
 
   useEffect(() => {
     if (!displayImage || displayImage.includes('via.placeholder.com')) {
@@ -1466,7 +1640,11 @@ export default function MiniPlayer() {
   },[isPlaying, isScrolledPastMain, isCanvasLoaded, isExpanded, showQueue, isVideoMode, isLyricsFullScreen, isCanvasEnabled, canvasData]);
 
   const playNext = () => {
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && isAdminRef.current) {
+        ablyChannelRef.current?.publish('sync', { type: 'ADMIN_ACTION', action: 'PLAY_NEXT' }); return;
+    }
+    if (isGuestLocked) return;
+
     if (sleepTimer === 'end') { setIsPlaying(false); setSleepTimer(null); if (audioRef.current) audioRef.current.pause(); return; }
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
     
@@ -1486,7 +1664,11 @@ export default function MiniPlayer() {
   };
 
   const playPrev = () => {
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && isAdminRef.current) {
+        ablyChannelRef.current?.publish('sync', { type: 'ADMIN_ACTION', action: 'PLAY_PREV' }); return;
+    }
+    if (isGuestLocked) return;
+
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
     if (audioRef.current && audioRef.current.currentTime > 3) { audioRef.current.currentTime = 0; return; }
     if (historyQueue.length > 0) {
@@ -1662,17 +1844,21 @@ export default function MiniPlayer() {
   },[activeLyricIndex, isLyricsFullScreen, isExpanded, customSmoothScroll]);
 
   const handleLyricClick = (time: number) => {
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && isAdminRef.current) {
+        ablyChannelRef.current?.publish('sync', { type: 'ADMIN_ACTION', action: 'TIME', time }); return;
+    }
+    if (isGuestLocked) return;
+
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: time }, '*');
     else if (audioRef.current && duration > 0) { audioRef.current.currentTime = time; setCurrentTime(time); syncPosition(); }
   };
 
   const handleSeekStart = (e?: any) => { 
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') { if (e?.preventDefault) e.preventDefault(); return; }
+    if (isGuestLocked && !isAdminRef.current) { if (e?.preventDefault) e.preventDefault(); return; }
     isSeekingRef.current = true; 
   };
   const handleSeekChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
+    if (isGuestLocked && !isAdminRef.current) return;
     const val = parseFloat(e.target.value); setProgress(val);
     const newTime = (val / 100) * duration; setCurrentTime(newTime);
     if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0) {
@@ -1684,12 +1870,18 @@ export default function MiniPlayer() {
   };
 
   const handleSeekEnd = (e: React.SyntheticEvent<HTMLInputElement>) => {
-    if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
+    if (isGuestLocked && !isAdminRef.current) return;
     isSeekingRef.current = false;
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
     
+    if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && isAdminRef.current) {
+        ablyChannelRef.current?.publish('sync', { type: 'ADMIN_ACTION', action: 'TIME', time: newTime });
+        if (audioRef.current && !isVideoModeRef.current) audioRef.current.currentTime = newTime;
+        return;
+    }
+
     if (jamRoleRef.current === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
-        ablyChannelRef.current.publish('sync', { type: 'TIME', time: newTime, isVideoMode: isVideoModeRef.current });
+        ablyChannelRef.current.publish('sync', { type: 'TIME', actionTs: Date.now(), time: newTime, isVideoMode: isVideoModeRef.current });
     }
 
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
@@ -2128,7 +2320,13 @@ const downloadLrcFile = () => {
 
           <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0" onClick={() => { 
              if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]); return; }
+             
+             if (jamRoleRef.current === 'guest' && jamStatus === 'connected' && isAdminRef.current) {
+                 ablyChannelRef.current?.publish('sync', { type: 'ADMIN_ACTION', action: 'CHANGE_SONG', song: track, upcomingQueue: upcomingQueue.filter((_: any, i: number) => i !== index) });
+                 return;
+             }
              if (isGuestLocked) return;
+
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
           }}>
             <div className="w-[44px] h-[44px] flex-shrink-0 rounded-[4px] bg-[#282828] overflow-hidden"><img draggable={false} src={getImageUrl(track) || "https://via.placeholder.com/150"} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" /></div>
@@ -2420,7 +2618,12 @@ const downloadLrcFile = () => {
                             </div>
                         ) : (
                             <div className="flex flex-col items-center gap-4 w-full">
-                                <div className="bg-[#181818] border border-white/5 shadow-inner rounded-2xl w-full p-4 flex flex-col items-center gap-1">
+                                <div className="bg-[#181818] border border-white/5 shadow-inner rounded-2xl w-full p-4 flex flex-col items-center gap-1 relative overflow-hidden">
+                                    {jamRole === 'host' && (
+                                        <button onClick={toggleAllAdmins} className={`absolute top-3 right-3 p-1.5 rounded-md border transition-colors ${jamAllAdmins ? 'bg-[#1db954]/20 border-[#1db954]/50 text-[#1db954]' : 'bg-white/5 border-white/10 text-white/50 hover:text-white'}`} title={jamAllAdmins ? "Revoke Admin from All" : "Make All Participants Admin"}>
+                                            <ShieldUser size={16} />
+                                        </button>
+                                    )}
                                     <p className="text-[#1db954] text-[10px] font-bold uppercase tracking-widest flex items-center gap-1">
                                         <span className="w-2 h-2 rounded-full bg-[#1db954] animate-pulse"></span> Live Room
                                     </p>
@@ -2430,16 +2633,41 @@ const downloadLrcFile = () => {
                                 
                                 <div className="w-full flex flex-col gap-2 mt-2">
                                     <span className="text-white/50 text-[10px] font-bold uppercase tracking-widest ml-1 flex justify-between">Participants <span>{jamParticipants.length} Online</span></span>
-                                    <div className="flex flex-col gap-2 max-h-32 overflow-y-auto scrollbar-hide">
-                                        {jamParticipants.map((p, i) => (
-                                            <div key={i} className="flex items-center justify-between bg-white/5 p-3 rounded-xl border border-white/5">
-                                                <div className="flex items-center gap-3">
-                                                    <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${p.isHost ? 'bg-[#1db954]/20 text-[#1db954]' : 'bg-white/10 text-white'}`}>{p.name.charAt(0).toUpperCase()}</div>
-                                                    <span className="text-white font-bold text-sm">{p.name}</span>
+                                    <div className="flex flex-col gap-2 max-h-40 overflow-y-auto scrollbar-hide pr-1">
+                                        {jamParticipants.map((p, i) => {
+                                            const isMe = p.clientId === jamMyClientId;
+                                            const isParticipantHost = p.isHost;
+                                            const isParticipantAdmin = jamAllAdmins || jamAdmins.includes(p.clientId);
+
+                                            return (
+                                                <div key={i} className="flex items-center justify-between bg-white/5 p-3 rounded-xl border border-white/5 hover:bg-white/10 transition-colors group">
+                                                    <div className="flex items-center gap-3">
+                                                        <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${isParticipantHost ? 'bg-[#1db954]/20 text-[#1db954]' : 'bg-white/10 text-white'}`}>{p.name.charAt(0).toUpperCase()}</div>
+                                                        <div className="flex flex-col">
+                                                            <span className="text-white font-bold text-sm flex items-center gap-2">
+                                                                {p.name} {isMe && <span className="text-[10px] text-white/30 font-medium tracking-wide">(You)</span>}
+                                                            </span>
+                                                            <div className="flex items-center gap-1 mt-0.5">
+                                                                {isParticipantHost && <span className="text-[#1db954] text-[9px] font-black uppercase tracking-widest">Host</span>}
+                                                                {!isParticipantHost && isParticipantAdmin && <span className="text-[#3b82f6] text-[9px] font-black uppercase tracking-widest">Admin</span>}
+                                                                {!isParticipantHost && !isParticipantAdmin && <span className="text-white/40 text-[9px] font-black uppercase tracking-widest">Listener</span>}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                    
+                                                    {jamRole === 'host' && !isParticipantHost && (
+                                                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                            <button onClick={() => toggleAdmin(p.clientId)} className={`p-1.5 rounded-md transition-colors ${isParticipantAdmin ? 'bg-[#3b82f6]/20 text-[#3b82f6]' : 'bg-white/10 text-white/60 hover:text-white hover:bg-white/20'}`} title="Toggle Admin">
+                                                                <ShieldUser size={14} />
+                                                            </button>
+                                                            <button onClick={() => transferHost(p.clientId)} className="p-1.5 rounded-md bg-white/10 text-[#1db954] hover:bg-[#1db954] hover:text-black transition-colors" title="Make Host">
+                                                                <Crown size={14} />
+                                                            </button>
+                                                        </div>
+                                                    )}
                                                 </div>
-                                                {p.isHost && <span className="text-[#1db954] text-[10px] font-black uppercase tracking-widest bg-[#1db954]/10 px-2 py-1 rounded">Host</span>}
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 </div>
 
@@ -2657,7 +2885,7 @@ const downloadLrcFile = () => {
             {isQueueEditMode ? (
                <button onClick={() => { setIsQueueEditMode(false); setSelectedQueueItems([]); }} className="text-[14px] font-bold text-[#1db954] active:opacity-50">Done</button>
             ) : (
-               <button onClick={() => setIsQueueEditMode(true)} className="text-[14px] font-medium text-white/80 active:opacity-50">Edit</button>
+               <button onClick={() => setIsQueueEditMode(true)} className={`text-[14px] font-medium text-white/80 active:opacity-50 ${isGuestLocked ? 'hidden' : ''}`}>Edit</button>
             )}
           </div>
           
@@ -2696,8 +2924,8 @@ const downloadLrcFile = () => {
                 </div>
             ) : (
                 <>
-                    <div className="flex flex-col items-center gap-1 active:opacity-50 cursor-pointer" onClick={() => setIsShuffle(!isShuffle)}><Shuffle size={24} className={isShuffle ? 'text-[#1db954]' : 'text-white/70'} /><span className={`text-[11px] font-medium ${isShuffle ? 'text-[#1db954]' : 'text-white/70'}`}>Shuffle</span></div>
-                    <div className="flex flex-col items-center gap-1 active:opacity-50 cursor-pointer" onClick={() => setRepeatMode((prev) => (prev + 1) % 3)}><div className="relative"><Repeat size={24} className={repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</div><span className={`text-[11px] font-medium ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}>Repeat</span></div>
+                    <div className={`flex flex-col items-center gap-1 active:opacity-50 cursor-pointer ${isGuestLocked ? 'pointer-events-none opacity-50' : ''}`} onClick={() => setIsShuffle(!isShuffle)}><Shuffle size={24} className={isShuffle ? 'text-[#1db954]' : 'text-white/70'} /><span className={`text-[11px] font-medium ${isShuffle ? 'text-[#1db954]' : 'text-white/70'}`}>Shuffle</span></div>
+                    <div className={`flex flex-col items-center gap-1 active:opacity-50 cursor-pointer ${isGuestLocked ? 'pointer-events-none opacity-50' : ''}`} onClick={() => setRepeatMode((prev) => (prev + 1) % 3)}><div className="relative"><Repeat size={24} className={repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</div><span className={`text-[11px] font-medium ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}>Repeat</span></div>
                     <div className="flex flex-col items-center gap-1 active:opacity-50 cursor-pointer text-white/70" onClick={openTimer}><div className={`relative ${sleepTimer ? 'text-[#1db954]' : 'text-white/70'}`}><Timer size={24} /></div><span className={`text-[11px] font-medium ${sleepTimer ? 'text-[#1db954]' : 'text-white/70'}`}>{timerRemaining ? formatSleepTimerStr(timerRemaining) : sleepTimer === 'end' ? 'Track End' : 'Timer'}</span></div>
                 </>
             )}
@@ -2715,8 +2943,8 @@ const downloadLrcFile = () => {
           <div className="flex flex-col flex-1 min-w-0 pr-3 justify-center"><MarqueeText text={displayTitle} className="text-[13px] font-bold text-white leading-tight mb-[2px] w-full" /><MarqueeText text={displayArtists} className="text-[12px] font-medium text-white/70 leading-tight w-full" /></div>
           <div className="flex items-center gap-4 flex-shrink-0 pr-2 text-white">
             <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }}><Users size={20} className={jamStatus === 'connected' ? "text-[#1db954]" : ""} /></button>
-            <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={toggleVideoMode}><MonitorPlay size={20} className={isVideoMode ? "text-[#1db954]" : ""} /></button>
-            <button className="active:scale-75 transition-transform flex items-center justify-center w-[24px] h-[24px]" onClick={handlePlayPauseToggle}>
+            <button className={`active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px] ${isGuestLocked ? 'pointer-events-none opacity-50' : ''}`} onClick={toggleVideoMode}><MonitorPlay size={20} className={isVideoMode ? "text-[#1db954]" : ""} /></button>
+            <button className={`active:scale-75 transition-transform flex items-center justify-center w-[24px] h-[24px] ${isGuestLocked ? 'pointer-events-none opacity-80' : ''}`} onClick={handlePlayPauseToggle}>
                {(loading || isVideoLoading) ? <Loader2 size={24} className="animate-spin text-white" /> : (isPlaying ? <Pause fill="white" stroke="white" size={24} /> : <Play fill="white" stroke="white" size={24} className="translate-x-[1px]" />)}
             </button>
           </div>
