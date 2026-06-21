@@ -1,4 +1,5 @@
 
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -11,7 +12,7 @@ import {
   Play, Pause, SkipForward, SkipBack, Loader2, ChevronDown, 
   MoreHorizontal, Shuffle, Repeat, Heart, ListMusic, 
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles,
-  Users, LogOut, Copy, Radio, Activity, MessageCircle, Send, MessageCircleOff, Shield, Crown
+  Users, LogOut, Copy, Radio, Activity, MessageCircle, Send, MessageCircleOff, Shield, Crown, AlertTriangle
 } from "lucide-react";
 
 // --- VERCEL PROTECTION BYPASS ENGINE ---
@@ -426,6 +427,7 @@ export default function MiniPlayer() {
   const [jamLogs, setJamLogs] = useState<any[]>([]);
   const [jamPlayBlocked, setJamPlayBlocked] = useState(false);
   const [jamPlayContext, setJamPlayContext] = useState<any>(null);
+  const [jamError, setJamError] = useState<string | null>(null);
   
   const [jamChatMessages, setJamChatMessages] = useState<any[]>([]);
   const [jamChatInput, setJamChatInput] = useState("");
@@ -568,6 +570,7 @@ export default function MiniPlayer() {
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen && canvasData?.canvasUrl;
   
+  // Admin is NOT guest locked for UI
   const isGuestLocked = jamRole === 'guest' && jamStatus === 'connected';
 
   // Context Switcher for UI
@@ -613,38 +616,32 @@ export default function MiniPlayer() {
       });
   }, []);
 
+  // Immediately broadcast DATA updates when they load asynchronously
   useEffect(() => {
-      if (jamRole === 'host' && jamStatus === 'connected' && currentSong) {
-          const t = setTimeout(broadcastFullSync, 50);
-          return () => clearTimeout(t);
+      if (jamRole === 'host' && jamStatus === 'connected' && ablyChannelRef.current) {
+          ablyChannelRef.current.publish('sync', {
+              type: 'DATA_UPDATE',
+              payload: {
+                  trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+                  canvasData: canvasDataRef.current,
+                  lyrics: lyricsRef.current,
+                  syncType: syncTypeRef.current,
+                  songDetails: songDetailsRef.current,
+                  ytVideoId: ytVideoIdRef.current
+              }
+          });
       }
-  }, [songDetails, lyrics, canvasData, ytVideoId, audioUrl, isVideoMode, currentSong, broadcastFullSync]);
+  }, [canvasData, lyrics, songDetails, ytVideoId, jamRole, jamStatus]);
 
-  // Guest requesting Data if Missing
-  useEffect(() => {
-      if ((jamRole === 'guest' || jamRole === 'admin') && jamStatus === 'connected' && currentSong) {
-          if (!canvasData || lyrics.length === 0 || !songDetails) {
-              const timeout = setTimeout(() => {
-                  if (ablyChannelRef.current) {
-                      ablyChannelRef.current.publish('sync', { 
-                          type: 'REQUEST_DATA', 
-                          trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id 
-                      });
-                  }
-              }, 3000);
-              return () => clearTimeout(timeout);
-          }
-      }
-  }, [currentSong, canvasData, lyrics, songDetails, jamRole, jamStatus]);
-
-  // --- 2-SECOND AUTOMATION HEARTBEAT + METADATA CARRIER ---
+  // --- AUTOMATION HEARTBEAT + METADATA CARRIER ---
   useEffect(() => {
       if (jamRole === 'host' && jamStatus === 'connected') {
           const interval = setInterval(() => {
               if (!ablyChannelRef.current) return;
               
+              // Beam metadata for 35 seconds to guarantee perfect async payload loading on Guests
               const timeSinceStart = Date.now() - (songStartTrackingRef.current || 0);
-              const shouldCarry = timeSinceStart < 20000;
+              const shouldCarry = timeSinceStart < 35000 || !hasCachedCurrentSongRef.current;
 
               ablyChannelRef.current.publish('sync', {
                   type: 'HEARTBEAT',
@@ -682,7 +679,7 @@ export default function MiniPlayer() {
           
           ably.connection.on('failed', () => {
               setJamStatus('disconnected');
-              alert("Jim Jam connection failed.");
+              setJamError("Jim Jam connection failed. Please try again.");
           });
 
           await new Promise<void>((resolve, reject) => {
@@ -699,7 +696,7 @@ export default function MiniPlayer() {
               
               const hasHost = members.some((p: any) => p.data && p.data.role === 'host');
               if (!hasHost) {
-                  alert("Invalid Room ID or Host has left.");
+                  setJamError("Invalid Room ID or Host has left the Jam.");
                   ably.close();
                   setJamStatus('disconnected');
                   setJamRole(null);
@@ -728,18 +725,17 @@ export default function MiniPlayer() {
                   });
               }
 
+              // Update participant list safely
               channel.presence.get().then((result: any) => {
                   const members = Array.isArray(result) ? result : (result.items || []);
                   setJamParticipants(members.map((m: any) => ({ ...m.data, clientId: m.clientId })));
-                  
-                  if (jamRoleRef.current === 'guest' || jamRoleRef.current === 'admin') {
-                      const hasHost = members.some((m: any) => m.data.role === 'host');
-                      if (!hasHost) {
-                          alert("Host has left the Jam.");
-                          disconnectJam();
-                      }
-                  }
               });
+
+              // Specifically track Host leaving via event, not relying on just presence get due to Ably sync delays
+              if (action === 'leave' && p.role === 'host' && (jamRoleRef.current === 'guest' || jamRoleRef.current === 'admin')) {
+                  setJamError("The Host has ended the Jam session.");
+                  disconnectJam();
+              }
 
               if (jamRoleRef.current === 'host' && action === 'enter' && p.role !== 'host') {
                   broadcastFullSync();
@@ -782,21 +778,24 @@ export default function MiniPlayer() {
               const { action, payload } = msg.data;
               
               if (action === 'PLAY_PAUSE') {
-                  setIsPlaying(payload.isPlaying);
+                  const newState = payload.isPlaying;
+                  setIsPlaying(newState);
                   if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) {
-                      videoIframeRef.current.contentWindow.postMessage({ type: payload.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
+                      videoIframeRef.current.contentWindow.postMessage({ type: newState ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
                   } else {
-                      if (payload.isPlaying) audioRef.current?.play().catch(()=>{});
+                      if (newState) audioRef.current?.play().catch(()=>{});
                       else audioRef.current?.pause();
                   }
-                  broadcastFullSync();
+                  channel.publish('sync', { type: 'STATE', isPlaying: newState, time: audioRef.current?.currentTime || 0, isVideoMode: isVideoModeRef.current });
               } else if (action === 'SEEK') {
+                  const newTime = payload.time;
                   if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) {
-                      videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: payload.time }, '*');
+                      videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: newTime }, '*');
                   } else if (audioRef.current) {
-                      audioRef.current.currentTime = payload.time;
+                      audioRef.current.currentTime = newTime;
+                      setCurrentTime(newTime);
                   }
-                  broadcastFullSync();
+                  channel.publish('sync', { type: 'TIME', time: newTime, isVideoMode: isVideoModeRef.current });
               } else if (action === 'NEXT_SONG') {
                   playNextRef.current();
               } else if (action === 'PREV_SONG') {
@@ -807,7 +806,7 @@ export default function MiniPlayer() {
                   setIsPlaying(true);
               } else if (action === 'UPDATE_QUEUE') {
                   setUpcomingQueue(payload.queue);
-                  broadcastFullSync();
+                  channel.publish('sync', { type: 'QUEUE_UPDATE', payload: { queue: payload.queue } });
               }
           });
 
@@ -817,40 +816,25 @@ export default function MiniPlayer() {
               const currentRole = jamRoleRef.current;
               
               if (data.type === 'ROOM_CLOSED' && (currentRole === 'guest' || currentRole === 'admin')) {
-                  alert("The host has ended the Jam.");
+                  setJamError("The host has ended the Jam.");
                   disconnectJam();
-                  return;
-              }
-
-              // HOST LOGIC
-              if (currentRole === 'host') {
-                  if (data.type === 'REQUEST_DATA') {
-                      const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
-                      if (currentId === data.trackId) {
-                          if (canvasDataRef.current || lyricsRef.current?.length > 0 || songDetailsRef.current) {
-                              broadcastFullSync();
-                          } else {
-                              setTimeout(() => {
-                                  const stillCurrentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
-                                  if (stillCurrentId === data.trackId && !canvasDataRef.current && (!lyricsRef.current || lyricsRef.current.length === 0)) {
-                                      channel.publish('sync', { type: 'DENY_DATA', trackId: data.trackId });
-                                  } else if (stillCurrentId === data.trackId) {
-                                      broadcastFullSync();
-                                  }
-                              }, 5000);
-                          }
-                      }
-                  }
                   return;
               }
 
               // GUEST/ADMIN LOGIC: Pure Synchronization Engine
               if (currentRole === 'guest' || currentRole === 'admin') {
-                  if (data.type === 'DENY_DATA') {
-                      if (currentTrackRef.current?.id === data.trackId || currentTrackRef.current?.track_id === data.trackId) {
-                          setCanvasData(null);
-                          setLyrics([]);
+                  if (data.type === 'DATA_UPDATE') {
+                      const p = data.payload;
+                      const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
+                      if (currentId === p.trackId) {
+                          if (p.canvasData && p.canvasData !== canvasDataRef.current) setCanvasData(p.canvasData);
+                          if (p.lyrics && p.lyrics !== lyricsRef.current) setLyrics(p.lyrics);
+                          if (p.syncType) setSyncType(p.syncType);
+                          if (p.songDetails) setSongDetails(p.songDetails);
+                          if (p.ytVideoId) setYtVideoId(p.ytVideoId);
                       }
+                  } else if (data.type === 'QUEUE_UPDATE') {
+                      setUpcomingQueue(data.payload.queue);
                   } else if (data.type === 'FULL_SYNC') {
                       const p = data.payload;
                       isSystemSongChangeRef.current = true;
@@ -888,8 +872,8 @@ export default function MiniPlayer() {
                   } else if (data.type === 'HEARTBEAT' || data.type === 'TIME' || data.type === 'STATE') {
                       if (data.type === 'HEARTBEAT') {
                           const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
-                          if (data.trackId !== currentId) {
-                              channel.publish('sync', { type: 'REQUEST_DATA', trackId: currentId });
+                          if (data.trackId !== currentId && !data.carryPayload) {
+                              // Let host carry payload handle sync natively next tick
                               return;
                           }
                           if (data.carryPayload) {
@@ -953,7 +937,7 @@ export default function MiniPlayer() {
           setJamRole(null);
           setJamRoomId(null);
           sessionStorage.removeItem(JAM_STORAGE_KEY);
-          alert("Failed to connect to Jam server. Check Room ID.");
+          setJamError("Failed to connect to Jam server. Check Room ID.");
       }
   };
 
@@ -987,6 +971,7 @@ export default function MiniPlayer() {
       setJamLogs([]);
       setJamChatMessages([]);
       sessionStorage.removeItem(JAM_STORAGE_KEY);
+      setShowJamMenu(false);
   };
 
   const assignRole = (targetClientId: string, newRole: string) => {
@@ -1018,7 +1003,9 @@ export default function MiniPlayer() {
   const toggleChat = () => {
       const newState = !isChatEnabled;
       setIsChatEnabled(newState);
-      ablyChannelRef.current.publish('chat_config', { enabled: newState });
+      if (ablyChannelRef.current) {
+          ablyChannelRef.current.publish('chat_config', { enabled: newState });
+      }
   };
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1588,7 +1575,7 @@ export default function MiniPlayer() {
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
 
     if (jamRoleRef.current === 'admin' && jamStatus === 'connected') {
-        ablyChannelRef.current.publish('admin_action', { action: 'PLAY_PAUSE', payload: { isPlaying: !isPlaying } });
+        ablyChannelRef.current?.publish('admin_action', { action: 'PLAY_PAUSE', payload: { isPlaying: !isPlaying } });
         return;
     }
     
@@ -1689,7 +1676,7 @@ export default function MiniPlayer() {
   const playNext = () => {
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     if (jamRoleRef.current === 'admin' && jamStatus === 'connected') {
-        ablyChannelRef.current.publish('admin_action', { action: 'NEXT_SONG' });
+        ablyChannelRef.current?.publish('admin_action', { action: 'NEXT_SONG' });
         return;
     }
     
@@ -1714,7 +1701,7 @@ export default function MiniPlayer() {
   const playPrev = () => {
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     if (jamRoleRef.current === 'admin' && jamStatus === 'connected') {
-        ablyChannelRef.current.publish('admin_action', { action: 'PREV_SONG' });
+        ablyChannelRef.current?.publish('admin_action', { action: 'PREV_SONG' });
         return;
     }
     
@@ -1895,7 +1882,7 @@ export default function MiniPlayer() {
   const handleLyricClick = (time: number) => {
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     if (jamRoleRef.current === 'admin' && jamStatus === 'connected') {
-        ablyChannelRef.current.publish('admin_action', { action: 'SEEK', payload: { time } });
+        ablyChannelRef.current?.publish('admin_action', { action: 'SEEK', payload: { time } });
         return;
     }
     
@@ -1925,7 +1912,7 @@ export default function MiniPlayer() {
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
     
     if (jamRoleRef.current === 'admin' && jamStatus === 'connected') {
-        ablyChannelRef.current.publish('admin_action', { action: 'SEEK', payload: { time: newTime } });
+        ablyChannelRef.current?.publish('admin_action', { action: 'SEEK', payload: { time: newTime } });
         return;
     }
 
@@ -2276,7 +2263,8 @@ const downloadLrcFile = () => {
         const formatOptions = mixed.map((v:any) => ({ ...v, label: `${v.quality} Video`, isMuxed: true }));
         setDlState({ type: "video", status: "options", options: formatOptions, server: serverNum });
       } catch (e) {
-        alert("Failed to connect to video server. Please try again."); setDlState({ type: null, status: "idle" });
+        setDlState({ type: null, status: "idle" });
+        setJamError("Failed to connect to video server. Please try again.");
       }
     }, 6000);
   };
@@ -2377,7 +2365,7 @@ const downloadLrcFile = () => {
              if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]); return; }
              if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
              if (jamRoleRef.current === 'admin' && jamStatus === 'connected') {
-                 ablyChannelRef.current.publish('admin_action', { action: 'CHANGE_SONG', payload: { song: track, queueIndex: index } });
+                 ablyChannelRef.current?.publish('admin_action', { action: 'CHANGE_SONG', payload: { song: track, queueIndex: index } });
                  return;
              }
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
@@ -2519,7 +2507,14 @@ const downloadLrcFile = () => {
                             <Users size={20} className={jamStatus === 'connected' ? "animate-pulse" : ""} />
                         </button>
                     </div>
-                    <div className="flex items-center gap-6"><button onClick={openQueue} className="active:opacity-50 text-white"><ListMusic size={20} /></button></div>
+                    <div className="flex items-center gap-6">
+                        {jamStatus === 'connected' && (
+                            <button onClick={(e) => { e.stopPropagation(); setShowChat(!showChat); }} className={`active:opacity-50 relative transition-colors ${showChat ? 'text-[#1db954]' : 'text-white/80'}`}>
+                                {isChatEnabled ? <MessageCircle size={20} /> : <MessageCircleOff size={20} className="opacity-50" />}
+                            </button>
+                        )}
+                        <button onClick={openQueue} className="active:opacity-50 text-white"><ListMusic size={20} /></button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -2628,54 +2623,66 @@ const downloadLrcFile = () => {
         </div>
 
         {/* --- LIVE CHAT OVERLAY --- */}
-        <div className={`absolute right-4 bottom-[130px] z-[100] flex flex-col items-end gap-2 pointer-events-none transition-all duration-300 ${isExpanded && jamStatus === 'connected' && !showQueue && !showSettingsMenu && !isUiHidden && !isLyricsFullScreen && !isVideoMode ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10'}`}>
-            <button onClick={() => setShowChat(!showChat)} className="pointer-events-auto bg-[#1db954] text-black w-14 h-14 rounded-full flex items-center justify-center shadow-[0_10px_20px_rgba(29,185,84,0.3)] hover:scale-105 transition-transform relative">
-                {isChatEnabled ? <MessageCircle size={26} /> : <MessageCircleOff size={26} />}
-                {!isChatEnabled && <div className="absolute inset-0 bg-black/10 rounded-full pointer-events-none" />}
-            </button>
-            
-            {showChat && isChatEnabled && (
-                <div className="pointer-events-auto w-[320px] flex flex-col overflow-hidden transition-all duration-300 origin-bottom-right scale-100 opacity-100 h-[400px] max-h-[50vh] bg-[#000000]/80 backdrop-blur-3xl border border-white/10 rounded-3xl shadow-[0_20px_40px_rgba(0,0,0,0.7)]">
-                    <div className="p-3 border-b border-white/10 flex justify-between items-center bg-white/5 shadow-sm">
-                        <span className="font-bold text-white flex items-center gap-2"><MessageCircle size={16} className="text-[#1db954]"/> Live Chat</span>
+        {showChat && (
+            <div className="absolute bottom-[80px] right-5 z-[100] w-[320px] max-w-[calc(100vw-40px)] flex flex-col overflow-hidden transition-all duration-300 origin-bottom-right scale-100 opacity-100 h-[400px] max-h-[50vh] bg-[#000000]/80 backdrop-blur-3xl border border-white/10 rounded-3xl shadow-[0_20px_40px_rgba(0,0,0,0.7)] pointer-events-auto">
+                <div className="p-3 border-b border-white/10 flex justify-between items-center bg-white/5 shadow-sm">
+                    <span className="font-bold text-white flex items-center gap-2"><MessageCircle size={16} className="text-[#1db954]"/> Live Chat</span>
+                    <div className="flex items-center gap-2">
                         {jamRole === 'host' && (
-                            <button onClick={toggleChat} className="text-xs font-bold text-red-400 hover:bg-red-400/20 bg-red-400/10 px-2 py-1 rounded transition-colors">Disable Chat</button>
+                            <button onClick={toggleChat} className={`text-xs font-bold px-2 py-1 rounded transition-colors ${isChatEnabled ? 'text-red-400 hover:bg-red-400/20 bg-red-400/10' : 'text-[#1db954] hover:bg-[#1db954]/20 bg-[#1db954]/10'}`}>
+                                {isChatEnabled ? 'Disable' : 'Enable'}
+                            </button>
                         )}
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4 scrollbar-hide" ref={chatContainerRef}>
-                        {jamChatMessages.map(msg => (
-                            <div key={msg.id} className="flex gap-3 items-start">
-                                <div className="w-8 h-8 rounded-full shrink-0 border border-white/10 overflow-hidden bg-white/5 flex items-center justify-center text-xs font-bold shadow-md">
-                                    {msg.avatar ? <img src={msg.avatar} className="w-full h-full object-cover" /> : msg.sender.charAt(0).toUpperCase()}
-                                </div>
-                                <div className="flex flex-col bg-white/5 rounded-2xl rounded-tl-sm px-4 py-2 border border-white/5 shadow-sm max-w-[85%]">
-                                    <span className="text-[10px] uppercase tracking-wider font-extrabold flex items-center gap-1.5 opacity-80 mb-0.5" style={{ color: msg.role === 'host' ? '#1db954' : msg.role === 'admin' ? '#3b82f6' : 'white' }}>
-                                        {msg.sender} {msg.role === 'host' && <Crown size={10} />} {msg.role === 'admin' && <Shield size={10} />}
-                                    </span>
-                                    <span className="text-[13px] font-medium text-white leading-snug">{msg.text}</span>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                    <div className="p-2 border-t border-white/10 bg-white/5">
-                        <form onSubmit={(e) => { e.preventDefault(); sendChat(jamChatInput); }} className="flex gap-2">
-                            <input value={jamChatInput} onChange={e => setJamChatInput(e.target.value)} placeholder="Type a message..." className="flex-1 bg-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:bg-white/20 transition-colors" />
-                            <button type="submit" disabled={!jamChatInput.trim()} className="bg-[#1db954] disabled:opacity-50 text-black px-4 rounded-xl font-bold flex items-center justify-center transition-opacity"><Send size={16}/></button>
-                        </form>
+                        <button onClick={() => setShowChat(false)} className="text-white/50 hover:text-white"><X size={16}/></button>
                     </div>
                 </div>
-            )}
-            
-            {showChat && !isChatEnabled && (
-                <div className="pointer-events-auto w-[320px] p-6 bg-[#000000]/80 backdrop-blur-3xl border border-white/10 rounded-3xl shadow-[0_20px_40px_rgba(0,0,0,0.7)] flex flex-col items-center justify-center transition-all duration-300 origin-bottom-right scale-100 opacity-100">
-                    <MessageCircleOff size={40} className="text-white/30 mb-3" />
-                    <p className="text-white/60 font-medium text-sm text-center">The Host has disabled Live Chat.</p>
-                    {jamRole === 'host' && (
-                        <button onClick={toggleChat} className="mt-4 text-[#1db954] font-bold text-sm bg-[#1db954]/10 hover:bg-[#1db954]/20 px-5 py-2.5 rounded-xl transition-colors">Enable Chat</button>
-                    )}
+
+                {isChatEnabled ? (
+                    <>
+                        <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4 scrollbar-hide" ref={chatContainerRef}>
+                            {jamChatMessages.map(msg => (
+                                <div key={msg.id} className="flex gap-3 items-start">
+                                    <div className="w-8 h-8 rounded-full shrink-0 border border-white/10 overflow-hidden bg-white/5 flex items-center justify-center text-xs font-bold shadow-md">
+                                        {msg.avatar ? <img src={msg.avatar} className="w-full h-full object-cover" /> : msg.sender.charAt(0).toUpperCase()}
+                                    </div>
+                                    <div className="flex flex-col bg-white/5 rounded-2xl rounded-tl-sm px-4 py-2 border border-white/5 shadow-sm max-w-[85%]">
+                                        <span className="text-[10px] uppercase tracking-wider font-extrabold flex items-center gap-1.5 opacity-80 mb-0.5" style={{ color: msg.role === 'host' ? '#1db954' : msg.role === 'admin' ? '#3b82f6' : 'white' }}>
+                                            {msg.sender} {msg.role === 'host' && <Crown size={10} />} {msg.role === 'admin' && <Shield size={10} />}
+                                        </span>
+                                        <span className="text-[13px] font-medium text-white leading-snug">{msg.text}</span>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                        <div className="p-2 border-t border-white/10 bg-white/5">
+                            <form onSubmit={(e) => { e.preventDefault(); sendChat(jamChatInput); }} className="flex gap-2">
+                                <input value={jamChatInput} onChange={e => setJamChatInput(e.target.value)} placeholder="Type a message..." className="flex-1 bg-white/10 rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:bg-white/20 transition-colors" />
+                                <button type="submit" disabled={!jamChatInput.trim()} className="bg-[#1db954] disabled:opacity-50 text-black px-4 rounded-xl font-bold flex items-center justify-center transition-opacity"><Send size={16}/></button>
+                            </form>
+                        </div>
+                    </>
+                ) : (
+                    <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                        <MessageCircleOff size={40} className="text-white/30 mb-3" />
+                        <p className="text-white/60 font-medium text-sm">The Host has disabled Live Chat.</p>
+                    </div>
+                )}
+            </div>
+        )}
+
+        {/* --- JAM ERROR MODAL --- */}
+        {jamError && (
+            <div className="absolute inset-0 z-[100020] bg-black/80 flex items-center justify-center p-6 backdrop-blur-md pointer-events-auto" onClick={() => setJamError(null)}>
+                <div className="w-full max-w-sm bg-[#121212] border border-white/10 rounded-3xl p-8 flex flex-col items-center text-center shadow-2xl animate-in zoom-in duration-300" onClick={e => e.stopPropagation()}>
+                    <div className="w-16 h-16 rounded-full bg-red-500/20 text-red-500 flex items-center justify-center mb-4">
+                        <AlertTriangle size={32} />
+                    </div>
+                    <h3 className="text-white font-bold text-xl mb-2">Connection Issue</h3>
+                    <p className="text-white/60 font-medium text-sm mb-6">{jamError}</p>
+                    <button onClick={() => setJamError(null)} className="w-full bg-white/10 hover:bg-white/20 text-white font-bold py-3 rounded-xl transition-colors">Dismiss</button>
                 </div>
-            )}
-        </div>
+            </div>
+        )}
 
         {/* --- JIM JAM MODAL MENU --- */}
         {showJamMenu && (
@@ -2715,11 +2722,9 @@ const downloadLrcFile = () => {
                             <div className="flex-grow border-t border-white/10"></div>
                         </div>
                         
-                        <div className="flex flex-col gap-2">
-                            <div className="flex gap-2">
-                                <input type="text" placeholder="ROOM CODE" value={jamInputId} onChange={e => setJamInputId(e.target.value.toUpperCase())} className="flex-1 bg-white/5 border border-white/10 rounded-2xl px-5 py-3.5 text-white font-black tracking-[0.2em] text-center focus:outline-none focus:border-[#1db954] transition-colors uppercase" maxLength={6} />
-                                <button onClick={joinJamRoom} disabled={jamInputId.length < 6} className="bg-white/10 text-[#1db954] font-bold px-6 py-3.5 rounded-2xl disabled:opacity-50 hover:bg-[#1db954] hover:text-black transition-colors">Join</button>
-                            </div>
+                        <div className="flex flex-col sm:flex-row gap-2">
+                            <input type="text" placeholder="ROOM CODE" value={jamInputId} onChange={e => setJamInputId(e.target.value.toUpperCase())} className="w-full sm:flex-1 bg-white/5 border border-white/10 rounded-2xl px-5 py-3.5 text-white font-black tracking-[0.2em] text-center focus:outline-none focus:border-[#1db954] transition-colors uppercase" maxLength={6} />
+                            <button onClick={joinJamRoom} disabled={jamInputId.length < 6} className="w-full sm:w-auto bg-white/10 text-[#1db954] font-bold px-6 py-3.5 rounded-2xl disabled:opacity-50 hover:bg-[#1db954] hover:text-black transition-colors">Join</button>
                         </div>
                     </div>
                 ) : (
@@ -3062,4 +3067,4 @@ const downloadLrcFile = () => {
       </div>
     </>
   );
-                                                                }
+}
