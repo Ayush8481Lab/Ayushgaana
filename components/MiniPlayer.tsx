@@ -680,7 +680,7 @@ export default function MiniPlayer() {
                       playContext: playContextRef.current
                   } : null
               });
-          }, 2000);
+          }, 6000);
           return () => clearInterval(interval);
       }
   }, [jamRole, jamStatus]);
@@ -849,7 +849,7 @@ export default function MiniPlayer() {
                   if (p.isVideoMode !== isVideoModeRef.current) setIsVideoMode(p.isVideoMode);
 
                   let targetTime = p.time;
-                  if (p.isPlaying) targetTime += 0.6; // Analysis Offset
+                  if (p.isPlaying) targetTime += 0.8; // Analysis Offset
                   iframeInitialTimeRef.current = targetTime;
 
                   if (p.song && p.song.id !== currentTrackRef.current?.id) {
@@ -891,7 +891,7 @@ export default function MiniPlayer() {
                   }
 
                   let targetTime = data.time;
-                  if (data.isPlaying) targetTime += 0.6; // Analysis Offset
+                  if (data.isPlaying) targetTime += 0.8; // Analysis Offset
                   
                   if (data.isVideoMode || isVideoModeRef.current) {
                       if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && Math.abs(videoStartTimeRef.current - targetTime) > 2.5)) {
@@ -1257,6 +1257,10 @@ export default function MiniPlayer() {
     if (isSystemSongChangeRef.current) {
         isSystemSongChangeRef.current = false;
         currentTrackRef.current = currentSong;
+        
+        setIsCanvasLoaded(false); // <-- ADD THIS: Resets the stale canvas state for the guest
+        setIsUiHidden(false);     // <-- ADD THIS: Ensures UI doesn't get stuck hidden
+        
         return; // SKIP LOCAL FETCHING AND PURGING - SYNC ALREADY HANDLED IT
     }
 
