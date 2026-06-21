@@ -1,5 +1,3 @@
---- START OF FILE Paste June 21, 2026 - 10:34AM ---
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
