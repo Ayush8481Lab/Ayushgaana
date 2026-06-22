@@ -443,6 +443,7 @@ export default function MiniPlayer() {
   const clientIdRef = useRef<string | null>(null);
   const isSystemSongChangeRef = useRef(false);
   
+  // High-performance action lockout to prevent UI fights
   const localActionTimeRef = useRef<number>(0);
   
   const upcomingQueueRef = useRef<any[]>([]);
@@ -512,7 +513,7 @@ export default function MiniPlayer() {
   const nextBtnRef = useRef<HTMLButtonElement>(null);
   
   const canvasVideoRef = useRef<HTMLVideoElement>(null);
-  const playNextRef = useRef<() => void>(() => {});
+  const playNextRef = useRef<((isAutoPlay?: boolean) => void)>(() => {});
   const playPrevRef = useRef<() => void>(() => {});
   const isVideoModeRef = useRef<boolean>(false);
   const[swipeX, setSwipeX] = useState(0);
@@ -661,6 +662,9 @@ export default function MiniPlayer() {
           const interval = setInterval(() => {
               if (!ablyChannelRef.current) return;
               
+              // Prevent heartbeat if host recently executed an action or received an authoritative FULL_SYNC
+              if (Date.now() - localActionTimeRef.current < 8000) return;
+
               // Beam metadata for 35 seconds to guarantee perfect async payload loading on Guests
               const timeSinceStart = Date.now() - (songStartTrackingRef.current || 0);
               const shouldCarry = timeSinceStart < 35000 || !hasCachedCurrentSongRef.current;
@@ -684,7 +688,7 @@ export default function MiniPlayer() {
                       playContext: playContextRef.current
                   } : null
               });
-          }, 6000);
+          }, 20000); // 20 Seconds Heartbeat Lock
           return () => clearInterval(interval);
       }
   }, [jamRole, jamStatus]);
@@ -823,6 +827,15 @@ export default function MiniPlayer() {
                   return;
               }
 
+              // --- CONFLICT RESOLUTION ENGINE ---
+              const isDriver = currentRole === 'admin' || currentRole === 'host';
+              const recentlyActed = isDriver && (Date.now() - localActionTimeRef.current < 10000);
+
+              // Ignore routine packets if we just performed a local action (like a song change) to stop reverting
+              if (recentlyActed && ['HEARTBEAT', 'TIME', 'STATE', 'QUEUE_UPDATE'].includes(data.type)) {
+                  return; 
+              }
+
               // Apply sync payload universally based on message type
               if (data.type === 'DATA_UPDATE') {
                   const p = data.payload;
@@ -837,6 +850,7 @@ export default function MiniPlayer() {
               } else if (data.type === 'QUEUE_UPDATE') {
                   setUpcomingQueue(data.payload.queue);
               } else if (data.type === 'FULL_SYNC') {
+                  localActionTimeRef.current = Date.now(); // Respect the authoritative switch, lock out our own actions
                   const p = data.payload;
                   isSystemSongChangeRef.current = true; // Prevents local fetch and purge
                   
@@ -853,7 +867,8 @@ export default function MiniPlayer() {
                   if (p.isVideoMode !== isVideoModeRef.current) setIsVideoMode(p.isVideoMode);
 
                   let targetTime = p.time;
-                  if (p.isPlaying) targetTime += 0.8; // Analysis Offset for buffering only applied on initial FULL_SYNC
+                  // Only add buffer offset explicitly on initial FULL_SYNC to avoid regular stutter
+                  if (p.isPlaying) targetTime += 0.8; 
                   iframeInitialTimeRef.current = targetTime;
 
                   if (p.song && p.song.id !== currentTrackRef.current?.id) {
@@ -873,11 +888,7 @@ export default function MiniPlayer() {
                       else audioRef.current.pause();
                   }
               } else if (data.type === 'HEARTBEAT' || data.type === 'TIME' || data.type === 'STATE') {
-                  
                   if (data.type === 'HEARTBEAT') {
-                      // Prevent automated host heartbeats from reverting recent Admin actions for 8s
-                      if (currentRole === 'admin' && Date.now() - localActionTimeRef.current < 8000) return;
-
                       const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
                       if (data.trackId !== currentId && !data.carryPayload) return;
                       if (data.carryPayload) {
@@ -898,12 +909,14 @@ export default function MiniPlayer() {
                       setIsVideoMode(data.isVideoMode);
                   }
 
-                  // 0.8s offset completely removed for routine syncs to prevent constant edge stutters
+                  // Standardized Time alignment - strictly guarded against manual scrubbing
                   let targetTime = data.time;
                   
                   if (data.isVideoMode || isVideoModeRef.current) {
-                      if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && Math.abs(videoStartTimeRef.current - targetTime) > 3.0)) {
-                          videoIframeRef.current?.contentWindow?.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
+                      if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && Math.abs(videoStartTimeRef.current - targetTime) > 4.0)) {
+                          if (!isSeekingRef.current) {
+                              videoIframeRef.current?.contentWindow?.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
+                          }
                       }
                       if (data.type === 'STATE' || data.type === 'HEARTBEAT') {
                           if (data.isPlaying !== isPlayingRef.current) {
@@ -912,8 +925,8 @@ export default function MiniPlayer() {
                           }
                       }
                   } else {
-                      if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && audioRef.current && Math.abs(audioRef.current.currentTime - targetTime) > 3.0)) {
-                          if (audioRef.current) {
+                      if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && audioRef.current && Math.abs(audioRef.current.currentTime - targetTime) > 4.0)) {
+                          if (audioRef.current && !isSeekingRef.current) {
                               audioRef.current.currentTime = targetTime;
                               setCurrentTime(targetTime);
                           }
@@ -1210,7 +1223,7 @@ export default function MiniPlayer() {
   useEffect(() => { isLyricsEnabledRef.current = isLyricsEnabled; if (!isLyricsEnabled) setIsLyricsFullScreen(false); },[isLyricsEnabled]);
   useEffect(() => { if (currentSong) localStorage.setItem('last_session_song', JSON.stringify(currentSong)); },[currentSong]);
   useEffect(() => { if (upcomingQueue && upcomingQueue.length > 0) localStorage.setItem('last_session_queue', JSON.stringify(upcomingQueue)); },[upcomingQueue]);
-  // Fix for Listener Device: Instantly show image banner while new canvas buffers
+  
   useEffect(() => { 
       setIsCanvasLoaded(false); 
   }, [canvasData?.canvasUrl]);
@@ -1594,9 +1607,9 @@ export default function MiniPlayer() {
         if (stateCode !== null) {
             if (stateCode === 1 || String(stateCode) === '1') { audioRef.current?.pause(); setIsPlaying(true); } 
             else if (stateCode === 2 || String(stateCode) === '2') { setIsPlaying(false); } 
-            else if (stateCode === 0 || String(stateCode) === '0') { setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100); }
+            else if (stateCode === 0 || String(stateCode) === '0') { setTimeout(() => { playNextRef.current(true); }, 100); }
         } else if (e.data === 'ended' || e.data?.event === 'ended' || e.data?.type === 'ENDED') {
-            setTimeout(() => { if (nextBtnRef.current) nextBtnRef.current.click(); else playNextRef.current(); }, 100);
+            setTimeout(() => { playNextRef.current(true); }, 100);
         }
       }
     };
@@ -1650,12 +1663,15 @@ export default function MiniPlayer() {
         if (playPromise !== undefined) playPromise.catch(()=>setJamPlayBlocked(true));
         setIsPlaying(true);
       }
+      setTimeout(() => broadcastFullSync(), 500); // Broadcast state change immediately
       return;
     }
     iframeInitialTimeRef.current = Math.floor(currentTime);
     if (prefetchedYtIdRef.current) {
       setYtVideoId(prefetchedYtIdRef.current); setIsVideoMode(true);
-      if (audioRef.current) audioRef.current.pause(); setIsPlaying(false); return;
+      if (audioRef.current) audioRef.current.pause(); setIsPlaying(false); 
+      setTimeout(() => broadcastFullSync(), 500);
+      return;
     }
     
     setIsVideoLoading(true);
@@ -1664,6 +1680,8 @@ export default function MiniPlayer() {
     if (newVid) { setYtVideoId(newVid); setIsVideoMode(true); } 
     else if (audioRef.current) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); setIsPlaying(true); }
     setIsVideoLoading(false);
+    
+    setTimeout(() => broadcastFullSync(), 500); // Force sync network
   };
 
   useEffect(() => {
@@ -1705,9 +1723,13 @@ export default function MiniPlayer() {
     return () => clearTimeout(timeoutId);
   },[isPlaying, isScrolledPastMain, isCanvasLoaded, isExpanded, showQueue, isVideoMode, isLyricsFullScreen, isCanvasEnabled, canvasData]);
 
-  const playNext = () => {
+  const playNext = (e?: any) => {
+    const isAutoPlay = e === true; // Detect if called via automated onEnded event
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     
+    // Prevent Admin from auto-forcing the next song if it finishes; let the Host drive the timeline!
+    if (isAutoPlay && jamRoleRef.current === 'admin' && jamStatus === 'connected') return;
+
     localActionTimeRef.current = Date.now();
 
     if (sleepTimer === 'end') { setIsPlaying(false); setSleepTimer(null); if (audioRef.current) audioRef.current.pause(); return; }
@@ -2434,7 +2456,7 @@ const downloadLrcFile = () => {
       `}} />
 
       <audio 
-        ref={audioRef} autoPlay={isPlaying && !isVideoMode} onEnded={playNext} onTimeUpdate={handleTimeUpdate} crossOrigin="anonymous" 
+        ref={audioRef} autoPlay={isPlaying && !isVideoMode} onEnded={() => playNext(true)} onTimeUpdate={handleTimeUpdate} crossOrigin="anonymous" 
         onLoadedMetadata={() => { 
            const dur = audioRef.current?.duration || 0; setDuration(dur); 
            if (restoreTimeRef.current !== null && restoreTimeRef.current > 0) { audioRef.current!.currentTime = restoreTimeRef.current; setCurrentTime(restoreTimeRef.current); restoreTimeRef.current = null; } 
@@ -3061,7 +3083,7 @@ const downloadLrcFile = () => {
                             return newArr;
                         });
                         setSelectedQueueItems([]); setIsQueueEditMode(false);
-                    }} className="text-[#ff4444] font-bold text-[13px] bg-[#ff4444]/10 px-4py-2 rounded-full active:bg-[#ff4444]/20 transition-colors">Remove</button>
+                    }} className="text-[#ff4444] font-bold text-[13px] bg-[#ff4444]/10 px-4 py-2 rounded-full active:bg-[#ff4444]/20 transition-colors">Remove</button>
                 </div>
             ) : (
                 <>
@@ -3097,4 +3119,4 @@ const downloadLrcFile = () => {
       </div>
     </>
   );
-      }
+}
