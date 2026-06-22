@@ -1,5 +1,3 @@
-
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -445,6 +443,7 @@ export default function MiniPlayer() {
   
   // High-performance action lockout to prevent UI fights
   const localActionTimeRef = useRef<number>(0);
+  const requestedDataForTrackRef = useRef<string | null>(null); // Prevents infinite data request loop
   
   const upcomingQueueRef = useRef<any[]>([]);
   const playContextRef = useRef<any>(null);
@@ -620,34 +619,21 @@ export default function MiniPlayer() {
       });
   }, []);
 
-  // Immediately broadcast DATA updates when they load asynchronously
-  useEffect(() => {
-      if ((jamRole === 'host' || jamRole === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
-          ablyChannelRef.current.publish('sync', {
-              type: 'DATA_UPDATE',
-              senderId: clientIdRef.current,
-              payload: {
-                  trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
-                  canvasData: canvasDataRef.current,
-                  lyrics: lyricsRef.current,
-                  syncType: syncTypeRef.current,
-                  songDetails: songDetailsRef.current,
-                  ytVideoId: ytVideoIdRef.current
-              }
-          });
-      }
-  }, [canvasData, lyrics, songDetails, ytVideoId, jamRole, jamStatus]);
-
   // Guest requesting Data if Missing
   useEffect(() => {
       if ((jamRole === 'guest' || jamRole === 'admin') && jamStatus === 'connected' && currentSong) {
+          const trackId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
+          
+          if (requestedDataForTrackRef.current === trackId) return; // Prevent infinite request loop
+
           if (!canvasData || lyrics.length === 0 || !songDetails) {
               const timeout = setTimeout(() => {
                   if (ablyChannelRef.current) {
+                      requestedDataForTrackRef.current = trackId; // Mark as requested
                       ablyChannelRef.current.publish('sync', { 
                           type: 'REQUEST_DATA',
                           senderId: clientIdRef.current,
-                          trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id 
+                          trackId: trackId 
                       });
                   }
               }, 3000);
@@ -688,7 +674,7 @@ export default function MiniPlayer() {
                       playContext: playContextRef.current
                   } : null
               });
-          }, 30000); // 20 Seconds Heartbeat Lock
+          }, 20000); // 20 Seconds Heartbeat Lock
           return () => clearInterval(interval);
       }
   }, [jamRole, jamStatus]);
@@ -868,7 +854,7 @@ export default function MiniPlayer() {
 
                   let targetTime = p.time;
                   // Only add buffer offset explicitly on initial FULL_SYNC to avoid regular stutter
-                  if (p.isPlaying) targetTime += 0; 
+                  if (p.isPlaying) targetTime += 0.8; 
                   iframeInitialTimeRef.current = targetTime;
 
                   if (p.song && p.song.id !== currentTrackRef.current?.id) {
@@ -882,8 +868,13 @@ export default function MiniPlayer() {
                       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
                       videoIframeRef.current.contentWindow.postMessage({ type: p.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
                   } else if (!p.isVideoMode && audioRef.current) {
-                      audioRef.current.currentTime = targetTime;
-                      setCurrentTime(targetTime);
+                      // Apply the 4.0 second tolerance to FULL_SYNC so it doesn't flicker current audio
+                      const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
+                      const payloadId = p.song?.id || p.song?.track_id;
+                      if (Math.abs(audioRef.current.currentTime - targetTime) > 4.0 || payloadId !== currentId) {
+                          audioRef.current.currentTime = targetTime;
+                          setCurrentTime(targetTime);
+                      }
                       if (p.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
                       else audioRef.current.pause();
                   }
@@ -2543,7 +2534,7 @@ const downloadLrcFile = () => {
                   <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
                      {(loading || isVideoLoading) ? <Loader2 size={26} className="animate-spin text-black" /> : (isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />)}
                   </button>
-                  <button id="next-song-btn" onClick={playNext} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipForward size={36} fill="white" stroke="white" /></button>
+                  <button id="next-song-btn" onClick={() => playNext()} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipForward size={36} fill="white" stroke="white" /></button>
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setRepeatMode((prev) => (prev + 1) % 3); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 relative pointer-events-auto ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}><Repeat size={24} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</button>
                 </div>
                 {!isLyricsFullScreen && (
