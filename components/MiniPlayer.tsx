@@ -688,7 +688,7 @@ export default function MiniPlayer() {
                       playContext: playContextRef.current
                   } : null
               });
-          }, 20000); // 20 Seconds Heartbeat Lock
+          }, 30000); // 20 Seconds Heartbeat Lock
           return () => clearInterval(interval);
       }
   }, [jamRole, jamStatus]);
@@ -868,7 +868,7 @@ export default function MiniPlayer() {
 
                   let targetTime = p.time;
                   // Only add buffer offset explicitly on initial FULL_SYNC to avoid regular stutter
-                  if (p.isPlaying) targetTime += 0.8; 
+                  if (p.isPlaying) targetTime += 0; 
                   iframeInitialTimeRef.current = targetTime;
 
                   if (p.song && p.song.id !== currentTrackRef.current?.id) {
