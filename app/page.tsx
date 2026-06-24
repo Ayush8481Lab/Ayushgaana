@@ -15,7 +15,7 @@ const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 
 const SECTION_CONFIGS =[
   { key: "showcase", title: "Top Picks", url: "/home/showcase?userlanguage={lang}", noPagination: true },
-  { key: "trending", title: "Trending Songs", url: "/home/trending/songs/v1?trending_section=1&pkc=true&userlanguage={lang}", showSubtitle: true, noPagination: true },
+  { key: "trending", title: "Trending Songs", url: "/home/smartfeed/765?view=all&userlanguage={lang}", showSubtitle: true, noPagination: true },
   { key: "top_charts", title: "Top Charts", url: "/home/playlist/top-charts?userlanguage={lang}" },
   { key: "top_playlists", title: "Top Playlists", url: "/home/section-data?seokey=top-playlists-1&view=all&userlanguage={lang}" },
   { key: "new_releases", title: "New Releases", url: "/home/album/featured/more?userlanguage={lang}", showSubtitle: true },
