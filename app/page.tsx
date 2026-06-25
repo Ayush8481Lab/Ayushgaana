@@ -9,7 +9,8 @@ import { Search as SearchIcon, Mic, ChevronLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 // --- API CONSTANTS & SECRETS ---
-const API_BASE = "https://gaanaayush.wonder945177.workers.dev/api/superserch";
+const VERCEL_API_BASE = "https://gaanaayush.vercel.app/api/superserch";
+const CF_API_BASE = "https://gaanaayush.wonder945177.workers.dev/api/superserch";
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 
@@ -31,15 +32,17 @@ const SECTION_CONFIGS =[
   { key: "mehfil", title: "Mehfil-e-ghazal", url: "/home/section-data?seokey=mehfil-e-ghazal&view=all&userlanguage={lang}" },
 ];
 
-// --- IRONCLAD GLOBAL FETCH LOCK (Guarantees exactly 1s gap AFTER response) ---
+// --- IRONCLAD GLOBAL FETCH LOCKS & CONCURRENCY CONTROLS ---
 declare global {
   interface Window {
     __API_QUEUE_PROMISE__?: Promise<any>;
+    __CF_ACTIVE_REQUESTS__?: number;
+    __CF_QUEUE__?: (() => void)[];
   }
 }
 
-const fetchStrictly = (url: string): Promise<any> => {
-  // 1. Check cache first to completely avoid network calls if data is fresh
+// 1. STRICT FETCHER (For Vercel API only - max 1 request/second)
+const fetchVercelStrictly = (url: string): Promise<any> => {
   try {
     const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
     if (cachedStr) {
@@ -50,18 +53,14 @@ const fetchStrictly = (url: string): Promise<any> => {
 
   if (typeof window === 'undefined') return Promise.resolve(null);
 
-  // 2. Queue system ensures requests never run parallel, and 1-second rule is strictly followed
   if (!window.__API_QUEUE_PROMISE__) {
     window.__API_QUEUE_PROMISE__ = Promise.resolve();
   }
 
   const task = async () => {
     try {
-      // INJECTED VERCEL AUTOMATION PROTECTION BYPASS (Official Method)
       const res = await fetch(url, {
-        headers: {
-          
-        }
+        headers: { "x-vercel-protection-bypass": AUTOMATION_SECRET }
       });
       
       let data = null;
@@ -70,11 +69,10 @@ const fetchStrictly = (url: string): Promise<any> => {
         try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
       }
       
-      // STRICTLY WAIT 1 FULL SECOND AFTER RECEIVING THE RESPONSE
       await new Promise(r => setTimeout(r, 1000));
       return data;
     } catch (e) {
-      await new Promise(r => setTimeout(r, 1000)); // Enforce wait even on failure to prevent spam
+      await new Promise(r => setTimeout(r, 1000)); 
       return null;
     }
   };
@@ -82,6 +80,56 @@ const fetchStrictly = (url: string): Promise<any> => {
   const newPromise = window.__API_QUEUE_PROMISE__.then(task);
   window.__API_QUEUE_PROMISE__ = newPromise.catch(() => {});
   return newPromise;
+};
+
+// 2. CONCURRENT FETCHER (For CF API - Up to 4 requests simultaneously, no artificial delays)
+const fetchCF = (url: string): Promise<any> => {
+  try {
+    const cachedStr = sessionStorage.getItem(`api_cache_${url}`);
+    if (cachedStr) {
+      const cached = JSON.parse(cachedStr);
+      if (Date.now() - cached.timestamp < CACHE_DURATION) return Promise.resolve(cached.data);
+    }
+  } catch (e) {}
+
+  if (typeof window === 'undefined') return Promise.resolve(null);
+
+  if (window.__CF_ACTIVE_REQUESTS__ === undefined) {
+     window.__CF_ACTIVE_REQUESTS__ = 0;
+     window.__CF_QUEUE__ = [];
+  }
+
+  return new Promise((resolve) => {
+    const task = async () => {
+      window.__CF_ACTIVE_REQUESTS__!++;
+      try {
+        const res = await fetch(url, {
+          headers: { "x-vercel-protection-bypass": AUTOMATION_SECRET }
+        });
+        
+        let data = null;
+        if (res.ok || res.status === 202 || res.status === 200) {
+          data = await res.json();
+          try { sessionStorage.setItem(`api_cache_${url}`, JSON.stringify({ timestamp: Date.now(), data })); } catch (e) {}
+        }
+        resolve(data);
+      } catch (e) {
+        resolve(null);
+      } finally {
+        window.__CF_ACTIVE_REQUESTS__!--;
+        if (window.__CF_QUEUE__!.length > 0) {
+          const next = window.__CF_QUEUE__!.shift();
+          if (next) next();
+        }
+      }
+    };
+
+    if (window.__CF_ACTIVE_REQUESTS__! < 4) {
+      task();
+    } else {
+      window.__CF_QUEUE__!.push(task);
+    }
+  });
 };
 
 
@@ -217,11 +265,16 @@ export default function Home() {
         if (idx >= SECTION_CONFIGS.length) break;
         
         const conf = SECTION_CONFIGS[idx];
-        let url = `${API_BASE}${conf.url.replace('{lang}', language || 'hindi')}`;
+        
+        // Target Top 2 to Vercel API and everything else to CF API
+        const isVercel = conf.key === "showcase" || conf.key === "trending";
+        const apiBase = isVercel ? VERCEL_API_BASE : CF_API_BASE;
+        
+        let url = `${apiBase}${conf.url.replace('{lang}', language || 'hindi')}`;
         if (!conf.noPagination) url += url.includes('?') ? '&limit=0,15' : '?limit=0,15';
 
-        // Wait strictly for response AND the 1-sec gap with Automation Token
-        const json = await fetchStrictly(url);
+        // Direct request appropriately based on endpoint limits 
+        const json = isVercel ? await fetchVercelStrictly(url) : await fetchCF(url);
         
         if (json) {
            const items = json?.data?.entities || json?.data?.tracks || json?.data ||[];
@@ -331,9 +384,14 @@ export default function Home() {
     const observer = new IntersectionObserver((entries) => {
       if (entries[0].isIntersecting && !isFetchingViewAll) {
         setIsFetchingViewAll(true);
-        const url = `${API_BASE}${viewAll.endpoint.replace('{lang}', language || 'hindi')}&limit=${viewAll.offset},40`;
         
-        fetchStrictly(url).then(json => {
+        const isVercel = viewAll.key === "showcase" || viewAll.key === "trending";
+        const apiBase = isVercel ? VERCEL_API_BASE : CF_API_BASE;
+        const url = `${apiBase}${viewAll.endpoint.replace('{lang}', language || 'hindi')}&limit=${viewAll.offset},40`;
+        
+        const fetchPromise = isVercel ? fetchVercelStrictly(url) : fetchCF(url);
+        
+        fetchPromise.then(json => {
            const newItems = json?.data?.entities || json?.data?.tracks || json?.data ||[];
            if (Array.isArray(newItems) && newItems.length > 0) {
              setViewAll((prev: any) => {
@@ -387,6 +445,7 @@ export default function Home() {
        window.history.pushState({ viewAllOpen: true }, '', window.location.href); 
     }
     const vAll = { 
+        key: section.key,
         title: section.title, 
         endpoint: section.url.split('&limit')[0].split('?limit')[0],
         noPagination: section.noPagination,
