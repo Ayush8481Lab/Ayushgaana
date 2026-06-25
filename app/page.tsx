@@ -9,7 +9,7 @@ import { Search as SearchIcon, Mic, ChevronLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 // --- API CONSTANTS & SECRETS ---
-const API_BASE = "https://ayushgaa.wonder945177.workers.dev";
+const API_BASE = "https://gaanaayush.wonder945177.workers.dev/api/superserch";
 const CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 
