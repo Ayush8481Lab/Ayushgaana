@@ -1,3 +1,5 @@
+
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -178,8 +180,12 @@ const performAK47Matching = (results: any[], targetTrack: string, targetArtist: 
 
     results.forEach((track) => {
         if (!track) return;
-        const rTitle = clean(track.song_name);
-        const rArtists = clean(track.artist);
+        // Dynamically pull properties to support custom APIs and official Spotify JSON responses
+        const trackName = track.song_name || track.name || track.title || "";
+        const trackArtist = track.artist || (track.artists && Array.isArray(track.artists) ? track.artists.map((a:any)=>a.name).join(" ") : "");
+        
+        const rTitle = clean(trackName);
+        const rArtists = clean(trackArtist);
         let score = 0; let artistMatched = false;
 
         if (tArtist.length > 0) {
@@ -369,7 +375,6 @@ export default function MiniPlayer() {
   
   const[audioUrl, setAudioUrl] = useState("");
   const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
-  const[loading, setLoading] = useState(false);
   const[isBuffering, setIsBuffering] = useState(false);
   const[progress, setProgress] = useState(0);
   const[buffered, setBuffered] = useState(0);
@@ -413,7 +418,7 @@ export default function MiniPlayer() {
   
   // High-performance action lockout to prevent UI fights
   const localActionTimeRef = useRef<number>(0);
-  const requestedDataForTrackRef = useRef<string | null>(null); // Prevents infinite data request loop
+  const requestedDataForTrackRef = useRef<string | null>(null); 
   
   const upcomingQueueRef = useRef<any[]>([]);
   const playContextRef = useRef<any>(null);
@@ -1305,7 +1310,7 @@ export default function MiniPlayer() {
         try {
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (!streamJson) {
-                // Instant stream fetching via Vercel as per instruction
+                // Instant stream fetching via Vercel for low latency
                 const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
                 if (streamRes.ok) {
                     streamJson = await streamRes.json();
@@ -1323,7 +1328,7 @@ export default function MiniPlayer() {
         try {
             let infoJson = await getCache(`gaana_info_${trackId}`);
             if (!infoJson) {
-                // Track Info fetching via Cloudflare worker as per instruction
+                // Track Info fetching via Cloudflare worker as default
                 const infoRes = await fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
                 if (infoRes.ok) {
                     infoJson = await infoRes.json();
@@ -1417,11 +1422,13 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
-               const authRes = await fetchProtected(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
+               const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
                if (authRes.ok) {
                    const authJson = await authRes.json();
-                   if (authJson && authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
-                       const match = performAK47Matching(authJson.results, searchTitle, searchArtist);
+                   // Fix array extraction logic to support BOTH custom structures and standard spotify arrays
+                   const items = authJson.results || authJson.tracks?.items || authJson.data || authJson;
+                   if (items && Array.isArray(items) && items.length > 0) {
+                       const match = performAK47Matching(items, searchTitle, searchArtist);
                        if (match) {
                           const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
                           const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
@@ -1469,43 +1476,42 @@ export default function MiniPlayer() {
        }
     };
 
-    const executeHeavyFetches = async () => {
+    const executeHeavyFetches = () => {
         setLoading(true);
 
-        // Wait, skipSpotifyLyrics evaluates in fetchInfoTask, 
-        // running concurrently means Spotify might fetch even if Gaana exists, 
-        // which provides better latency and overrides elegantly.
-        await Promise.all([
-            fetchStreamTask(),
-            fetchInfoTask(),
-            triggerSpotifyFallback(currentSong, false)
-        ]);
-        
-        if (!isCurrent || signal.aborted) return;
-        setLoading(false);
+        // Fetch stream independently to play instantly without waiting for metadata
+        fetchStreamTask().then(() => {
+            if (!isCurrent || signal.aborted) return;
+            setLoading(false); // Disable spinner immediately once stream resolves
+            
+            // Broadcast initial sync immediately to guests
+            if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
+                broadcastFullSync();
+            }
+        });
 
-        // If Host or Admin, broadcast completion sync
-        if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
-            ablyChannelRef.current.publish('sync', {
-                type: 'FULL_SYNC',
-                senderId: clientIdRef.current,
-                payload: {
-                    song: currentTrackRef.current,
-                    songDetails: songDetailsRef.current,
-                    audioUrl: audioUrlRef.current,
-                    streamBaseUrl: streamBaseUrlRef.current,
-                    lyrics: lyricsRef.current,
-                    syncType: syncTypeRef.current,
-                    canvasData: canvasDataRef.current,
-                    isVideoMode: isVideoModeRef.current,
-                    ytVideoId: ytVideoIdRef.current,
-                    isPlaying: isPlayingRef.current,
-                    time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
-                    queue: upcomingQueueRef.current,
-                    playContext: playContextRef.current
+        // Fetch metadata concurrently in background
+        fetchInfoTask().then(() => {
+            if (!isCurrent || signal.aborted) return;
+            triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics).then(() => {
+                if (!isCurrent || signal.aborted) return;
+                
+                // Broadcast updated canvas & lyrics details if connected
+                if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
+                    ablyChannelRef.current.publish('sync', {
+                        type: 'DATA_UPDATE',
+                        senderId: clientIdRef.current,
+                        payload: {
+                            trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+                            canvasData: canvasDataRef.current,
+                            lyrics: lyricsRef.current,
+                            syncType: syncTypeRef.current,
+                            songDetails: songDetailsRef.current
+                        }
+                    });
                 }
             });
-        }
+        });
     };
 
     executeHeavyFetches();
@@ -1766,7 +1772,7 @@ export default function MiniPlayer() {
       
       setCurrentTime(c); setDuration(d || 0);
 
-      // Lazy load next track stream URL using Vercel after 30 seconds
+      // Lazy load next track stream URL using Vercel immediately when reaching 30 seconds
       if (c > 30 && upcomingQueue.length > 0) {
           const nextTrackId = upcomingQueue[0].id || upcomingQueue[0].track_id;
           if (nextTrackId && prefetchedNextTrackIdRef.current !== nextTrackId) {
@@ -2013,6 +2019,8 @@ export default function MiniPlayer() {
   const handleTouchEnd = () => { 
       if (swipeX > window.innerWidth * 0.4 && !isExpanded && !showQueue) { 
           setCurrentSong(null); setIsPlaying(false); closeMainPlayer(); 
+          if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
+          if (audioRef.current) audioRef.current.src = "";
       } 
       setSwipeX(0); 
   };
@@ -2511,7 +2519,7 @@ const downloadLrcFile = () => {
                   <button onClick={playPrev} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipBack size={36} fill="white" stroke="white" /></button>
                   <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`relative w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
                      {(isBuffering || isVideoLoading) && (
-                         <div className="absolute inset-[-4px] rounded-full border-[3px] border-[#1db954] border-t-transparent animate-spin pointer-events-none" />
+                         <div className="absolute inset-[-4px] rounded-full border-[3px] border-white/80 border-t-transparent animate-spin pointer-events-none" />
                      )}
                      {isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />}
                   </button>
@@ -3078,7 +3086,10 @@ const downloadLrcFile = () => {
           <div className="flex items-center gap-4 flex-shrink-0 pr-2 text-white">
             <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }}><Users size={20} className={jamStatus === 'connected' ? "text-[#1db954]" : ""} /></button>
             <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={toggleVideoMode}><MonitorPlay size={20} className={isVideoMode ? "text-[#1db954]" : ""} /></button>
-            <button className="active:scale-75 transition-transform flex items-center justify-center w-[24px] h-[24px]" onClick={handlePlayPauseToggle}>
+            <button className="relative active:scale-75 transition-transform flex items-center justify-center w-[24px] h-[24px]" onClick={handlePlayPauseToggle}>
+               {isBuffering && (
+                   <div className="absolute inset-[-6px] rounded-full border-[2px] border-white/80 border-t-transparent animate-spin pointer-events-none" />
+               )}
                {isPlaying ? <Pause fill="white" stroke="white" size={24} /> : <Play fill="white" stroke="white" size={24} className="translate-x-[1px]" />}
             </button>
           </div>
