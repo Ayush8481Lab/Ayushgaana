@@ -121,7 +121,7 @@ const fetchNewAuthToken = async () => {
   if (ongoingAuthPromise) return ongoingAuthPromise;
   ongoingAuthPromise = (async () => {
     try {
-      const data = await fetchJina('https://serverayush.vercel.app/api/auth', { referrerPolicy: "no-referrer" });
+      const data = await('https://spotifystreamayush.vercel.app/api/Auth', { referrerPolicy: "no-referrer" });
       if (data && data.accessToken) {
          if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
          return data;
