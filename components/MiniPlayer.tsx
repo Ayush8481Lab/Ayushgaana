@@ -21,6 +21,31 @@ const fetchProtected = async (url: string, options: any = {}) => {
   return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
 };
 
+// Advanced Parser for r.jina.ai
+const fetchJina = async (targetUrl: string, options: any = {}) => {
+  const res = await fetch(`https://r.jina.ai/${targetUrl}`, {
+      ...options,
+      headers: { ...options.headers, "Accept": "application/json", ...bypassHeaders }
+  });
+  const text = await res.text();
+  let result;
+  try {
+      const jinaWrapper = JSON.parse(text);
+      if (jinaWrapper.data && jinaWrapper.data.content) {
+          const match = jinaWrapper.data.content.match(/```(?:json)?\n([\s\S]*?)\n```/);
+          result = match ? JSON.parse(match[1]) : JSON.parse(jinaWrapper.data.content);
+      } else {
+          result = jinaWrapper;
+      }
+  } catch(e) {
+      try {
+          const match = text.match(/```(?:json)?\n([\s\S]*?)\n```/);
+          result = match ? JSON.parse(match[1]) : JSON.parse(text);
+      } catch(err) { result = null; }
+  }
+  return result;
+};
+
 // --- 30-MINUTE INDEXEDDB CACHE ENGINE ---
 const DB_NAME = "GrooveCacheDB";
 const STORE_NAME = "caches";
@@ -86,8 +111,8 @@ const getCachedAuth = () => {
     const cached = localStorage.getItem(AUTH_STORAGE_KEY);
     if (cached) {
       const authData = JSON.parse(cached);
-      // We rely on localExpiry (45 mins from issue time) to prevent server timestamp skew causing loops
-      if (authData.localExpiry && Date.now() < authData.localExpiry) return authData;
+      // Strictly matching original code check to avoid infinite loops
+      if (Date.now() < (authData.accessTokenExpirationTimestampMs - 10000)) return authData;
     }
   } catch (e) {}
   return null;
@@ -100,8 +125,6 @@ const fetchNewAuthToken = async () => {
       const res = await fetchProtected('https://spotifystreamayush.vercel.app/api/Auth', { referrerPolicy: "no-referrer" });
       const data = await res.json();
       if (data && data.accessToken) {
-         // Force 45-minute strict local expiry to avoid infinite loops if server timestamp is weird
-         data.localExpiry = Date.now() + 45 * 60 * 1000;
          if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
          return data;
       }
@@ -172,6 +195,7 @@ const RAPID_API_HOST = "spotify81.p.rapidapi.com";
 
 const QUALITY_MAP: any = { "16": "Low", "64": "Medium", "128": "High", "320": "HD" };
 
+// AK47 Matcher reverted securely to original design targeting proper properties
 const performAK47Matching = (results: any[], targetTrack: string, targetArtist: string): any => {
     if (!results || results.length === 0) return null;
     const clean = (s: string) => decodeEntities(s || "").toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ").trim();
@@ -181,11 +205,8 @@ const performAK47Matching = (results: any[], targetTrack: string, targetArtist: 
 
     results.forEach((track) => {
         if (!track) return;
-        const trackName = track.song_name || track.name || track.title || "";
-        const trackArtist = track.artist || (track.artists && Array.isArray(track.artists) ? track.artists.map((a:any)=>a.name).join(" ") : "");
-        
-        const rTitle = clean(trackName);
-        const rArtists = clean(trackArtist);
+        const rTitle = clean(track.song_name);
+        const rArtists = clean(track.artist);
         let score = 0; let artistMatched = false;
 
         if (tArtist.length > 0) {
@@ -1218,14 +1239,14 @@ export default function MiniPlayer() {
     } catch (e) {}
   },[]);
 
-  // Direct Fetch to ayushvid for Video Prefetching
   const prefetchVideoId = async (songTitle: string, songArtists: string) => {
     try {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
 
-      const dataRes = await fetch(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
+      // Safe fetch via fetchProtected to bypass protections properly
+      const dataRes = await fetchProtected(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       const data = await dataRes.json();
       
       if (data?.top_result?.videoId) { 
@@ -1381,7 +1402,7 @@ export default function MiniPlayer() {
                let dataJson = await getCache(`spotify_data_${sId}`);
                if (!dataJson) {
                    try {
-                       const res = await fetch(`https://ayush-gamma-coral.vercel.app/api/data?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
+                       const res = await fetchProtected(`https://ayush-gamma-coral.vercel.app/api/data?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
                        if (res.ok) {
                            dataJson = await res.json();
                            if (dataJson.success) await setCache(`spotify_data_${sId}`, dataJson);
@@ -1423,13 +1444,14 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
+               // Fixed: Using fetchProtected exactly as requested for the AK47 API to prevent 401 Unauthorized
                const authRes = await fetchProtected(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
                if (authRes.ok) {
                    const authJson = await authRes.json();
-                   // Fix array extraction logic to support BOTH custom structures and standard spotify arrays
-                   const items = authJson.results || authJson.tracks?.items || authJson.data || authJson;
-                   if (items && Array.isArray(items) && items.length > 0) {
-                       const match = performAK47Matching(items, searchTitle, searchArtist);
+                   
+                   // Retaining exact original checking format for AK47 responses
+                   if (authJson && authJson.results && Array.isArray(authJson.results) && authJson.results.length > 0) {
+                       const match = performAK47Matching(authJson.results, searchTitle, searchArtist);
                        if (match) {
                           const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
                           const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
@@ -1487,14 +1509,14 @@ export default function MiniPlayer() {
         if (isVideoModeRef.current) {
             setIsVideoLoading(true);
             
-            // 1. Fetch Video ID instantly and play it
+            // 1. Fetch Video ID instantly and play it immediately without blocking
             prefetchVideoId(searchTitle, searchArtist).then((vid) => {
                 if (!isCurrent || signal.aborted) return;
                 if (vid) setYtVideoId(vid);
                 setIsVideoLoading(false);
-                setLoading(false); // Remove main loading spinner too
+                setLoading(false); // Remove main loading spinner immediately
                 
-                // 2. Now fetch Stream, Info, and Spotify Fallback in background quietly
+                // 2. Fetch Stream, Info, and Spotify Fallback in background quietly
                 Promise.all([fetchStreamTask(), fetchInfoTask()]).then(() => {
                     if (!isCurrent || signal.aborted) return;
                     triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics).then(() => {
@@ -1519,14 +1541,14 @@ export default function MiniPlayer() {
             // Audio mode: Fetch audio stream instantly and play
             fetchStreamTask().then(() => {
                 if (!isCurrent || signal.aborted) return;
-                setLoading(false); // Remove main loading spinner immediately
+                setLoading(false); // Remove main loading spinner immediately when music starts
                 
                 if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
                     broadcastFullSync();
                 }
             });
 
-            // Fetch metadata and spotify in background
+            // Fetch metadata and spotify quietly in background
             fetchInfoTask().then(() => {
                 if (!isCurrent || signal.aborted) return;
                 triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics).then(() => {
@@ -1547,7 +1569,7 @@ export default function MiniPlayer() {
                 });
             });
             
-            // Prefetch video silently in background so TV button is instant if clicked later
+            // Prefetch video silently in background so TV button works instantly if clicked later
             prefetchVideoId(searchTitle, searchArtist);
         }
     };
@@ -1810,7 +1832,7 @@ export default function MiniPlayer() {
       
       setCurrentTime(c); setDuration(d || 0);
 
-      // Lazy load next track stream URL using Vercel immediately when reaching 30 seconds
+      // Lazy load next track stream URL immediately when reaching 30 seconds
       if (c > 30 && upcomingQueue.length > 0) {
           const nextTrackId = upcomingQueue[0].id || upcomingQueue[0].track_id;
           if (nextTrackId && prefetchedNextTrackIdRef.current !== nextTrackId) {
