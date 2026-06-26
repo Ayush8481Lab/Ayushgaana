@@ -1,5 +1,3 @@
-
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -88,7 +86,8 @@ const getCachedAuth = () => {
     const cached = localStorage.getItem(AUTH_STORAGE_KEY);
     if (cached) {
       const authData = JSON.parse(cached);
-      if (Date.now() < (authData.accessTokenExpirationTimestampMs - 10000)) return authData;
+      // We rely on localExpiry (45 mins from issue time) to prevent server timestamp skew causing loops
+      if (authData.localExpiry && Date.now() < authData.localExpiry) return authData;
     }
   } catch (e) {}
   return null;
@@ -101,6 +100,8 @@ const fetchNewAuthToken = async () => {
       const res = await fetchProtected('https://spotifystreamayush.vercel.app/api/Auth', { referrerPolicy: "no-referrer" });
       const data = await res.json();
       if (data && data.accessToken) {
+         // Force 45-minute strict local expiry to avoid infinite loops if server timestamp is weird
+         data.localExpiry = Date.now() + 45 * 60 * 1000;
          if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
          return data;
       }
@@ -180,7 +181,6 @@ const performAK47Matching = (results: any[], targetTrack: string, targetArtist: 
 
     results.forEach((track) => {
         if (!track) return;
-        // Dynamically pull properties to support custom APIs and official Spotify JSON responses
         const trackName = track.song_name || track.name || track.title || "";
         const trackArtist = track.artist || (track.artists && Array.isArray(track.artists) ? track.artists.map((a:any)=>a.name).join(" ") : "");
         
@@ -375,7 +375,7 @@ export default function MiniPlayer() {
   
   const[audioUrl, setAudioUrl] = useState("");
   const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const[loading, setLoading] = useState(false);
   const[isBuffering, setIsBuffering] = useState(false);
   const[progress, setProgress] = useState(0);
   const[buffered, setBuffered] = useState(0);
@@ -1423,7 +1423,7 @@ export default function MiniPlayer() {
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
-               const authRes = await fetch(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
+               const authRes = await fetchProtected(`https://ak47ayush.vercel.app/search?q=${encodeURIComponent(query)}&CID=${auth.clientId}&token=${auth.accessToken}&limit=25&offset=0`, { referrerPolicy: "no-referrer", signal });
                if (authRes.ok) {
                    const authJson = await authRes.json();
                    // Fix array extraction logic to support BOTH custom structures and standard spotify arrays
@@ -1480,39 +1480,76 @@ export default function MiniPlayer() {
     const executeHeavyFetches = () => {
         setLoading(true);
 
-        // Fetch stream independently to play instantly without waiting for metadata
-        fetchStreamTask().then(() => {
-            if (!isCurrent || signal.aborted) return;
-            setLoading(false); // Disable spinner immediately once stream resolves
-            
-            // Broadcast initial sync immediately to guests
-            if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
-                broadcastFullSync();
-            }
-        });
+        const searchTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
+        const searchArtistsFull = decodeEntities(getArtistsText(currentSong));
+        const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
 
-        // Fetch metadata concurrently in background
-        fetchInfoTask().then(() => {
-            if (!isCurrent || signal.aborted) return;
-            triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics).then(() => {
+        if (isVideoModeRef.current) {
+            setIsVideoLoading(true);
+            
+            // 1. Fetch Video ID instantly and play it
+            prefetchVideoId(searchTitle, searchArtist).then((vid) => {
                 if (!isCurrent || signal.aborted) return;
+                if (vid) setYtVideoId(vid);
+                setIsVideoLoading(false);
+                setLoading(false); // Remove main loading spinner too
                 
-                // Broadcast updated canvas & lyrics details if connected
-                if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
-                    ablyChannelRef.current.publish('sync', {
-                        type: 'DATA_UPDATE',
-                        senderId: clientIdRef.current,
-                        payload: {
-                            trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
-                            canvasData: canvasDataRef.current,
-                            lyrics: lyricsRef.current,
-                            syncType: syncTypeRef.current,
-                            songDetails: songDetailsRef.current
+                // 2. Now fetch Stream, Info, and Spotify Fallback in background quietly
+                Promise.all([fetchStreamTask(), fetchInfoTask()]).then(() => {
+                    if (!isCurrent || signal.aborted) return;
+                    triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics).then(() => {
+                        if (!isCurrent || signal.aborted) return;
+                        if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
+                            ablyChannelRef.current.publish('sync', {
+                                type: 'DATA_UPDATE',
+                                senderId: clientIdRef.current,
+                                payload: {
+                                    trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+                                    canvasData: canvasDataRef.current,
+                                    lyrics: lyricsRef.current,
+                                    syncType: syncTypeRef.current,
+                                    songDetails: songDetailsRef.current
+                                }
+                            });
                         }
                     });
+                });
+            });
+        } else {
+            // Audio mode: Fetch audio stream instantly and play
+            fetchStreamTask().then(() => {
+                if (!isCurrent || signal.aborted) return;
+                setLoading(false); // Remove main loading spinner immediately
+                
+                if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
+                    broadcastFullSync();
                 }
             });
-        });
+
+            // Fetch metadata and spotify in background
+            fetchInfoTask().then(() => {
+                if (!isCurrent || signal.aborted) return;
+                triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics).then(() => {
+                    if (!isCurrent || signal.aborted) return;
+                    if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
+                        ablyChannelRef.current.publish('sync', {
+                            type: 'DATA_UPDATE',
+                            senderId: clientIdRef.current,
+                            payload: {
+                                trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
+                                canvasData: canvasDataRef.current,
+                                lyrics: lyricsRef.current,
+                                syncType: syncTypeRef.current,
+                                songDetails: songDetailsRef.current
+                            }
+                        });
+                    }
+                });
+            });
+            
+            // Prefetch video silently in background so TV button is instant if clicked later
+            prefetchVideoId(searchTitle, searchArtist);
+        }
     };
 
     executeHeavyFetches();
@@ -2519,8 +2556,8 @@ const downloadLrcFile = () => {
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setIsShuffle(!isShuffle); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 pointer-events-auto ${isShuffle ? 'text-[#1db954]' : 'text-white'}`}><Shuffle size={24} /></button>
                   <button onClick={playPrev} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipBack size={36} fill="white" stroke="white" /></button>
                   <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`relative w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
-                     {(isBuffering || isVideoLoading) && (
-                         <div className="absolute inset-[-4px] rounded-full border-[3px] border-white/80 border-t-transparent animate-spin pointer-events-none" />
+                     {isBuffering && (
+                         <div className="absolute inset-[-4px] rounded-full border-[3px] border-[#1db954] border-t-transparent animate-spin pointer-events-none" />
                      )}
                      {isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />}
                   </button>
