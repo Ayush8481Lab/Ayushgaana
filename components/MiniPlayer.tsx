@@ -121,7 +121,7 @@ const fetchNewAuthToken = async () => {
   if (ongoingAuthPromise) return ongoingAuthPromise;
   ongoingAuthPromise = (async () => {
     try {
-      const data = await fetchProtected('https://spotifystreamayush.vercel.app/api/Auth', { referrerPolicy: "no-referrer" });
+      const data = await fetchJina('https://spotifystreamayush.vercel.app/api/Auth', { referrerPolicy: "no-referrer" });
       if (data && data.accessToken) {
          if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
          return data;
@@ -400,7 +400,11 @@ export default function MiniPlayer() {
   
   const[audioUrl, setAudioUrl] = useState("");
   const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
-  const[loading, setLoading] = useState(false);
+  
+  // Buffering States
+  const[isStreamLoading, setIsStreamLoading] = useState(false);
+  const[isAudioBuffering, setIsAudioBuffering] = useState(false);
+  
   const[progress, setProgress] = useState(0);
   const[buffered, setBuffered] = useState(0);
   const[currentTime, setCurrentTime] = useState(0);
@@ -571,7 +575,8 @@ export default function MiniPlayer() {
   const handleLikeClick = (e: any) => { e.stopPropagation(); toggleLikeSong(currentSong); };
 
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen && canvasData?.canvasUrl;
-  
+  const isBuffering = isStreamLoading || isAudioBuffering || isVideoLoading;
+
   // Admin is NOT guest locked for UI
   const isGuestLocked = jamRole === 'guest' && jamStatus === 'connected';
 
@@ -1327,6 +1332,7 @@ export default function MiniPlayer() {
     let skipSpotifyLyrics = false;
 
     const fetchStreamTask = async () => {
+        setIsStreamLoading(true);
         try {
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (!streamJson) {
@@ -1340,7 +1346,9 @@ export default function MiniPlayer() {
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
-        } catch (e: any) { }
+        } catch (e: any) { } finally {
+            setIsStreamLoading(false);
+        }
     };
 
     const fetchInfoTask = async () => {
@@ -1394,38 +1402,29 @@ export default function MiniPlayer() {
            if (!isCurrent || signal.aborted) return;
            setSpotifyId(sId); setSpotifyUrl(sUrl);
            
-           const tasks =[];
-
-           if (isLyricsEnabledRef.current && !skipLyrics && !signal.aborted) {
-              tasks.push((async () => {
-                  let lyricsJson = await getCache(`lyrics_${sId}`);
-                  if (!lyricsJson) {
-                      lyricsJson = await fetchJina(`https://lyr-nine.vercel.app/api/lyrics?url=${encodeURIComponent(sUrl)}&format=lrc`, { referrerPolicy: "no-referrer", signal });
-                      if (lyricsJson && !lyricsJson.error) await setCache(`lyrics_${sId}`, lyricsJson);
-                      else lyricsJson = { notFound: true };
-                  }
-                  if (isCurrent && lyricsJson && !lyricsJson.notFound && lyricsJson.lines && !signal.aborted) { 
-                      setLyrics(lyricsJson.lines.map((l: any) => ({ time: parseTimeTag(l.timeTag), words: l.words }))); 
-                      setSyncType(lyricsJson.syncType);
-                  }
-              })());
-           }
-
-           if (isCanvasEnabledRef.current && !signal.aborted) {
-              tasks.push((async () => {
-                  let canvasJson = await getCache(`canvas_${sId}`);
-                  if (!canvasJson) {
-                      canvasJson = await fetchJina(`https://ayush-gamma-coral.vercel.app/api/canvas?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
-                      if (canvasJson && canvasJson.canvasesList) await setCache(`canvas_${sId}`, canvasJson);
-                      else canvasJson = { notFound: true };
-                  }
-                  if (isCurrent && canvasJson && !canvasJson.notFound && canvasJson.canvasesList?.length > 0 && !signal.aborted) {
-                      setCanvasData(canvasJson.canvasesList[0]);
-                  }
-              })());
-           }
-
-           await Promise.all(tasks);
+           if (!isCanvasEnabledRef.current && (!isLyricsEnabledRef.current || skipLyrics)) return;
+           
+           try {
+               let dataJson = await getCache(`spotify_data_${sId}`);
+               if (!dataJson) {
+                   dataJson = await fetchJina(`https://ayush-gamma-coral.vercel.app/api/data?trackId=${sId}`, { referrerPolicy: "no-referrer", signal });
+                   if (dataJson && dataJson.success) await setCache(`spotify_data_${sId}`, dataJson);
+                   else dataJson = { notFound: true };
+               }
+               if (isCurrent && dataJson && !dataJson.notFound && !signal.aborted) {
+                   if (isCanvasEnabledRef.current && dataJson.data?.canvas?.canvasesList?.length > 0) {
+                       setCanvasData(dataJson.data.canvas.canvasesList[0]);
+                   }
+                   if (isLyricsEnabledRef.current && !skipLyrics && dataJson.data?.lyrics?.lyrics?.lines) {
+                       const parsedLyrics = dataJson.data.lyrics.lyrics.lines.map((l: any) => ({
+                           time: Number(l.startTimeMs) / 1000,
+                           words: l.words
+                       }));
+                       setLyrics(parsedLyrics);
+                       setSyncType(dataJson.data.lyrics.lyrics.syncType);
+                   }
+               }
+           } catch(e) {}
        };
 
        if (cachedMatch) { 
@@ -1496,46 +1495,31 @@ export default function MiniPlayer() {
     };
 
     const executeHeavyFetches = async () => {
-        setLoading(true);
         const searchTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
         const searchArtistsFull = decodeEntities(getArtistsText(currentSong));
         const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
+        
+        // Unleash Fast Parallel Processes
+        fetchStreamTask(); 
+        fetchInfoTask();
+        getAuthData();
 
         if (isVideoModeRef.current) {
             setIsVideoLoading(true);
-            const vid = await prefetchVideoId(searchTitle, searchArtist);
-            if (vid && isCurrent && !signal.aborted) setYtVideoId(vid);
-            setIsVideoLoading(false);
-
-            await new Promise(r => setTimeout(r, 1500));
-            if (!isCurrent || signal.aborted) return;
-
-            await Promise.all([fetchStreamTask(), fetchInfoTask()]);
-            if (!isCurrent || signal.aborted) return;
-            setLoading(false);
-
-            getAuthData();
-            await new Promise(r => setTimeout(r, 1500));
-            if (!isCurrent || signal.aborted) return;
-
-            await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
-
+            prefetchVideoId(searchTitle, searchArtist).then(vid => {
+                if (vid && isCurrent && !signal.aborted) setYtVideoId(vid);
+                setIsVideoLoading(false);
+            });
         } else {
-            const p1 = fetchStreamTask();
-            const p2 = fetchInfoTask();
-            const p3 = getAuthData();
-            const p4 = prefetchVideoId(searchTitle, searchArtist);
-            
-            await Promise.all([p1, p2, p3, p4]);
-            
-            if (!isCurrent || signal.aborted) return;
-            setLoading(false);
-
-            await new Promise(r => setTimeout(r, 1500));
-            if (!isCurrent || signal.aborted) return;
-
-            await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
+            prefetchVideoId(searchTitle, searchArtist);
         }
+
+        // Extremely fast 0.5s network clearance block for Vercel functions pacing (No playback block)
+        await new Promise(r => setTimeout(r, 500));
+        
+        if (!isCurrent || signal.aborted) return;
+        
+        await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
         
         // If Host or Admin, broadcast completion sync
         if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current && isCurrent && !signal.aborted) {
@@ -2444,10 +2428,38 @@ const downloadLrcFile = () => {
         .no-select-text { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
         .queue-item { transform-origin: center; will-change: transform; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); }
         .lyric-word-sync { background: linear-gradient(to right, #ffffff calc(var(--p, 0%) - 15%), rgba(255,255,255,0.2) var(--p, 0%)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; color: transparent; will-change: background; transform: translateZ(0); }
+        
+        @keyframes spin-buffer { 100% { transform: rotate(360deg); } }
+        
+        .spotify-spinner {
+            position: absolute;
+            inset: -4px;
+            border-radius: 50%;
+            background: conic-gradient(from 0deg, transparent 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,1) 100%);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
+            animation: spin-buffer 1s linear infinite;
+        }
+        
+        .spotify-spinner-mini {
+            position: absolute;
+            inset: -6px;
+            border-radius: 50%;
+            background: conic-gradient(from 0deg, transparent 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,1) 100%);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px));
+            mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px));
+            animation: spin-buffer 1s linear infinite;
+        }
       `}} />
 
       <audio 
-        ref={audioRef} autoPlay={isPlaying && !isVideoMode} onEnded={() => playNext(true)} onTimeUpdate={handleTimeUpdate} crossOrigin="anonymous" 
+        ref={audioRef} autoPlay={isPlaying && !isVideoMode} 
+        onEnded={() => playNext(true)} 
+        onTimeUpdate={handleTimeUpdate}
+        onWaiting={() => setIsAudioBuffering(true)}
+        onPlaying={() => setIsAudioBuffering(false)}
+        onCanPlay={() => setIsAudioBuffering(false)}
+        crossOrigin="anonymous" 
         onLoadedMetadata={() => { 
            const dur = audioRef.current?.duration || 0; setDuration(dur); 
            if (restoreTimeRef.current !== null && restoreTimeRef.current > 0) { audioRef.current!.currentTime = restoreTimeRef.current; setCurrentTime(restoreTimeRef.current); restoreTimeRef.current = null; } 
@@ -2499,7 +2511,6 @@ const downloadLrcFile = () => {
                 </div>
               ) : (
                 <div className={`relative bg-[#282828] rounded-[8px] shadow-[0_15px_40px_rgba(0,0,0,0.5)] overflow-hidden transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${isCanvasLoaded && isCanvasEnabled ? 'opacity-0 scale-75 pointer-events-none hidden' : 'opacity-100 scale-100 block'}`} style={{ width: '100%', aspectRatio: '1/1', maxWidth: '380px', maxHeight: '50vh' }}>
-                  {(loading || isVideoLoading) && <div className="absolute inset-0 z-10 bg-black/50 flex items-center justify-center"><Loader2 size={40} className="animate-spin text-white" /></div>}
                   {displayImage && <img draggable={false} src={displayImage} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" />}
                 </div>
               )}
@@ -2531,9 +2542,14 @@ const downloadLrcFile = () => {
                 <div className={`flex items-center justify-between w-full px-1 drop-shadow-md no-select-text ${isLyricsFullScreen ? 'mb-0' : (isCanvasActive ? 'mb-2' : 'mb-5')}`}>
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setIsShuffle(!isShuffle); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 pointer-events-auto ${isShuffle ? 'text-[#1db954]' : 'text-white'}`}><Shuffle size={24} /></button>
                   <button onClick={playPrev} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipBack size={36} fill="white" stroke="white" /></button>
-                  <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
-                     {(loading || isVideoLoading) ? <Loader2 size={26} className="animate-spin text-black" /> : (isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />)}
-                  </button>
+                  
+                  <div className="relative flex items-center justify-center">
+                      {isBuffering && <div className="spotify-spinner pointer-events-none z-0" />}
+                      <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg relative z-10 ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
+                         {isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />}
+                      </button>
+                  </div>
+                  
                   <button id="next-song-btn" onClick={() => playNext()} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipForward size={36} fill="white" stroke="white" /></button>
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setRepeatMode((prev) => (prev + 1) % 3); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 relative pointer-events-auto ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}><Repeat size={24} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</button>
                 </div>
@@ -3091,15 +3107,16 @@ const downloadLrcFile = () => {
         <div className="absolute inset-0 bg-black/25 z-0 pointer-events-none" />
         <div className="relative z-10 w-full h-full flex items-center px-2">
           <div className="w-[40px] h-[40px] flex-shrink-0 rounded-[4px] shadow-sm overflow-hidden bg-[#282828] relative mr-3">
-            {(loading || isVideoLoading) && <div className="absolute inset-0 bg-black/40 flex items-center justify-center"><Loader2 size={16} className="animate-spin text-white" /></div>}
             {displayImage && <img draggable={false} src={displayImage} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" />}
           </div>
           <div className="flex flex-col flex-1 min-w-0 pr-3 justify-center"><MarqueeText text={displayTitle} className="text-[13px] font-bold text-white leading-tight mb-[2px] w-full" /><MarqueeText text={displayArtists} className="text-[12px] font-medium text-white/70 leading-tight w-full" /></div>
           <div className="flex items-center gap-4 flex-shrink-0 pr-2 text-white">
             <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={(e) => { e.stopPropagation(); setShowJamMenu(true); }}><Users size={20} className={jamStatus === 'connected' ? "text-[#1db954]" : ""} /></button>
             <button className="active:scale-75 transition-transform flex items-center justify-center w-[20px] h-[20px]" onClick={toggleVideoMode}><MonitorPlay size={20} className={isVideoMode ? "text-[#1db954]" : ""} /></button>
-            <button className="active:scale-75 transition-transform flex items-center justify-center w-[24px] h-[24px]" onClick={handlePlayPauseToggle}>
-               {(loading || isVideoLoading) ? <Loader2 size={24} className="animate-spin text-white" /> : (isPlaying ? <Pause fill="white" stroke="white" size={24} /> : <Play fill="white" stroke="white" size={24} className="translate-x-[1px]" />)}
+            
+            <button className="active:scale-75 transition-transform flex items-center justify-center w-[24px] h-[24px] relative" onClick={handlePlayPauseToggle}>
+               {isBuffering && <div className="spotify-spinner-mini pointer-events-none z-0" />}
+               {isPlaying ? <Pause fill="white" stroke="white" size={24} /> : <Play fill="white" stroke="white" size={24} className="translate-x-[1px]" />}
             </button>
           </div>
         </div>
