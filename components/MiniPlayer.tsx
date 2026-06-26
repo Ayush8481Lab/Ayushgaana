@@ -21,31 +21,6 @@ const fetchProtected = async (url: string, options: any = {}) => {
   return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
 };
 
-// Advanced Parser for r.jina.ai (Kept for Auth/Other fallbacks if needed)
-const fetchJina = async (targetUrl: string, options: any = {}) => {
-  const res = await fetch(`https://r.jina.ai/${targetUrl}`, {
-      ...options,
-      headers: { ...options.headers, "Accept": "application/json", ...bypassHeaders }
-  });
-  const text = await res.text();
-  let result;
-  try {
-      const jinaWrapper = JSON.parse(text);
-      if (jinaWrapper.data && jinaWrapper.data.content) {
-          const match = jinaWrapper.data.content.match(/```(?:json)?\n([\s\S]*?)\n```/);
-          result = match ? JSON.parse(match[1]) : JSON.parse(jinaWrapper.data.content);
-      } else {
-          result = jinaWrapper;
-      }
-  } catch(e) {
-      try {
-          const match = text.match(/```(?:json)?\n([\s\S]*?)\n```/);
-          result = match ? JSON.parse(match[1]) : JSON.parse(text);
-      } catch(err) { result = null; }
-  }
-  return result;
-};
-
 // --- 30-MINUTE INDEXEDDB CACHE ENGINE ---
 const DB_NAME = "GrooveCacheDB";
 const STORE_NAME = "caches";
@@ -121,7 +96,8 @@ const fetchNewAuthToken = async () => {
   if (ongoingAuthPromise) return ongoingAuthPromise;
   ongoingAuthPromise = (async () => {
     try {
-      const data = await fetchJina('https://spotifystreamayush.vercel.app/api/Auth', { referrerPolicy: "no-referrer" });
+      const res = await fetchProtected('https://spotifystreamayush.vercel.app/api/Auth', { referrerPolicy: "no-referrer" });
+      const data = await res.json();
       if (data && data.accessToken) {
          if (typeof window !== "undefined") localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(data));
          return data;
@@ -186,13 +162,6 @@ const formatTime = (time: number) => {
   const minutes = Math.floor(time / 60);
   const seconds = Math.floor(time % 60);
   return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
-};
-
-const parseTimeTag = (tag: string) => {
-  if (!tag) return 0;
-  const parts = tag.split(':');
-  if (parts.length >= 2) return parseInt(parts[0], 10) * 60 + parseFloat(parts[1]);
-  return 0;
 };
 
 const RAPID_KEYS =["d1edce158amshec139440d20658ap1f2545jsnbb7da9add82f", "6cf7f03014msh787c51a713c0264p15c20djsna1f9a9f6a378", "13d48f6bb8msh459c11b91bdcc44p110f4ejsn099443894115", "03fc23317fmsh0535ef9ec8c6f5bp1db59bjsn545991df9343", "e54e3fbc4dmshfc16d4417b618fdp1a2fafjsn30c72d8cf3ab"];
@@ -473,6 +442,7 @@ export default function MiniPlayer() {
   // High-performance payload broadcast tracking
   const songStartTrackingRef = useRef<number>(Date.now());
   const lastFetchedTrackIdRef = useRef<string | null>(null);
+  const prefetchedNextTrackIdRef = useRef<string | null>(null);
   
   const[dominantColor, setDominantColor] = useState("rgb(83, 83, 83)");
   const[isScrolledPastMain, setIsScrolledPastMain] = useState(false);
@@ -595,25 +565,6 @@ export default function MiniPlayer() {
           window.removeEventListener('touchstart', unlockAudio);
       };
   }, []);
-
-  // --- PREFETCH/LAZY LOAD NEXT 3 SONGS ---
-  useEffect(() => {
-    if (!upcomingQueue || upcomingQueue.length === 0) return;
-    const nextThree = upcomingQueue.slice(0, 3);
-    nextThree.forEach((song: any) => {
-        const trackId = song.id || song.track_id;
-        if (!trackId) return;
-        getCache(`gaana_stream_${trackId}`).then(cached => {
-            if (!cached) {
-                fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/stream/${trackId}`, { referrerPolicy: "no-referrer" })
-                .then(res => res.json())
-                .then(data => {
-                    if (data?.data) setCache(`gaana_stream_${trackId}`, data);
-                }).catch(() => {});
-            }
-        });
-    });
-  }, [upcomingQueue]);
 
   // --- HOST/ADMIN SYNC BROADCASTER ---
   const broadcastFullSync = useCallback(() => {
@@ -1291,6 +1242,7 @@ export default function MiniPlayer() {
   useEffect(() => {
     if (!currentSong) return;
     songStartTrackingRef.current = Date.now();
+    prefetchedNextTrackIdRef.current = null;
     
     // IF THIS SONG CHANGE IS TRIGGERED BY A SYNC EVENT:
     if (isSystemSongChangeRef.current) {
@@ -1519,48 +1471,21 @@ export default function MiniPlayer() {
 
     const executeHeavyFetches = async () => {
         setLoading(true);
-        const searchTitle = decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown");
-        const searchArtistsFull = decodeEntities(getArtistsText(currentSong));
-        const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
 
-        if (isVideoModeRef.current) {
-            setIsVideoLoading(true);
-            const vid = await prefetchVideoId(searchTitle, searchArtist);
-            if (vid && isCurrent && !signal.aborted) setYtVideoId(vid);
-            setIsVideoLoading(false);
-
-            await new Promise(r => setTimeout(r, 1500));
-            if (!isCurrent || signal.aborted) return;
-
-            await Promise.all([fetchStreamTask(), fetchInfoTask()]);
-            if (!isCurrent || signal.aborted) return;
-            setLoading(false);
-
-            getAuthData();
-            await new Promise(r => setTimeout(r, 1500));
-            if (!isCurrent || signal.aborted) return;
-
-            await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
-
-        } else {
-            const p1 = fetchStreamTask();
-            const p2 = fetchInfoTask();
-            const p3 = getAuthData();
-            const p4 = prefetchVideoId(searchTitle, searchArtist);
-            
-            await Promise.all([p1, p2, p3, p4]);
-            
-            if (!isCurrent || signal.aborted) return;
-            setLoading(false);
-
-            await new Promise(r => setTimeout(r, 1500));
-            if (!isCurrent || signal.aborted) return;
-
-            await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
-        }
+        // Wait, skipSpotifyLyrics evaluates in fetchInfoTask, 
+        // running concurrently means Spotify might fetch even if Gaana exists, 
+        // which provides better latency and overrides elegantly.
+        await Promise.all([
+            fetchStreamTask(),
+            fetchInfoTask(),
+            triggerSpotifyFallback(currentSong, false)
+        ]);
         
+        if (!isCurrent || signal.aborted) return;
+        setLoading(false);
+
         // If Host or Admin, broadcast completion sync
-        if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current && isCurrent && !signal.aborted) {
+        if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
             ablyChannelRef.current.publish('sync', {
                 type: 'FULL_SYNC',
                 senderId: clientIdRef.current,
@@ -1840,6 +1765,23 @@ export default function MiniPlayer() {
       lastTimeUpdateRef.current = now;
       
       setCurrentTime(c); setDuration(d || 0);
+
+      // Lazy load next track stream URL using Vercel after 30 seconds
+      if (c > 30 && upcomingQueue.length > 0) {
+          const nextTrackId = upcomingQueue[0].id || upcomingQueue[0].track_id;
+          if (nextTrackId && prefetchedNextTrackIdRef.current !== nextTrackId) {
+              prefetchedNextTrackIdRef.current = nextTrackId;
+              getCache(`gaana_stream_${nextTrackId}`).then(cached => {
+                  if (!cached) {
+                      fetchProtected(`https://gaanaayush.vercel.app/api/stream/${nextTrackId}`, { referrerPolicy: "no-referrer" })
+                      .then(res => res.json())
+                      .then(data => {
+                          if (data?.data) setCache(`gaana_stream_${nextTrackId}`, data);
+                      }).catch(() => {});
+                  }
+              });
+          }
+      }
       
       if (d > 0 && !isSeekingRef.current && isExpanded) {
         const currentPercent = (c / d) * 100;
@@ -2536,7 +2478,6 @@ const downloadLrcFile = () => {
                 </div>
               ) : (
                 <div className={`relative bg-[#282828] rounded-[8px] shadow-[0_15px_40px_rgba(0,0,0,0.5)] overflow-hidden transition-all duration-700 ease-[cubic-bezier(0.32,0.72,0,1)] ${isCanvasLoaded && isCanvasEnabled ? 'opacity-0 scale-75 pointer-events-none hidden' : 'opacity-100 scale-100 block'}`} style={{ width: '100%', aspectRatio: '1/1', maxWidth: '380px', maxHeight: '50vh' }}>
-                  {(loading || isVideoLoading) && <div className="absolute inset-0 z-10 bg-black/50 flex items-center justify-center"><Loader2 size={40} className="animate-spin text-white" /></div>}
                   {displayImage && <img draggable={false} src={displayImage} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" />}
                 </div>
               )}
@@ -2568,8 +2509,11 @@ const downloadLrcFile = () => {
                 <div className={`flex items-center justify-between w-full px-1 drop-shadow-md no-select-text ${isLyricsFullScreen ? 'mb-0' : (isCanvasActive ? 'mb-2' : 'mb-5')}`}>
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setIsShuffle(!isShuffle); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 pointer-events-auto ${isShuffle ? 'text-[#1db954]' : 'text-white'}`}><Shuffle size={24} /></button>
                   <button onClick={playPrev} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipBack size={36} fill="white" stroke="white" /></button>
-                  <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
-                     {(isBuffering || isVideoLoading) ? <Loader2 size={26} className="animate-spin text-black" /> : (isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />)}
+                  <button ref={nextBtnRef} onClick={handlePlayPauseToggle} className={`relative w-[64px] h-[64px] rounded-full bg-white flex items-center justify-center text-black active:scale-95 transition-transform shadow-lg ${isGuestLocked ? 'pointer-events-none opacity-80' : 'pointer-events-auto'}`}>
+                     {(isBuffering || isVideoLoading) && (
+                         <div className="absolute inset-[-4px] rounded-full border-[3px] border-[#1db954] border-t-transparent animate-spin pointer-events-none" />
+                     )}
+                     {isPlaying ? <Pause fill="black" stroke="black" size={26} /> : <Play fill="black" stroke="black" size={28} className="translate-x-[2px]" />}
                   </button>
                   <button id="next-song-btn" onClick={() => playNext()} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipForward size={36} fill="white" stroke="white" /></button>
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setRepeatMode((prev) => (prev + 1) % 3); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 relative pointer-events-auto ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}><Repeat size={24} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</button>
@@ -3128,7 +3072,6 @@ const downloadLrcFile = () => {
         <div className="absolute inset-0 bg-black/25 z-0 pointer-events-none" />
         <div className="relative z-10 w-full h-full flex items-center px-2">
           <div className="w-[40px] h-[40px] flex-shrink-0 rounded-[4px] shadow-sm overflow-hidden bg-[#282828] relative mr-3">
-            {loading && <div className="absolute inset-0 bg-black/40 flex items-center justify-center"><Loader2 size={16} className="animate-spin text-white" /></div>}
             {displayImage && <img draggable={false} src={displayImage} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" />}
           </div>
           <div className="flex flex-col flex-1 min-w-0 pr-3 justify-center"><MarqueeText text={displayTitle} className="text-[13px] font-bold text-white leading-tight mb-[2px] w-full" /><MarqueeText text={displayArtists} className="text-[12px] font-medium text-white/70 leading-tight w-full" /></div>
