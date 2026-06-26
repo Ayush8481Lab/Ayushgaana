@@ -375,6 +375,7 @@ export default function MiniPlayer() {
   
   const[audioUrl, setAudioUrl] = useState("");
   const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const[isBuffering, setIsBuffering] = useState(false);
   const[progress, setProgress] = useState(0);
   const[buffered, setBuffered] = useState(0);
