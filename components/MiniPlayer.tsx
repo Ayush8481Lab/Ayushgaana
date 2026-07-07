@@ -103,58 +103,89 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
   } catch(e) {}
 };
 
-// --- LYRICS TRANSLITERATION ENGINE ---
+// --- FLAWLESS LYRICS TRANSLITERATION ENGINE ---
 const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en') => {
-    if (!originalLyrics || !originalLyrics.length) return [];
+    if (!originalLyrics || !originalLyrics.length || lang === 'original') return originalLyrics;
     
-    // Combining for bulk Indic translation checks
-    const fullText = originalLyrics.map(l => l.words || "").join(" \n ");
-    const hasIndic = /[\u0900-\u0DFF]/.test(fullText);
-    const hasEnglish = /[a-zA-Z]/.test(fullText);
-
-    // 1. Aksharamukha Bulk Paths (Indic Scripts <-> Roman/Hindi)
-    if (lang === 'hi' && hasIndic) {
-        try {
-            const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=Devanagari&text=${encodeURIComponent(fullText)}`);
-            if (res.ok) {
-                const lines = (await res.text()).split(" \n ");
-                return originalLyrics.map((l, i) => ({ ...l, words: lines[i] || l.words }));
-            }
-        } catch(e) { console.error("Aksharamukha Devanagari Error:", e); }
-    } else if (lang === 'en' && hasIndic) {
-        try {
-            const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=ISO&text=${encodeURIComponent(fullText)}`);
-            if (res.ok) {
-                const lines = (await res.text()).split(" \n ");
-                return originalLyrics.map((l, i) => ({ ...l, words: lines[i] || l.words }));
-            }
-        } catch(e) { console.error("Aksharamukha Romanization Error:", e); }
-    }
+    const wordMap = new Map<string, string>();
+    // Matches ONLY actual characters and marks. Commas, spaces, and periods are perfectly ignored.
+    const tokenRegex = /[\p{L}\p{M}]+/gu; 
     
-    // 2. Google Input Tools Path (English -> Phonetic Hindi)
-    if (lang === 'hi' && hasEnglish && !hasIndic) {
-        const result = [];
-        const chunkSize = 8; // 8 Concurrent lines per batch to avoid rate limiting
-        for (let i = 0; i < originalLyrics.length; i += chunkSize) {
-            const chunk = originalLyrics.slice(i, i + chunkSize);
-            const chunkPromises = chunk.map(async (item) => {
-                if (!item.words?.trim()) return item;
-                try {
-                    const res = await fetch(`https://inputtools.google.com/request?text=${encodeURIComponent(item.words)}&itc=hi-t-i0-und&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`);
-                    const data = await res.json();
-                    if (data[0] === 'SUCCESS' && data[1] && data[1][0] && data[1][0][1]) {
-                        return { ...item, words: data[1][0][1][0] };
-                    }
-                } catch(e) {}
-                return item;
+    // 1. Extract and Deduplicate all words to dramatically save network calls
+    originalLyrics.forEach(line => {
+        if (!line.words) return;
+        const matches = line.words.match(tokenRegex);
+        if (matches) {
+            matches.forEach((word: string) => {
+                if (!wordMap.has(word)) wordMap.set(word, word);
             });
-            result.push(...(await Promise.all(chunkPromises)));
         }
-        return result;
+    });
+
+    const uniqueWords = Array.from(wordMap.keys());
+    const englishWords = uniqueWords.filter(w => /^[a-zA-Z]+$/.test(w));
+    const indicWords = uniqueWords.filter(w => /[\u0900-\u0DFF]/.test(w));
+    
+    // Concurrent batching to avoid API rate blocks
+    const processInBatches = async (items: string[], processor: (batch: string[]) => Promise<void>) => {
+        const chunkSize = 20; 
+        for (let i = 0; i < items.length; i += chunkSize) {
+            await processor(items.slice(i, i + chunkSize));
+        }
+    };
+
+    if (lang === 'hi') {
+        if (englishWords.length > 0) {
+            // Google Input Tools properly evaluates Svars and Matras natively for phonetic text
+            await processInBatches(englishWords, async (batch) => {
+                const promises = batch.map(async (word) => {
+                    try {
+                        const res = await fetch(`https://inputtools.google.com/request?text=${encodeURIComponent(word)}&itc=hi-t-i0-und&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`);
+                        const data = await res.json();
+                        if (data[0] === 'SUCCESS' && data[1] && data[1][0] && data[1][0][1]) {
+                            wordMap.set(word, data[1][0][1][0]);
+                        }
+                    } catch(e) {}
+                });
+                await Promise.all(promises);
+            });
+        }
+        if (indicWords.length > 0) {
+            // Aksharamukha handles strict non-phonetic Indic to Devanagari translation 
+            const query = indicWords.join('\n');
+            try {
+                const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=Devanagari&text=${encodeURIComponent(query)}`);
+                if (res.ok) {
+                    const translated = (await res.text()).split('\n');
+                    indicWords.forEach((word, idx) => {
+                        if (translated[idx]) wordMap.set(word, translated[idx].trim());
+                    });
+                }
+            } catch(e) {}
+        }
+    } else if (lang === 'en') {
+        if (indicWords.length > 0) {
+            const query = indicWords.join('\n');
+            try {
+                const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=ISO&text=${encodeURIComponent(query)}`);
+                if (res.ok) {
+                    const translated = (await res.text()).split('\n');
+                    indicWords.forEach((word, idx) => {
+                        if (translated[idx]) wordMap.set(word, translated[idx].trim());
+                    });
+                }
+            } catch(e) {}
+        }
     }
 
-    // Fallback untouched
-    return originalLyrics;
+    // 3. Reconstruct Lyrics with perfect punctuation placement
+    return originalLyrics.map(line => {
+        if (!line.words) return line;
+        const newWords = line.words.replace(tokenRegex, (match: string) => {
+            return wordMap.get(match) || match;
+        });
+        return { ...line, words: newWords };
+    });
 };
 
 // --- PRO AUTH ENGINE ---
@@ -242,13 +273,6 @@ const formatTime = (time: number) => {
   const minutes = Math.floor(time / 60);
   const seconds = Math.floor(time % 60);
   return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
-};
-
-const parseTimeTag = (tag: string) => {
-  if (!tag) return 0;
-  const parts = tag.split(':');
-  if (parts.length >= 2) return parseInt(parts[0], 10) * 60 + parseFloat(parts[1]);
-  return 0;
 };
 
 const RAPID_KEYS =["d1edce158amshec139440d20658ap1f2545jsnbb7da9add82f", "6cf7f03014msh787c51a713c0264p15c20djsna1f9a9f6a378", "13d48f6bb8msh459c11b91bdcc44p110f4ejsn099443894115", "03fc23317fmsh0535ef9ec8c6f5bp1db59bjsn545991df9343", "e54e3fbc4dmshfc16d4417b618fdp1a2fafjsn30c72d8cf3ab"];
@@ -1906,10 +1930,10 @@ export default function MiniPlayer() {
 
       const now = Date.now();
       if (!isSeekingRef.current && now - lastTimeUpdateRef.current < 250) {
-         if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0 && isExpanded) {
+         if (isLyricsEnabled && syncType === "LINE_SYNCED" && displayLyrics.length > 0 && isExpanded) {
             let activeIdx = -1;
             const offsetTime = c + 0.4;
-            for (let i = 0; i < lyrics.length; i++) { if (lyrics[i].time <= offsetTime) activeIdx = i; else break; }
+            for (let i = 0; i < displayLyrics.length; i++) { if (displayLyrics[i].time <= offsetTime) activeIdx = i; else break; }
             if (activeIdx !== activeLyricIndex) setActiveLyricIndex(activeIdx);
          }
          return; 
@@ -1939,23 +1963,23 @@ export default function MiniPlayer() {
 
       if (c > 0 && Math.abs(c - (parseFloat(localStorage.getItem('last_session_time')||'0'))) > 2) localStorage.setItem('last_session_time', c.toString());
 
-      if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0 && !isSeekingRef.current) {
+      if (isLyricsEnabled && syncType === "LINE_SYNCED" && displayLyrics.length > 0 && !isSeekingRef.current) {
         let activeIdx = -1;
         const offsetTime = c + 0.4; 
-        for (let i = 0; i < lyrics.length; i++) { if (lyrics[i].time <= offsetTime) activeIdx = i; else break; }
+        for (let i = 0; i < displayLyrics.length; i++) { if (displayLyrics[i].time <= offsetTime) activeIdx = i; else break; }
         if (activeIdx !== activeLyricIndex) setActiveLyricIndex(activeIdx);
       }
     }
   };
 
   useEffect(() => {
-    if (!isWordSyncEnabled || !isLyricsEnabled || isVideoMode || activeLyricIndex < 0 || !lyrics[activeLyricIndex] || !isExpanded) return;
+    if (!isWordSyncEnabled || !isLyricsEnabled || isVideoMode || activeLyricIndex < 0 || !displayLyrics[activeLyricIndex] || !isExpanded) return;
     let animationFrameId: number;
     const updateProgress = () => {
         if (audioRef.current) {
             const currentTime = audioRef.current.currentTime + 0.4;
-            const currentLineTime = lyrics[activeLyricIndex].time;
-            let nextLineTime = lyrics[activeLyricIndex + 1]?.time || currentLineTime + 4;
+            const currentLineTime = displayLyrics[activeLyricIndex].time;
+            let nextLineTime = displayLyrics[activeLyricIndex + 1]?.time || currentLineTime + 4;
             const duration = nextLineTime - currentLineTime;
             const elapsed = currentTime - currentLineTime;
             const rawProgress = duration > 0 ? (elapsed / duration) * 100 : 100;
@@ -2006,7 +2030,7 @@ export default function MiniPlayer() {
     else updateProgress(); 
 
     return () => { if (animationFrameId) cancelAnimationFrame(animationFrameId); };
-  },[isWordSyncEnabled, isMiniWordSyncEnabled, isLyricsEnabled, isVideoMode, activeLyricIndex, lyrics, isPlaying, isExpanded]);
+  },[isWordSyncEnabled, isMiniWordSyncEnabled, isLyricsEnabled, isVideoMode, activeLyricIndex, displayLyrics, isPlaying, isExpanded]);
 
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const scrolled = e.currentTarget.scrollTop > 100;
@@ -2039,10 +2063,10 @@ export default function MiniPlayer() {
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     const val = parseFloat(e.target.value); setProgress(val);
     const newTime = (val / 100) * duration; setCurrentTime(newTime);
-    if (isLyricsEnabled && syncType === "LINE_SYNCED" && lyrics.length > 0) {
+    if (isLyricsEnabled && syncType === "LINE_SYNCED" && displayLyrics.length > 0) {
       let activeIdx = -1;
       const offsetTime = newTime + 0.4; 
-      for (let i = 0; i < lyrics.length; i++) { if (lyrics[i].time <= offsetTime) activeIdx = i; else break; }
+      for (let i = 0; i < displayLyrics.length; i++) { if (displayLyrics[i].time <= offsetTime) activeIdx = i; else break; }
       if (activeIdx !== activeLyricIndex) setActiveLyricIndex(activeIdx);
     }
   };
@@ -2252,8 +2276,8 @@ export default function MiniPlayer() {
     }
   };
 
-const downloadLrcFile = () => {
-    if (!lyrics || lyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
+  const downloadLrcFile = () => {
+    if (!displayLyrics || displayLyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
 
     const cleanTitle = decodeEntities(displayTitle);
     const cleanArtist = decodeEntities(displayArtists);
@@ -2262,7 +2286,7 @@ const downloadLrcFile = () => {
 
     let lrcContent = `[ar:${cleanArtist}]\n[al:${cleanAlbum}]\n[ti:${cleanTitle}]\n[au:${cleanArtist}]\n[length:${lenStr}]\n`;
 
-    lyrics.forEach((line: any) => {
+    displayLyrics.forEach((line: any) => {
         const t = Number(line.time) || 0;
         const [secPart, msPart] = t.toFixed(2).split('.');
         const mins = Math.floor(Number(secPart) / 60).toString().padStart(2, '0');
