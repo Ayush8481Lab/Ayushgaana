@@ -104,7 +104,7 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
 };
 
 // --- FLAWLESS LYRICS TRANSLITERATION ENGINE ---
-const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en') => {
+const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'original') => {
     if (!originalLyrics || !originalLyrics.length || lang === 'original') return originalLyrics;
     
     const wordMap = new Map<string, string>();
