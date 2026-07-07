@@ -108,10 +108,12 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
     if (!originalLyrics || !originalLyrics.length || lang === 'original') return originalLyrics;
     
     const wordMap = new Map<string, string>();
-    // Matches ONLY actual characters and marks. Commas, spaces, and periods are perfectly ignored.
-    const tokenRegex = /[\p{L}\p{M}]+/gu; 
     
-    // 1. Extract and Deduplicate all words to dramatically save network calls
+    // Regex strictly captures pure letters and marks with optional internal hyphens/apostrophes (o-re, don't).
+    // Ignores all punctuation like ..... , ? ! seamlessly.
+    const tokenRegex = /[\p{L}\p{M}]+(?:['-][\p{L}\p{M}]+)*/gu; 
+    
+    // 1. Extract and deduplicate all words to conserve strict network bandwidth
     originalLyrics.forEach(line => {
         if (!line.words) return;
         const matches = line.words.match(tokenRegex);
@@ -123,12 +125,13 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
     });
 
     const uniqueWords = Array.from(wordMap.keys());
-    const englishWords = uniqueWords.filter(w => /^[a-zA-Z]+$/.test(w));
-    const indicWords = uniqueWords.filter(w => /[\u0900-\u0DFF]/.test(w));
     
-    // Concurrent batching to avoid API rate blocks
+    // Intelligently separate languages to assign them their optimal APIs
+    const englishWords = uniqueWords.filter(w => /^[a-zA-Z\'-]+$/.test(w));
+    const nonEnglishWords = uniqueWords.filter(w => /[^\x00-\x7F]/.test(w));
+
     const processInBatches = async (items: string[], processor: (batch: string[]) => Promise<void>) => {
-        const chunkSize = 20; 
+        const chunkSize = 15; // Smooth batch limits for high-speed concurrent network
         for (let i = 0; i < items.length; i += chunkSize) {
             await processor(items.slice(i, i + chunkSize));
         }
@@ -136,41 +139,45 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
 
     if (lang === 'hi') {
         if (englishWords.length > 0) {
-            // Google Input Tools properly evaluates Svars and Matras natively for phonetic text
             await processInBatches(englishWords, async (batch) => {
                 const promises = batch.map(async (word) => {
                     try {
-                        const res = await fetch(`https://inputtools.google.com/request?text=${encodeURIComponent(word)}&itc=hi-t-i0-und&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`);
+                        // Prepending a space mathematically triggers Svar evaluations (" उई") instead of Matras ("ुई") for standalone words
+                        const queryText = encodeURIComponent(" " + word);
+                        const res = await fetch(`https://inputtools.google.com/request?text=${queryText}&itc=hi-t-i0-und&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`);
                         const data = await res.json();
                         if (data[0] === 'SUCCESS' && data[1] && data[1][0] && data[1][0][1]) {
-                            wordMap.set(word, data[1][0][1][0]);
+                            wordMap.set(word, data[1][0][1][0].trim());
                         }
                     } catch(e) {}
                 });
                 await Promise.all(promises);
             });
         }
-        if (indicWords.length > 0) {
-            // Aksharamukha handles strict non-phonetic Indic to Devanagari translation 
-            const query = indicWords.join('\n');
-            try {
-                const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=Devanagari&text=${encodeURIComponent(query)}`);
-                if (res.ok) {
-                    const translated = (await res.text()).split('\n');
-                    indicWords.forEach((word, idx) => {
-                        if (translated[idx]) wordMap.set(word, translated[idx].trim());
-                    });
-                }
-            } catch(e) {}
+        if (nonEnglishWords.length > 0) {
+            // Evaluates Urdu, Punjabi, Malayalam, Arabic, etc., while safely skipping already Devanagari text
+            const needsIndicToDevanagari = nonEnglishWords.filter(w => !/^[\u0900-\u097F\p{M}\'-]+$/u.test(w));
+            if (needsIndicToDevanagari.length > 0) {
+                const query = needsIndicToDevanagari.join('\n');
+                try {
+                    const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=Devanagari&text=${encodeURIComponent(query)}`);
+                    if (res.ok) {
+                        const translated = (await res.text()).split('\n');
+                        needsIndicToDevanagari.forEach((word, idx) => {
+                            if (translated[idx]) wordMap.set(word, translated[idx].trim());
+                        });
+                    }
+                } catch(e) {}
+            }
         }
     } else if (lang === 'en') {
-        if (indicWords.length > 0) {
-            const query = indicWords.join('\n');
+        if (nonEnglishWords.length > 0) {
+            const query = nonEnglishWords.join('\n');
             try {
                 const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=ISO&text=${encodeURIComponent(query)}`);
                 if (res.ok) {
                     const translated = (await res.text()).split('\n');
-                    indicWords.forEach((word, idx) => {
+                    nonEnglishWords.forEach((word, idx) => {
                         if (translated[idx]) wordMap.set(word, translated[idx].trim());
                     });
                 }
@@ -178,7 +185,7 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
         }
     }
 
-    // 3. Reconstruct Lyrics with perfect punctuation placement
+    // 3. Reconstruct back exactly into their native places leaving periods and punctuation strictly alone
     return originalLyrics.map(line => {
         if (!line.words) return line;
         const newWords = line.words.replace(tokenRegex, (match: string) => {
@@ -273,6 +280,13 @@ const formatTime = (time: number) => {
   const minutes = Math.floor(time / 60);
   const seconds = Math.floor(time % 60);
   return `${minutes}:${seconds < 10 ? "0" : ""}${seconds}`;
+};
+
+const parseTimeTag = (tag: string) => {
+  if (!tag) return 0;
+  const parts = tag.split(':');
+  if (parts.length >= 2) return parseInt(parts[0], 10) * 60 + parseFloat(parts[1]);
+  return 0;
 };
 
 const RAPID_KEYS =["d1edce158amshec139440d20658ap1f2545jsnbb7da9add82f", "6cf7f03014msh787c51a713c0264p15c20djsna1f9a9f6a378", "13d48f6bb8msh459c11b91bdcc44p110f4ejsn099443894115", "03fc23317fmsh0535ef9ec8c6f5bp1db59bjsn545991df9343", "e54e3fbc4dmshfc16d4417b618fdp1a2fafjsn30c72d8cf3ab"];
