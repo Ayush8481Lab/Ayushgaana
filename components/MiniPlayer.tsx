@@ -1,3 +1,5 @@
+
+
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -10,7 +12,7 @@ import {
   Play, Pause, SkipForward, SkipBack, Loader2, ChevronDown, 
   MoreHorizontal, Shuffle, Repeat, Heart, ListMusic, 
   MonitorPlay, Maximize2, Menu, Timer, Disc3, Calendar, Clock, Hash, Globe, Settings2, Check, Share2, Download, Video, X, Server, Sparkles,
-  Users, LogOut, Copy, Radio, Activity, MessageCircle, Send, MessageCircleOff, Shield, Crown, AlertTriangle, UserMinus
+  Users, LogOut, Copy, Radio, Activity, MessageCircle, Send, MessageCircleOff, Shield, Crown, AlertTriangle, UserMinus, Languages
 } from "lucide-react";
 
 // --- VERCEL PROTECTION BYPASS ENGINE ---
@@ -99,6 +101,60 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
       };
     });
   } catch(e) {}
+};
+
+// --- LYRICS TRANSLITERATION ENGINE ---
+const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en') => {
+    if (!originalLyrics || !originalLyrics.length) return [];
+    
+    // Combining for bulk Indic translation checks
+    const fullText = originalLyrics.map(l => l.words || "").join(" \n ");
+    const hasIndic = /[\u0900-\u0DFF]/.test(fullText);
+    const hasEnglish = /[a-zA-Z]/.test(fullText);
+
+    // 1. Aksharamukha Bulk Paths (Indic Scripts <-> Roman/Hindi)
+    if (lang === 'hi' && hasIndic) {
+        try {
+            const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=Devanagari&text=${encodeURIComponent(fullText)}`);
+            if (res.ok) {
+                const lines = (await res.text()).split(" \n ");
+                return originalLyrics.map((l, i) => ({ ...l, words: lines[i] || l.words }));
+            }
+        } catch(e) { console.error("Aksharamukha Devanagari Error:", e); }
+    } else if (lang === 'en' && hasIndic) {
+        try {
+            const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=ISO&text=${encodeURIComponent(fullText)}`);
+            if (res.ok) {
+                const lines = (await res.text()).split(" \n ");
+                return originalLyrics.map((l, i) => ({ ...l, words: lines[i] || l.words }));
+            }
+        } catch(e) { console.error("Aksharamukha Romanization Error:", e); }
+    }
+    
+    // 2. Google Input Tools Path (English -> Phonetic Hindi)
+    if (lang === 'hi' && hasEnglish && !hasIndic) {
+        const result = [];
+        const chunkSize = 8; // 8 Concurrent lines per batch to avoid rate limiting
+        for (let i = 0; i < originalLyrics.length; i += chunkSize) {
+            const chunk = originalLyrics.slice(i, i + chunkSize);
+            const chunkPromises = chunk.map(async (item) => {
+                if (!item.words?.trim()) return item;
+                try {
+                    const res = await fetch(`https://inputtools.google.com/request?text=${encodeURIComponent(item.words)}&itc=hi-t-i0-und&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`);
+                    const data = await res.json();
+                    if (data[0] === 'SUCCESS' && data[1] && data[1][0] && data[1][0][1]) {
+                        return { ...item, words: data[1][0][1][0] };
+                    }
+                } catch(e) {}
+                return item;
+            });
+            result.push(...(await Promise.all(chunkPromises)));
+        }
+        return result;
+    }
+
+    // Fallback untouched
+    return originalLyrics;
 };
 
 // --- PRO AUTH ENGINE ---
@@ -415,6 +471,11 @@ export default function MiniPlayer() {
   const[showQueue, setShowQueue] = useState(false);
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
+
+  // --- LYRICS TRANSLITERATION STATES ---
+  const [lyricsLang, setLyricsLang] = useState<'original' | 'hi' | 'en'>('original');
+  const [displayLyrics, setDisplayLyrics] = useState<any[]>([]);
+  const [isTransliterating, setIsTransliterating] = useState(false);
 
   // --- JIM JAM CORE STATE ENGINE ---
   const JAM_STORAGE_KEY = 'jim_jam_session';
@@ -1201,6 +1262,11 @@ export default function MiniPlayer() {
        const mws = localStorage.getItem('mini_word_sync_enabled'); if (mws !== null) setIsMiniWordSyncEnabled(mws === 'true');
        const lsr = localStorage.getItem('lyrics_server'); if (lsr !== null) setLyricsServer(lsr);
 
+       const storedLang = localStorage.getItem('lyrics_lang');
+       if (storedLang === 'hi' || storedLang === 'en' || storedLang === 'original') {
+           setLyricsLang(storedLang as 'original'|'hi'|'en');
+       }
+
        const storedSong = localStorage.getItem('last_session_song');
        if (storedSong && !currentSong && !isSessionRestored) {
           try {
@@ -1214,6 +1280,55 @@ export default function MiniPlayer() {
        } else setIsSessionRestored(true);
     }
   },[currentSong, isSessionRestored, setCurrentSong, setUpcomingQueue]);
+
+  // --- LYRICS TRANSLITERATION EFFECT ---
+  useEffect(() => {
+      let isCancelled = false;
+      
+      if (!lyrics || lyrics.length === 0) {
+          setDisplayLyrics([]);
+          return;
+      }
+      
+      if (lyricsLang === 'original') {
+          setDisplayLyrics(lyrics);
+          return;
+      }
+
+      const process = async () => {
+          setIsTransliterating(true);
+          const cacheKey = `trans_lyrics_${currentTrackRef.current?.id || currentTrackRef.current?.track_id}_${lyricsLang}`;
+          const cached = await getCache(cacheKey);
+          if (cached) {
+              if (!isCancelled) {
+                  setDisplayLyrics(cached);
+                  setIsTransliterating(false);
+              }
+              return;
+          }
+          
+          if (!isCancelled && displayLyrics.length === 0) setDisplayLyrics(lyrics); // Fallback to avoid blinking empty state
+
+          const result = await transliterateLyrics(lyrics, lyricsLang);
+          if (!isCancelled) {
+              setDisplayLyrics(result);
+              setIsTransliterating(false);
+              setCache(cacheKey, result);
+          }
+      };
+      process();
+
+      return () => { isCancelled = true; };
+  }, [lyrics, lyricsLang]);
+
+  const cycleLyricsLang = (e?: any) => {
+      if (e) e.stopPropagation();
+      setLyricsLang(prev => {
+          const next = prev === 'original' ? 'hi' : prev === 'hi' ? 'en' : 'original';
+          localStorage.setItem('lyrics_lang', next);
+          return next;
+      });
+  };
 
   useEffect(() => { isCanvasEnabledRef.current = isCanvasEnabled; },[isCanvasEnabled]);
   useEffect(() => { isLyricsEnabledRef.current = isLyricsEnabled; if (!isLyricsEnabled) setIsLyricsFullScreen(false); },[isLyricsEnabled]);
@@ -2327,10 +2442,10 @@ const downloadLrcFile = () => {
   }, [songDetails]);
 
   const RenderedMiniLyrics = useMemo(() => {
-    if (!isLyricsEnabled || isLyricsFullScreen || syncType !== "LINE_SYNCED" || lyrics.length === 0 || isVideoMode) return null;
+    if (!isLyricsEnabled || isLyricsFullScreen || syncType !== "LINE_SYNCED" || displayLyrics.length === 0 || isVideoMode) return null;
     return (
        <div className="relative w-full h-full flex justify-start items-center">
-         {lyrics.map((line: any, idx: number) => {
+         {displayLyrics.map((line: any, idx: number) => {
             const diff = idx - activeLyricIndex;
             if (Math.abs(diff) > 1) return null;
             let transform = '', op = 0;
@@ -2346,11 +2461,11 @@ const downloadLrcFile = () => {
          })}
        </div>
     );
-  },[lyrics, activeLyricIndex, isLyricsEnabled, isLyricsFullScreen, syncType, isVideoMode, isMiniWordSyncEnabled, lineFontSize]);
+  },[displayLyrics, activeLyricIndex, isLyricsEnabled, isLyricsFullScreen, syncType, isVideoMode, isMiniWordSyncEnabled, lineFontSize]);
 
   const RenderedLyrics = useMemo(() => {
     if (!isLyricsEnabled) return null;
-    return lyrics.map((line: any, idx: number) => {
+    return displayLyrics.map((line: any, idx: number) => {
       const isActive = idx === activeLyricIndex;
       const isPast = idx < activeLyricIndex;
       const isFuture = idx > activeLyricIndex;
@@ -2366,7 +2481,7 @@ const downloadLrcFile = () => {
         </p>
       )
     });
-  },[lyrics, activeLyricIndex, isLyricsFullScreen, isLyricsEnabled, cardFontSize, isWordSyncEnabled, syncType, isVideoMode]);
+  },[displayLyrics, activeLyricIndex, isLyricsFullScreen, isLyricsEnabled, cardFontSize, isWordSyncEnabled, syncType, isVideoMode]);
 
   const RenderedQueue = useMemo(() => {
     return upcomingQueue.map((track: any, index: number) => {
@@ -2499,7 +2614,7 @@ const downloadLrcFile = () => {
               {isLyricsFullScreen && isLyricsEnabled ? (
                 <div className="flex-1 w-full h-full flex flex-col relative overflow-hidden pointer-events-auto transition-colors duration-700 bg-transparent">
                   <div className="flex-1 overflow-y-auto scrollbar-hide px-6 pt-4 pb-[30vh] flex flex-col gap-8 w-full h-full mask-edges-vertical" ref={fullLyricsContainerRef}>
-                     {lyrics.length > 0 && (syncType !== "LINE_SYNCED" || isVideoMode) && (
+                     {displayLyrics.length > 0 && (syncType !== "LINE_SYNCED" || isVideoMode) && (
                          <div className="flex items-center gap-3 mb-2 px-1 opacity-70"><span className="px-2.5 py-[3px] bg-white/20 rounded text-[10px] font-bold text-white uppercase tracking-widest border border-white/20">Unsynced</span></div>
                      )}
                      {RenderedLyrics}
@@ -2538,7 +2653,7 @@ const downloadLrcFile = () => {
                 <div className="flex items-center justify-between text-[11px] font-medium text-[#a7a7a7] mt-1 w-full pointer-events-none no-select-text"><span>{formatTime(currentTime)}</span><span>{formatTime(duration)}</span></div>
               </div>
 
-              <div className={`flex flex-col w-full transition-all duration-[450ms] ease-[cubic-bezier(0.32,0.72,0,1)] overflow-hidden ${isUiHidden && !isVideoMode ? 'max-h-0 opacity-0 translate-y-6 pointer-events-none' : (isLyricsFullScreen ? 'max-h-[64px] opacity-100 translate-y-0 pointer-events-auto scale-[0.85] origin-bottom' : 'max-h-[140px] opacity-100 translate-y-0 pointer-events-auto')}`}>
+              <div className={`flex flex-col w-full transition-all duration-[450ms] ease-[cubic-bezier(0.32,0.72,0,1)] overflow-hidden ${isUiHidden && !isVideoMode ? 'max-h-0 opacity-0 translate-y-6 pointer-events-none' : (isLyricsFullScreen ? 'max-h-[110px] opacity-100 translate-y-0 pointer-events-auto scale-[0.85] origin-bottom' : 'max-h-[140px] opacity-100 translate-y-0 pointer-events-auto')}`}>
                 <div className={`flex items-center justify-between w-full px-1 drop-shadow-md no-select-text ${isLyricsFullScreen ? 'mb-0' : (isCanvasActive ? 'mb-2' : 'mb-5')}`}>
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setIsShuffle(!isShuffle); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 pointer-events-auto ${isShuffle ? 'text-[#1db954]' : 'text-white'}`}><Shuffle size={24} /></button>
                   <button onClick={playPrev} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipBack size={36} fill="white" stroke="white" /></button>
@@ -2553,7 +2668,7 @@ const downloadLrcFile = () => {
                   <button id="next-song-btn" onClick={() => playNext()} className={`text-white active:opacity-50 pointer-events-auto ${isGuestLocked ? 'opacity-30' : ''}`}><SkipForward size={36} fill="white" stroke="white" /></button>
                   <button onClick={() => { localActionTimeRef.current = Date.now(); setRepeatMode((prev) => (prev + 1) % 3); if(isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*'); }} className={`active:opacity-50 relative pointer-events-auto ${repeatMode > 0 ? 'text-[#1db954]' : 'text-white/70'}`}><Repeat size={24} />{repeatMode === 2 && <span className="absolute -top-1 -right-1 bg-[#1db954] text-black text-[9px] font-bold rounded-full w-3 h-3 flex items-center justify-center">1</span>}</button>
                 </div>
-                {!isLyricsFullScreen && (
+                {!isLyricsFullScreen ? (
                   <div className={`flex items-center justify-between text-[#b3b3b3] w-full px-1 drop-shadow-md pointer-events-auto ${isCanvasActive ? 'mt-2 mb-1' : ''}`}>
                     <div className="flex items-center gap-4">
                         <button onClick={toggleVideoMode} className={`active:opacity-50 transition-colors ${isVideoMode ? 'text-[#1db954]' : 'text-[#b3b3b3]'} ${isGuestLocked ? 'pointer-events-none opacity-50' : ''}`}>{isVideoLoading ? <Loader2 size={20} className="animate-spin" /> : <MonitorPlay size={20} />}</button>
@@ -2570,6 +2685,16 @@ const downloadLrcFile = () => {
                         <button onClick={openQueue} className="active:opacity-50 text-white"><ListMusic size={20} /></button>
                     </div>
                   </div>
+                ) : (
+                  <div className="flex items-center justify-center w-full px-1 drop-shadow-md pointer-events-auto mt-3">
+                      <button onClick={cycleLyricsLang} className="flex items-center gap-2 p-2 px-5 rounded-full bg-white/10 hover:bg-white/20 transition-colors text-white active:scale-95">
+                          <Languages size={18} className={isTransliterating ? "animate-pulse text-[#1db954]" : "text-white/80"} />
+                          <span className="text-[12px] font-bold uppercase tracking-wider">
+                              {lyricsLang === 'original' ? 'Original Lyrics' : lyricsLang === 'hi' ? 'Hindi Lyrics' : 'English Lyrics'}
+                          </span>
+                          {isTransliterating && <Loader2 size={14} className="animate-spin ml-1 text-[#1db954]" />}
+                      </button>
+                  </div>
                 )}
               </div>
 
@@ -2577,7 +2702,7 @@ const downloadLrcFile = () => {
           </div>
 
           <div className={`w-full px-5 pb-24 flex flex-col gap-6 pointer-events-auto transition-opacity duration-500 ${isUiHidden && !isVideoMode ? 'opacity-0 pointer-events-none' : 'opacity-100'} ${isLyricsFullScreen ? 'hidden' : 'block'}`}>
-            {isLyricsEnabled && lyrics.length > 0 && !isLyricsFullScreen && (
+            {isLyricsEnabled && displayLyrics.length > 0 && !isLyricsFullScreen && (
               <div className="rounded-2xl p-6 w-full mx-auto shadow-2xl relative overflow-hidden transition-colors duration-500 border border-white/10" style={{ backgroundColor: dominantColor }}>
                 <div className="absolute inset-0 bg-black/5 z-0 pointer-events-none" />
                 <div className="relative z-10 flex items-center justify-between mb-6 sticky top-0 bg-transparent no-select-text">
@@ -2585,7 +2710,16 @@ const downloadLrcFile = () => {
                      Lyrics
                      {(syncType !== "LINE_SYNCED" || isVideoMode) && <span className="ml-3 px-2 py-[2px] bg-white/20 rounded text-[9px] font-bold text-white uppercase tracking-wider border border-white/10">Unsynced</span>}
                    </h3>
-                   <button onClick={() => setIsLyricsFullScreen(true)} className="p-2 text-white/80 hover:text-white rounded-full bg-black/30 pointer-events-auto"><Maximize2 size={16} /></button>
+                   <div className="flex items-center gap-3">
+                     <button onClick={cycleLyricsLang} className="flex items-center gap-1.5 p-1.5 px-3 text-white/80 hover:text-white rounded-full bg-black/30 pointer-events-auto transition-colors">
+                        <Languages size={15} className={isTransliterating ? "animate-pulse text-[#1db954]" : ""} />
+                        <span className="text-[10px] font-bold uppercase tracking-wider">
+                           {lyricsLang === 'original' ? 'Orig' : lyricsLang === 'hi' ? 'Hin' : 'Eng'}
+                        </span>
+                        {isTransliterating && <Loader2 size={10} className="animate-spin text-[#1db954]" />}
+                     </button>
+                     <button onClick={() => setIsLyricsFullScreen(true)} className="p-2 text-white/80 hover:text-white rounded-full bg-black/30 pointer-events-auto"><Maximize2 size={16} /></button>
+                   </div>
                 </div>
                 <div className="relative z-10 flex flex-col gap-5 max-h-[300px] overflow-y-auto scrollbar-hide pb-10" ref={lyricsContainerRef}>{RenderedLyrics}</div>
               </div>
