@@ -127,7 +127,7 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
     const uniqueWords = Array.from(wordMap.keys());
     
     // Intelligently separate languages to assign them their optimal APIs
-    const englishWords = uniqueWords.filter(w => /^[a-zA-Z\'-]+$/.test(w));
+    const englishWords = uniqueWords.filter(w => /^[a-zA-Z'-]+$/.test(w));
     const nonEnglishWords = uniqueWords.filter(w => /[^\x00-\x7F]/.test(w));
 
     const processInBatches = async (items: string[], processor: (batch: string[]) => Promise<void>) => {
@@ -156,7 +156,7 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
         }
         if (nonEnglishWords.length > 0) {
             // Evaluates Urdu, Punjabi, Malayalam, Arabic, etc., while safely skipping already Devanagari text
-            const needsIndicToDevanagari = nonEnglishWords.filter(w => !/^[\u0900-\u097F\p{M}\'-]+$/u.test(w));
+            const needsIndicToDevanagari = nonEnglishWords.filter(w => !/^[\u0900-\u097F\p{M}'-]+$/u.test(w));
             if (needsIndicToDevanagari.length > 0) {
                 const query = needsIndicToDevanagari.join('\n');
                 try {
