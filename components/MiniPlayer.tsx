@@ -21,7 +21,6 @@ const fetchProtected = async (url: string, options: any = {}) => {
   return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
 };
 
-// Advanced Parser for r.jina.ai
 const fetchJina = async (targetUrl: string, options: any = {}) => {
   const res = await fetch(`https://r.jina.ai/${targetUrl}`, {
       ...options,
@@ -114,10 +113,9 @@ const deleteCache = async (key: string): Promise<void> => {
 };
 
 // --- HDNTL CACHE ENGINE (HLS CDN Token Reuse) ---
-// Reads the token directly from IndexedDB ignoring the 30-min generic CACHE_EXPIRY_MS.
-// Honors ONLY the token's own `exp` claim.
+// Reads the token directly from IndexedDB ignoring CACHE_EXPIRY_MS — honors only token's own `exp`.
 const HDNTL_CACHE_KEY = 'gaana_hdntl_token';
-const HDNTL_MIN_REMAINING_MS = 60 * 60 * 1000; // Stop using when < 1 hour remains before exp
+const HDNTL_MIN_REMAINING_MS = 60 * 60 * 1000; // 1 hour
 
 const getHdntlCache = (): Promise<any> => new Promise(async (resolve) => {
   try {
@@ -133,36 +131,46 @@ const getHdntlCache = (): Promise<any> => new Promise(async (resolve) => {
   } catch(e) { resolve(null); }
 });
 
+// HTML-parser-equivalent extraction:
+//   Input : https://vodhlsgaana-ebw.akamaized.net/hls/23/17620223/80524747/128/hdntl=exp=…~acl=%2f*~data=hdntl~hmac=…/index.m3u8
+//   Output: hdntl=exp=…~acl=%2f*~data=hdntl~hmac=…
+//           hostPrefix = https://vodhlsgaana-ebw.akamaized.net/hls/23
 const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
   try {
-    const hdntlMatch = hlsUrl.match(/(\/hdntl=[^\/]+)\//);
-    if (!hdntlMatch) { console.log('[HDNTL] No token found in URL'); return null; }
-    const hdntlParam = hdntlMatch[1].substring(1); // strip leading slash
+    if (!hlsUrl) return null;
+    // Handle protocol-less URLs like the exact case that was silently failing
+    let urlToParse = hlsUrl.trim();
+    if (!urlToParse.startsWith('http://') && !urlToParse.startsWith('https://')) {
+      urlToParse = 'https://' + urlToParse;
+    }
+
+    const hdntlMatch = urlToParse.match(/(\/hdntl=[^\/]+)\//);
+    if (!hdntlMatch) { console.warn('[HDNTL] ✗ no token segment in URL:', urlToParse); return null; }
+    const hdntlParam = hdntlMatch[1].substring(1);
 
     const expMatch = hdntlParam.match(/exp=(\d+)/);
-    if (!expMatch) { console.log('[HDNTL] No exp field'); return null; }
+    if (!expMatch) { console.warn('[HDNTL] ✗ no exp field in token'); return null; }
     const exp = parseInt(expMatch[1], 10);
     if (!exp || isNaN(exp)) return null;
 
-    const urlObj = new URL(hlsUrl);
+    const urlObj = new URL(urlToParse);
     const hostPrefixMatch = urlObj.pathname.match(/^(\/hls\/[^\/]+)\//);
-    if (!hostPrefixMatch) { console.log('[HDNTL] Could not derive hostPrefix'); return null; }
+    if (!hostPrefixMatch) { console.warn('[HDNTL] ✗ could not derive hostPrefix from', urlObj.pathname); return null; }
     const hostPrefix = `${urlObj.protocol}//${urlObj.host}${hostPrefixMatch[1]}`;
 
     const cacheEntry = { hdntl: hdntlParam, hostPrefix, exp, cachedAt: Date.now() };
     const remainingHrs = ((exp * 1000) - Date.now()) / (60 * 60 * 1000);
-    console.log(`[HDNTL] Token extracted. Valid for ${remainingHrs.toFixed(2)}h. hostPrefix=${hostPrefix}`);
+    console.log(`[HDNTL] ✓ Token extracted. Valid for ${remainingHrs.toFixed(2)}h. hostPrefix=${hostPrefix}`);
 
-    // Only cache when more than 1 hour remains before expiration
     if ((exp * 1000) - Date.now() > HDNTL_MIN_REMAINING_MS) {
       await setCache(HDNTL_CACHE_KEY, cacheEntry);
-      console.log('[HDNTL] Token cached');
+      console.log('[HDNTL] ✓ Token cached for reuse across all tracks');
     } else {
-      console.log('[HDNTL] Token too close to expiry, not cached');
+      console.warn('[HDNTL] ✗ Token <1h to expiry, not cached');
     }
     return cacheEntry;
   } catch (e) {
-    console.warn('[HDNTL] extractAndCacheHdntl failed:', e);
+    console.warn('[HDNTL] ✗ extractAndCacheHdntl threw:', e);
     return null;
   }
 };
@@ -170,11 +178,11 @@ const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
 const getCachedHdntlUrl = async (albumId: string, trackId: string, quality: string): Promise<string | null> => {
   try {
     if (!albumId || !trackId) return null;
-    const cached = await getHdntlCache(); // custom getter bypasses CACHE_EXPIRY_MS
+    const cached = await getHdntlCache();
     if (!cached?.hdntl || !cached?.hostPrefix || !cached?.exp) return null;
     const remainingMs = (cached.exp * 1000) - Date.now();
     if (remainingMs < HDNTL_MIN_REMAINING_MS) {
-      console.log(`[HDNTL] Token expires in ${(remainingMs/60000).toFixed(1)}m < 60m, ignoring`);
+      console.warn(`[HDNTL] ✗ Token expires in ${(remainingMs/60000).toFixed(1)}m <60m, ignoring`);
       return null;
     }
     return `${cached.hostPrefix}/${albumId}/${trackId}/${quality}/${cached.hdntl}/index.m3u8`;
@@ -183,28 +191,20 @@ const getCachedHdntlUrl = async (albumId: string, trackId: string, quality: stri
   }
 };
 
-const extractAlbumIdFromHlsUrl = (hlsUrl: string | undefined | null): string | null => {
-  if (!hlsUrl) return null;
-  try {
-    // Format: .../hls/23/{albumId}/{trackId}/{quality}/hdntl=.../index.m3u8
-    const m = hlsUrl.match(/\/hls\/[^\/]+\/([^\/]+)\/[^\/]+\/[^\/]+\//);
-    return m ? m[1] : null;
-  } catch(e) { return null; }
-};
-
 const getAlbumIdFromSong = (song: any): string | null => {
   if (!song) return null;
-  const candidates = [
+  const candidates: any[] = [
     song.album_id, song.albumid, song.albumId,
     song.album?.id, song.album?.album_id,
     song.meta?.album_id,
   ];
+  // Numeric string fallback for cases where song.album is just the id string
+  if (typeof song.album === 'string' && /^\d+$/.test(song.album)) candidates.push(song.album);
   for (const c of candidates) {
     if (c !== undefined && c !== null && c !== '' && (typeof c === 'string' || typeof c === 'number')) {
       return String(c);
     }
   }
-  // Check entity_info (some gaana responses carry it there)
   if (Array.isArray(song.entity_info)) {
     const albumInfo = song.entity_info.find((e: any) => e && (e.key === 'album' || e.key === 'albums'));
     if (albumInfo && Array.isArray(albumInfo.value) && albumInfo.value[0]) {
@@ -218,31 +218,22 @@ const getAlbumIdFromSong = (song: any): string | null => {
 // --- FLAWLESS LYRICS TRANSLITERATION ENGINE ---
 const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'original') => {
     if (!originalLyrics || !originalLyrics.length || lang === 'original') return originalLyrics;
-    
     const wordMap = new Map<string, string>();
     const tokenRegex = /[\p{L}\p{M}]+(?:['-][\p{L}\p{M}]+)*/gu; 
-    
     originalLyrics.forEach(line => {
         if (!line.words) return;
         const matches = line.words.match(tokenRegex);
         if (matches) {
-            matches.forEach((word: string) => {
-                if (!wordMap.has(word)) wordMap.set(word, word);
-            });
+            matches.forEach((word: string) => { if (!wordMap.has(word)) wordMap.set(word, word); });
         }
     });
-
     const uniqueWords = Array.from(wordMap.keys());
     const englishWords = uniqueWords.filter(w => /^[a-zA-Z'-]+$/.test(w));
     const nonEnglishWords = uniqueWords.filter(w => /[^\x00-\x7F]/.test(w));
-
     const processInBatches = async (items: string[], processor: (batch: string[]) => Promise<void>) => {
         const chunkSize = 15;
-        for (let i = 0; i < items.length; i += chunkSize) {
-            await processor(items.slice(i, i + chunkSize));
-        }
+        for (let i = 0; i < items.length; i += chunkSize) { await processor(items.slice(i, i + chunkSize)); }
     };
-
     if (lang === 'hi') {
         if (englishWords.length > 0) {
             await processInBatches(englishWords, async (batch) => {
@@ -267,9 +258,7 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
                     const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=Devanagari&text=${encodeURIComponent(query)}`);
                     if (res.ok) {
                         const translated = (await res.text()).split('\n');
-                        needsIndicToDevanagari.forEach((word, idx) => {
-                            if (translated[idx]) wordMap.set(word, translated[idx].trim());
-                        });
+                        needsIndicToDevanagari.forEach((word, idx) => { if (translated[idx]) wordMap.set(word, translated[idx].trim()); });
                     }
                 } catch(e) {}
             }
@@ -281,19 +270,14 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
                 const res = await fetch(`https://aksharamukha-plugin.appspot.com/api/public?target=ISO&text=${encodeURIComponent(query)}`);
                 if (res.ok) {
                     const translated = (await res.text()).split('\n');
-                    nonEnglishWords.forEach((word, idx) => {
-                        if (translated[idx]) wordMap.set(word, translated[idx].trim());
-                    });
+                    nonEnglishWords.forEach((word, idx) => { if (translated[idx]) wordMap.set(word, translated[idx].trim()); });
                 }
             } catch(e) {}
         }
     }
-
     return originalLyrics.map(line => {
         if (!line.words) return line;
-        const newWords = line.words.replace(tokenRegex, (match: string) => {
-            return wordMap.get(match) || match;
-        });
+        const newWords = line.words.replace(tokenRegex, (match: string) => wordMap.get(match) || match);
         return { ...line, words: newWords };
     });
 };
@@ -403,23 +387,17 @@ const performAK47Matching = (results: any[], targetTrack: string, targetArtist: 
     const tTitle = clean(targetTrack);
     const tArtist = clean(targetArtist);
     let bestMatch = null; let highestScore = 0;
-
     results.forEach((track) => {
         if (!track) return;
         const rTitle = clean(track.song_name);
         const rArtists = clean(track.artist);
         let score = 0; let artistMatched = false;
-
         if (tArtist.length > 0) {
             if (rArtists === tArtist) { score += 100; artistMatched = true; }
             else if (rArtists.includes(tArtist) || tArtist.includes(rArtists)) { score += 80; artistMatched = true; }
-            else {
-                const tSplit = tArtist.split(" ");
-                for (let t of tSplit) { if (t.length > 2 && rArtists.includes(t)) { score += 50; artistMatched = true; break; } }
-            }
+            else { const tSplit = tArtist.split(" "); for (let t of tSplit) { if (t.length > 2 && rArtists.includes(t)) { score += 50; artistMatched = true; break; } } }
             if (!artistMatched) score = 0;
         } else score += 50;
-
         if (score > 0) {
             if (rTitle === tTitle) score += 100;
             else if (rTitle.startsWith(tTitle) || tTitle.startsWith(rTitle)) score += 80;
@@ -436,23 +414,15 @@ const performMatching = (apiData: any, targetTrack: string, targetArtist: string
   const clean = (s: string) => decodeEntities(s || "").toLowerCase().replace(/[^\w\s]|_/g, "").replace(/\s+/g, " ").trim();
   const tTitle = clean(targetTrack); const tArtist = clean(targetArtist);
   let bestMatch: any = null; let highestScore = 0;
-  
   apiData.tracks.forEach((item: any) => {
       const track = item.data || item; if (!track) return;
       const rTitle = clean(track.name); const rArtists = (track.artists?.items || track.artists ||[]).map((a: any) => clean(a.profile?.name || a.name));
       let score = 0; let artistMatched = false;
       if (tArtist.length > 0) {
-          for (let ra of rArtists) { 
-              if (ra === tArtist) { score += 100; artistMatched = true; break; } 
-              else if (ra.includes(tArtist) || tArtist.includes(ra)) { score += 80; artistMatched = true; break; } 
-          }
+          for (let ra of rArtists) { if (ra === tArtist) { score += 100; artistMatched = true; break; } else if (ra.includes(tArtist) || tArtist.includes(ra)) { score += 80; artistMatched = true; break; } }
           if (!artistMatched) score = 0;
       } else score += 50;
-      if (score > 0) { 
-          if (rTitle === tTitle) score += 100; 
-          else if (rTitle.startsWith(tTitle) || tTitle.startsWith(rTitle)) score += 80; 
-          else if (rTitle.includes(tTitle)) score += 50; 
-      }
+      if (score > 0) { if (rTitle === tTitle) score += 100; else if (rTitle.startsWith(tTitle) || tTitle.startsWith(rTitle)) score += 80; else if (rTitle.includes(tTitle)) score += 50; }
       if (score > highestScore) { highestScore = score; bestMatch = track; }
   });
   if (highestScore > 0) return bestMatch;
@@ -531,19 +501,13 @@ const MarqueeText = React.memo(({ text, className = "" }: { text: string, classN
   const containerRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
   const[isOverflowing, setIsOverflowing] = useState(false);
-
   useEffect(() => {
-    const checkOverflow = () => { 
-      if (containerRef.current && textRef.current) {
-        setIsOverflowing(textRef.current.scrollWidth > containerRef.current.clientWidth + 5); 
-      }
-    };
+    const checkOverflow = () => { if (containerRef.current && textRef.current) { setIsOverflowing(textRef.current.scrollWidth > containerRef.current.clientWidth + 5); } };
     checkOverflow();
     const timeouts =[setTimeout(checkOverflow, 100), setTimeout(checkOverflow, 500)];
     window.addEventListener('resize', checkOverflow);
     return () => { timeouts.forEach(clearTimeout); window.removeEventListener('resize', checkOverflow); };
   },[text]);
-
   return (
     <div ref={containerRef} className={`overflow-hidden whitespace-nowrap w-full flex items-center ${isOverflowing ? "mask-edges" : ""} ${className}`}>
       <div className={`inline-block whitespace-nowrap ${isOverflowing ? "animate-spotify-marquee" : ""}`} style={{ minWidth: "100%" }}>
@@ -558,19 +522,12 @@ MarqueeText.displayName = 'MarqueeText';
 const SongDnaCard = React.memo(({ artist, closePlayer, isFew }: { artist: any, closePlayer: () => void, isFew: boolean }) => {
     const artistImg = getImageUrl(artist);
     const fallbackColor = getArtistColor(artist.name || "Unknown");
-    
-    const formatRoles = (roles: string[]) => {
-        if (!roles || roles.length === 0) return "";
-        const joined = roles.join(', ').toLowerCase();
-        return joined.charAt(0).toUpperCase() + joined.slice(1);
-    };
+    const formatRoles = (roles: string[]) => { if (!roles || roles.length === 0) return ""; const joined = roles.join(', ').toLowerCase(); return joined.charAt(0).toUpperCase() + joined.slice(1); };
     const rolesText = formatRoles(artist.roles);
-
     const sizeClass = isFew ? "w-[130px] h-[130px] sm:w-[150px] sm:h-[150px]" : "w-[110px] h-[110px]";
     const textClass = isFew ? "text-[15px] sm:text-[16px]" : "text-[13px]";
     const subtextClass = isFew ? "text-[12px] sm:text-[13px]" : "text-[11px]";
     const containerWidth = isFew ? "w-[130px] sm:w-[150px]" : "w-[110px]";
-
     return (
         <Link prefetch={false} href={`/artist/${artist.seokey || artist.id}`} onClick={closePlayer} className={`flex flex-col items-center gap-2 flex-shrink-0 ${containerWidth} group no-select-text`}>
             <div className={`${sizeClass} rounded-full overflow-hidden relative flex items-center justify-center shadow-[0_10px_20px_rgba(0,0,0,0.3)] border border-white/10 group-hover:scale-105 transition-transform`} style={{ backgroundColor: artistImg ? '#282828' : fallbackColor }}>
@@ -597,28 +554,22 @@ export default function MiniPlayer() {
   
   const[audioUrl, setAudioUrl] = useState("");
   const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
-  
-  // Buffering States
   const[isStreamLoading, setIsStreamLoading] = useState(false);
   const[isAudioBuffering, setIsAudioBuffering] = useState(false);
-  
   const[progress, setProgress] = useState(0);
   const[buffered, setBuffered] = useState(0);
   const[currentTime, setCurrentTime] = useState(0);
   const[duration, setDuration] = useState(0);
   const[volume, setVolume] = useState(100);
-  
   const[isExpanded, setIsExpanded] = useState(false);
   const[showQueue, setShowQueue] = useState(false);
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
 
-  // --- LYRICS TRANSLITERATION STATES ---
   const [lyricsLang, setLyricsLang] = useState<'original' | 'hi' | 'en'>('original');
   const [displayLyrics, setDisplayLyrics] = useState<any[]>([]);
   const [isTransliterating, setIsTransliterating] = useState(false);
 
-  // --- JIM JAM CORE STATE ENGINE ---
   const JAM_STORAGE_KEY = 'jim_jam_session';
   const [showJamMenu, setShowJamMenu] = useState(false);
   const [jamRoomId, setJamRoomId] = useState<string | null>(null);
@@ -632,7 +583,6 @@ export default function MiniPlayer() {
   const [jamPlayBlocked, setJamPlayBlocked] = useState(false);
   const [jamPlayContext, setJamPlayContext] = useState<any>(null);
   const [jamError, setJamError] = useState<string | null>(null);
-  
   const [jamChatMessages, setJamChatMessages] = useState<any[]>([]);
   const [jamChatInput, setJamChatInput] = useState("");
   const [isChatEnabled, setIsChatEnabled] = useState(true);
@@ -646,10 +596,8 @@ export default function MiniPlayer() {
   const jamPlayBlockedRef = useRef(jamPlayBlocked);
   const clientIdRef = useRef<string | null>(null);
   const isSystemSongChangeRef = useRef(false);
-  
   const localActionTimeRef = useRef<number>(0);
   const requestedDataForTrackRef = useRef<string | null>(null);
-  
   const upcomingQueueRef = useRef<any[]>([]);
   const playContextRef = useRef<any>(null);
 
@@ -669,9 +617,7 @@ export default function MiniPlayer() {
   }, []);
 
   useEffect(() => {
-      if (chatContainerRef.current && showChat) {
-          chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
-      }
+      if (chatContainerRef.current && showChat) { chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight; }
   }, [jamChatMessages, showChat]);
 
   const songStartTrackingRef = useRef<number>(Date.now());
@@ -752,8 +698,11 @@ export default function MiniPlayer() {
   const isCanvasEnabledRef = useRef(true);
   const isLyricsEnabledRef = useRef(true);
 
-  // --- HDNTL FALLBACK TRACKING ---
   const hlsApiRetryAttemptedRef = useRef<Set<string>>(new Set());
+
+  // Shared info-fetch promise cache — deduplicates concurrent calls for the same track between
+  // fetchStreamTask (needs albumId for TIER 2) and fetchInfoTask (needs full details)
+  const infoFetchPromisesRef = useRef<Map<string, Promise<any>>>(new Map());
 
   const songDetailsRef = useRef(songDetails);
   const audioUrlRef = useRef(audioUrl);
@@ -771,6 +720,40 @@ export default function MiniPlayer() {
   useEffect(() => { canvasDataRef.current = canvasData; }, [canvasData]);
   useEffect(() => { ytVideoIdRef.current = ytVideoId; }, [ytVideoId]);
 
+  // Shared, deduplicated info fetcher
+  const ensureInfoForTrack = useCallback(async (trackId: string): Promise<any> => {
+      if (!trackId) return null;
+      try {
+          const cached = await getCache(`gaana_info_${trackId}`);
+          if (cached?.data) return cached.data;
+          if (cached?.notFound) return null;
+          
+          if (infoFetchPromisesRef.current.has(trackId)) {
+              return infoFetchPromisesRef.current.get(trackId);
+          }
+          
+          const promise = (async () => {
+              try {
+                  const res = await fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer" });
+                  if (res.ok) {
+                      const data = await res.json();
+                      if (data?.data) {
+                          await setCache(`gaana_info_${trackId}`, data);
+                          return data.data;
+                      }
+                      await setCache(`gaana_info_${trackId}`, { notFound: true });
+                  }
+              } catch(e) {}
+              return null;
+          })();
+          
+          infoFetchPromisesRef.current.set(trackId, promise);
+          try { return await promise; } finally { infoFetchPromisesRef.current.delete(trackId); }
+      } catch(e) {
+          return null;
+      }
+  }, []);
+
   const[dlState, setDlState] = useState<{type: "music" | "video" | null, status: string, options?: any[], progress?: number, packStep?: string, server?: number}>({type: null, status: "idle", progress: 0, server: 1});
 
   const isSongLiked = likedSongs.some((s: any) => s && (s.id || s.track_id) === (currentSong?.id || currentSong?.track_id));
@@ -785,17 +768,12 @@ export default function MiniPlayer() {
   useEffect(() => {
       const unlockAudio = () => {
           if (jamPlayBlockedRef.current && audioRef.current) {
-              audioRef.current.play().then(() => {
-                  setJamPlayBlocked(false);
-              }).catch(() => {});
+              audioRef.current.play().then(() => { setJamPlayBlocked(false); }).catch(() => {});
           }
       };
       window.addEventListener('click', unlockAudio);
       window.addEventListener('touchstart', unlockAudio);
-      return () => {
-          window.removeEventListener('click', unlockAudio);
-          window.removeEventListener('touchstart', unlockAudio);
-      };
+      return () => { window.removeEventListener('click', unlockAudio); window.removeEventListener('touchstart', unlockAudio); };
   }, []);
 
   const broadcastFullSync = useCallback(() => {
@@ -804,19 +782,13 @@ export default function MiniPlayer() {
           type: 'FULL_SYNC',
           senderId: clientIdRef.current,
           payload: {
-              song: currentTrackRef.current,
-              songDetails: songDetailsRef.current,
-              audioUrl: audioUrlRef.current,
-              streamBaseUrl: streamBaseUrlRef.current,
-              lyrics: lyricsRef.current,
-              syncType: syncTypeRef.current,
-              canvasData: canvasDataRef.current,
-              isVideoMode: isVideoModeRef.current,
-              ytVideoId: ytVideoIdRef.current,
-              isPlaying: isPlayingRef.current,
+              song: currentTrackRef.current, songDetails: songDetailsRef.current,
+              audioUrl: audioUrlRef.current, streamBaseUrl: streamBaseUrlRef.current,
+              lyrics: lyricsRef.current, syncType: syncTypeRef.current,
+              canvasData: canvasDataRef.current, isVideoMode: isVideoModeRef.current,
+              ytVideoId: ytVideoIdRef.current, isPlaying: isPlayingRef.current,
               time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
-              queue: upcomingQueueRef.current,
-              playContext: playContextRef.current
+              queue: upcomingQueueRef.current, playContext: playContextRef.current
           }
       });
   }, []);
@@ -829,11 +801,7 @@ export default function MiniPlayer() {
               const timeout = setTimeout(() => {
                   if (ablyChannelRef.current) {
                       requestedDataForTrackRef.current = trackId;
-                      ablyChannelRef.current.publish('sync', { 
-                          type: 'REQUEST_DATA',
-                          senderId: clientIdRef.current,
-                          trackId: trackId 
-                      });
+                      ablyChannelRef.current.publish('sync', { type: 'REQUEST_DATA', senderId: clientIdRef.current, trackId: trackId });
                   }
               }, 3000);
               return () => clearTimeout(timeout);
@@ -849,21 +817,16 @@ export default function MiniPlayer() {
               const timeSinceStart = Date.now() - (songStartTrackingRef.current || 0);
               const shouldCarry = timeSinceStart < 35000 || !hasCachedCurrentSongRef.current;
               ablyChannelRef.current.publish('sync', {
-                  type: 'HEARTBEAT',
-                  senderId: clientIdRef.current,
+                  type: 'HEARTBEAT', senderId: clientIdRef.current,
                   trackId: currentTrackRef.current?.id || currentTrackRef.current?.track_id,
                   isPlaying: isPlayingRef.current,
                   time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
                   isVideoMode: isVideoModeRef.current,
                   carryPayload: shouldCarry ? {
-                      audioUrl: audioUrlRef.current,
-                      streamBaseUrl: streamBaseUrlRef.current,
-                      lyrics: lyricsRef.current,
-                      syncType: syncTypeRef.current,
-                      canvasData: canvasDataRef.current,
-                      songDetails: songDetailsRef.current,
-                      ytVideoId: ytVideoIdRef.current,
-                      queue: upcomingQueueRef.current,
+                      audioUrl: audioUrlRef.current, streamBaseUrl: streamBaseUrlRef.current,
+                      lyrics: lyricsRef.current, syncType: syncTypeRef.current,
+                      canvasData: canvasDataRef.current, songDetails: songDetailsRef.current,
+                      ytVideoId: ytVideoIdRef.current, queue: upcomingQueueRef.current,
                       playContext: playContextRef.current
                   } : null
               });
@@ -877,136 +840,81 @@ export default function MiniPlayer() {
           setJamStatus('connecting');
           const Ably = await loadAblyJS();
           const ABLY_KEY: string = "02RdCw.eCopUg:BoGqeU7MsjH0CSEh1acIjkB_O8We71t6tY8huz1wFho"; 
-          
           const clientId = 'jam_' + Math.random().toString(36).substr(2, 9);
           clientIdRef.current = clientId;
           const ably = new Ably.Realtime.Promise({ key: ABLY_KEY, clientId });
-          
-          ably.connection.on('failed', () => {
-              setJamStatus('disconnected');
-              setJamError("Jim Jam connection failed. Please try again.");
-          });
-
+          ably.connection.on('failed', () => { setJamStatus('disconnected'); setJamError("Jim Jam connection failed. Please try again."); });
           await new Promise<void>((resolve, reject) => {
               ably.connection.once('connected', () => resolve());
               ably.connection.once('failed', () => reject(new Error("Connection Failed")));
           });
-
           const channel = ably.channels.get(`jim-jam-${roomId}`);
           await channel.attach();
-
           ablyClientRef.current = ably;
           ablyChannelRef.current = channel;
           localStorage.setItem(JAM_STORAGE_KEY, JSON.stringify({ roomId, role, name: customName, timestamp: Date.now() }));
-
           const defaultName = customName.trim() || (role === 'host' ? 'Host' : `Groover_${Math.floor(Math.random()*1000)}`);
           const currentAvatar = localStorage.getItem('jam_avatar') || '';
-
           channel.presence.subscribe(['enter', 'leave', 'update'], (msg: any) => {
-              const p = msg.data;
-              const action = msg.action;
-              
+              const p = msg.data; const action = msg.action;
               if (action === 'enter' || action === 'leave') {
                   const isEnter = action === 'enter';
-                  setJamLogs(prev => {
-                      const newLogs = [...prev, { id: Date.now(), text: `${p.name} ${isEnter ? 'joined the Jam.' : 'left.'}` }];
-                      return newLogs.slice(-10);
-                  });
+                  setJamLogs(prev => { const newLogs = [...prev, { id: Date.now(), text: `${p.name} ${isEnter ? 'joined the Jam.' : 'left.'}` }]; return newLogs.slice(-10); });
               }
-
               channel.presence.get().then((result: any) => {
                   const members = Array.isArray(result) ? result : (result.items || []);
                   setJamParticipants(members.map((m: any) => ({ ...m.data, clientId: m.clientId })));
               });
-
-              if (jamRoleRef.current === 'host' && action === 'enter' && p.role !== 'host') {
-                  broadcastFullSync();
-              }
+              if (jamRoleRef.current === 'host' && action === 'enter' && p.role !== 'host') { broadcastFullSync(); }
           });
-
-          await channel.presence.enter({
-              clientId,
-              name: defaultName,
-              avatar: currentAvatar,
-              role: role
-          });
-
+          await channel.presence.enter({ clientId, name: defaultName, avatar: currentAvatar, role: role });
           channel.subscribe('role_assign', (msg: any) => {
               if (msg.data.targetClientId === clientIdRef.current) {
                   setJamRole(msg.data.newRole);
                   localStorage.setItem(JAM_STORAGE_KEY, JSON.stringify({ roomId, role: msg.data.newRole, name: customName, timestamp: Date.now() }));
-                  channel.presence.update({
-                      clientId: clientIdRef.current,
-                      name: customName,
-                      avatar: currentAvatar,
-                      role: msg.data.newRole
-                  });
+                  channel.presence.update({ clientId: clientIdRef.current, name: customName, avatar: currentAvatar, role: msg.data.newRole });
                   if (msg.data.newRole === 'host') setTimeout(() => broadcastFullSync(), 500);
               }
           });
-
-          channel.subscribe('chat_msg', (msg: any) => {
-              setJamChatMessages(prev => [...prev, msg.data].slice(-50));
-          });
-          channel.subscribe('chat_config', (msg: any) => {
-              setIsChatEnabled(msg.data.enabled);
-          });
-
+          channel.subscribe('chat_msg', (msg: any) => { setJamChatMessages(prev => [...prev, msg.data].slice(-50)); });
+          channel.subscribe('chat_config', (msg: any) => { setIsChatEnabled(msg.data.enabled); });
           channel.subscribe('kick_user', (msg: any) => {
               if (msg.data.targetClientId === clientIdRef.current) {
                   setJamError("You have been removed from the Jam session by the host.");
                   disconnectJam();
               }
           });
-
           channel.subscribe('sync', (msg: any) => {
               const data = msg.data;
               const currentRole = jamRoleRef.current;
-              
               if (data.senderId === clientIdRef.current) return;
-
-              if (data.type === 'ROOM_CLOSED') {
-                  setJamError("The host has ended the Jam session.");
-                  disconnectJam();
-                  return;
-              }
-
+              if (data.type === 'ROOM_CLOSED') { setJamError("The host has ended the Jam session."); disconnectJam(); return; }
               if (data.type === 'REQUEST_DATA') {
                   if (currentRole === 'host' || currentRole === 'admin') {
                       const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
                       if (currentId === data.trackId) {
-                          if (canvasDataRef.current || lyricsRef.current?.length > 0 || songDetailsRef.current) {
-                              broadcastFullSync();
-                          } else {
+                          if (canvasDataRef.current || lyricsRef.current?.length > 0 || songDetailsRef.current) { broadcastFullSync(); }
+                          else {
                               setTimeout(() => {
                                   const stillCurrentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
                                   if (stillCurrentId === data.trackId && !canvasDataRef.current && (!lyricsRef.current || lyricsRef.current.length === 0)) {
                                       channel.publish('sync', { type: 'DENY_DATA', senderId: clientIdRef.current, trackId: data.trackId });
-                                  } else if (stillCurrentId === data.trackId) {
-                                      broadcastFullSync();
-                                  }
+                                  } else if (stillCurrentId === data.trackId) { broadcastFullSync(); }
                               }, 5000);
                           }
                       }
                   }
                   return;
               }
-
               if (data.type === 'DENY_DATA') {
                   if (currentTrackRef.current?.id === data.trackId || currentTrackRef.current?.track_id === data.trackId) {
-                      setCanvasData(null);
-                      setLyrics([]);
+                      setCanvasData(null); setLyrics([]);
                   }
                   return;
               }
-
               const isDriver = currentRole === 'admin' || currentRole === 'host';
               const recentlyActed = isDriver && (Date.now() - localActionTimeRef.current < 10000);
-
-              if (recentlyActed && ['HEARTBEAT', 'TIME', 'STATE', 'QUEUE_UPDATE'].includes(data.type)) {
-                  return; 
-              }
-
+              if (recentlyActed && ['HEARTBEAT', 'TIME', 'STATE', 'QUEUE_UPDATE'].includes(data.type)) { return; }
               if (data.type === 'DATA_UPDATE') {
                   const p = data.payload;
                   const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
@@ -1023,29 +931,16 @@ export default function MiniPlayer() {
                   localActionTimeRef.current = Date.now();
                   const p = data.payload;
                   isSystemSongChangeRef.current = true;
-                  
-                  setSongDetails(p.songDetails);
-                  setAudioUrl(p.audioUrl);
-                  setStreamBaseUrl(p.streamBaseUrl);
-                  setLyrics(p.lyrics);
-                  setSyncType(p.syncType);
-                  setCanvasData(p.canvasData);
-                  setYtVideoId(p.ytVideoId);
-                  setJamPlayContext(p.playContext);
+                  setSongDetails(p.songDetails); setAudioUrl(p.audioUrl); setStreamBaseUrl(p.streamBaseUrl);
+                  setLyrics(p.lyrics); setSyncType(p.syncType); setCanvasData(p.canvasData);
+                  setYtVideoId(p.ytVideoId); setJamPlayContext(p.playContext);
                   if (p.queue) setUpcomingQueue(p.queue);
-                  
                   if (p.isVideoMode !== isVideoModeRef.current) setIsVideoMode(p.isVideoMode);
-
                   let targetTime = p.time;
                   if (p.isPlaying) targetTime += 0.8; 
                   iframeInitialTimeRef.current = targetTime;
-
-                  if (p.song && p.song.id !== currentTrackRef.current?.id) {
-                      setCurrentSong(p.song);
-                  } else {
-                      currentTrackRef.current = p.song;
-                  }
-
+                  if (p.song && p.song.id !== currentTrackRef.current?.id) { setCurrentSong(p.song); }
+                  else { currentTrackRef.current = p.song; }
                   setIsPlaying(p.isPlaying);
                   if (p.isVideoMode && videoIframeRef.current?.contentWindow) {
                       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
@@ -1054,8 +949,7 @@ export default function MiniPlayer() {
                       const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
                       const payloadId = p.song?.id || p.song?.track_id;
                       if (Math.abs(audioRef.current.currentTime - targetTime) > 4.0 || payloadId !== currentId) {
-                          audioRef.current.currentTime = targetTime;
-                          setCurrentTime(targetTime);
+                          audioRef.current.currentTime = targetTime; setCurrentTime(targetTime);
                       }
                       if (p.isPlaying) audioRef.current.play().catch(() => setJamPlayBlocked(true));
                       else audioRef.current.pause();
@@ -1077,18 +971,11 @@ export default function MiniPlayer() {
                           if (cp.queue) setUpcomingQueue(cp.queue);
                       }
                   }
-
-                  if (data.isVideoMode !== undefined && data.isVideoMode !== isVideoModeRef.current) {
-                      setIsVideoMode(data.isVideoMode);
-                  }
-
+                  if (data.isVideoMode !== undefined && data.isVideoMode !== isVideoModeRef.current) { setIsVideoMode(data.isVideoMode); }
                   let targetTime = data.time;
-                  
                   if (data.isVideoMode || isVideoModeRef.current) {
                       if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && Math.abs(videoStartTimeRef.current - targetTime) > 4.0)) {
-                          if (!isSeekingRef.current) {
-                              videoIframeRef.current?.contentWindow?.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
-                          }
+                          if (!isSeekingRef.current) { videoIframeRef.current?.contentWindow?.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*'); }
                       }
                       if (data.type === 'STATE' || data.type === 'HEARTBEAT') {
                           if (data.isPlaying !== isPlayingRef.current) {
@@ -1098,10 +985,7 @@ export default function MiniPlayer() {
                       }
                   } else {
                       if (data.type === 'TIME' || (data.type === 'HEARTBEAT' && audioRef.current && Math.abs(audioRef.current.currentTime - targetTime) > 4.0)) {
-                          if (audioRef.current && !isSeekingRef.current) {
-                              audioRef.current.currentTime = targetTime;
-                              setCurrentTime(targetTime);
-                          }
+                          if (audioRef.current && !isSeekingRef.current) { audioRef.current.currentTime = targetTime; setCurrentTime(targetTime); }
                       }
                       if (data.type === 'STATE' || data.type === 'HEARTBEAT') {
                           if (data.isPlaying !== isPlayingRef.current) {
@@ -1113,17 +997,13 @@ export default function MiniPlayer() {
                   }
               }
           });
-
           setJamStatus('connected');
           const result = await channel.presence.get();
           const members = Array.isArray(result) ? result : (result.items || []);
           setJamParticipants(members.map((m: any) => ({ ...m.data, clientId: m.clientId })));
-
       } catch (e) {
           console.error("Jam Connect Error:", e);
-          setJamStatus('disconnected');
-          setJamRole(null);
-          setJamRoomId(null);
+          setJamStatus('disconnected'); setJamRole(null); setJamRoomId(null);
           localStorage.removeItem(JAM_STORAGE_KEY);
           setJamError("Failed to connect to Jam server. Check Room ID.");
       }
@@ -1131,33 +1011,23 @@ export default function MiniPlayer() {
 
   const createJamRoom = () => {
       const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-      setJamRoomId(newRoomId);
-      setJamRole('host');
+      setJamRoomId(newRoomId); setJamRole('host');
       connectToAbly(newRoomId, 'host', jamName);
   };
 
   const joinJamRoom = () => {
       if (jamInputId.length < 6) return;
-      setJamRoomId(jamInputId);
-      setJamRole('guest');
+      setJamRoomId(jamInputId); setJamRole('guest');
       connectToAbly(jamInputId, 'guest', jamName);
   };
 
   const disconnectJam = () => {
-      if (jamRole === 'host' && ablyChannelRef.current) {
-          ablyChannelRef.current.publish('sync', { type: 'ROOM_CLOSED', senderId: clientIdRef.current });
-      }
+      if (jamRole === 'host' && ablyChannelRef.current) { ablyChannelRef.current.publish('sync', { type: 'ROOM_CLOSED', senderId: clientIdRef.current }); }
       if (ablyChannelRef.current) ablyChannelRef.current.presence.leave();
       if (ablyClientRef.current) ablyClientRef.current.close();
-      
-      ablyClientRef.current = null;
-      ablyChannelRef.current = null;
-      setJamStatus('disconnected');
-      setJamRole(null);
-      setJamRoomId(null);
-      setJamParticipants([]);
-      setJamLogs([]);
-      setJamChatMessages([]);
+      ablyClientRef.current = null; ablyChannelRef.current = null;
+      setJamStatus('disconnected'); setJamRole(null); setJamRoomId(null);
+      setJamParticipants([]); setJamLogs([]); setJamChatMessages([]);
       localStorage.removeItem(JAM_STORAGE_KEY);
       setShowJamMenu(false);
   };
@@ -1167,12 +1037,7 @@ export default function MiniPlayer() {
       ablyChannelRef.current.publish('role_assign', { targetClientId, newRole });
       if (newRole === 'host') {
           setJamRole('admin');
-          ablyChannelRef.current.presence.update({
-              clientId: clientIdRef.current,
-              name: jamName,
-              avatar: jamAvatar,
-              role: 'admin'
-          });
+          ablyChannelRef.current.presence.update({ clientId: clientIdRef.current, name: jamName, avatar: jamAvatar, role: 'admin' });
       }
   };
 
@@ -1183,28 +1048,17 @@ export default function MiniPlayer() {
 
   const sendChat = (text: string) => {
       if (!text.trim() || !ablyChannelRef.current) return;
-      ablyChannelRef.current.publish('chat_msg', {
-          id: Date.now(),
-          sender: jamName || 'Anonymous',
-          avatar: jamAvatar,
-          text: text.trim(),
-          role: jamRole
-      });
+      ablyChannelRef.current.publish('chat_msg', { id: Date.now(), sender: jamName || 'Anonymous', avatar: jamAvatar, text: text.trim(), role: jamRole });
       setJamChatInput("");
   };
 
   const toggleChat = () => {
       const newState = !isChatEnabled;
       setIsChatEnabled(newState);
-      if (ablyChannelRef.current) {
-          ablyChannelRef.current.publish('chat_config', { enabled: newState });
-      }
+      if (ablyChannelRef.current) { ablyChannelRef.current.publish('chat_config', { enabled: newState }); }
   };
 
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-      setJamName(e.target.value);
-      localStorage.setItem('jam_name', e.target.value);
-  };
+  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => { setJamName(e.target.value); localStorage.setItem('jam_name', e.target.value); };
 
   const handleAvatarChange = (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -1219,12 +1073,10 @@ export default function MiniPlayer() {
                   const ctx = canvas.getContext('2d');
                   if (ctx) {
                       const minDim = Math.min(img.width, img.height);
-                      const sx = (img.width - minDim) / 2;
-                      const sy = (img.height - minDim) / 2;
+                      const sx = (img.width - minDim) / 2; const sy = (img.height - minDim) / 2;
                       ctx.drawImage(img, sx, sy, minDim, minDim, 0, 0, size, size);
                       const base64 = canvas.toDataURL('image/jpeg', 0.8);
-                      setJamAvatar(base64);
-                      localStorage.setItem('jam_avatar', base64);
+                      setJamAvatar(base64); localStorage.setItem('jam_avatar', base64);
                   }
               };
               img.src = ev.target?.result as string;
@@ -1239,13 +1091,9 @@ export default function MiniPlayer() {
           try {
               const { roomId, role, name, timestamp } = JSON.parse(session);
               if (roomId && role && timestamp && (Date.now() - timestamp < 5 * 60 * 60 * 1000)) {
-                  setJamRoomId(roomId);
-                  setJamRole(role);
-                  setJamName(name || '');
+                  setJamRoomId(roomId); setJamRole(role); setJamName(name || '');
                   connectToAbly(roomId, role, name || '');
-              } else {
-                  localStorage.removeItem(JAM_STORAGE_KEY);
-              }
+              } else { localStorage.removeItem(JAM_STORAGE_KEY); }
           } catch (e) {}
       }
   }, []);
@@ -1267,16 +1115,11 @@ export default function MiniPlayer() {
   },[]);
 
   const closeMainPlayer = useCallback(() => {
-    setIsExpanded(false);
-    setShowQueue(false);
-    setShowSettingsMenu(false);
-    setShowTimerMenu(false);
+    setIsExpanded(false); setShowQueue(false); setShowSettingsMenu(false); setShowTimerMenu(false);
   },[]);
 
   const openMainPlayer = () => {
-      if (!isExpanded) { 
-          setIsExpanded(true); setShowQueue(false); setShowSettingsMenu(false); setShowTimerMenu(false);
-      }
+      if (!isExpanded) { setIsExpanded(true); setShowQueue(false); setShowSettingsMenu(false); setShowTimerMenu(false); }
   };
   
   const openSettings = (e: React.MouseEvent) => { e.stopPropagation(); setShowSettingsMenu(true); };
@@ -1298,8 +1141,6 @@ export default function MiniPlayer() {
                       hls.loadSource(audioUrl);
                       hls.attachMedia(audioRef.current);
                       hlsRef.current = hls;
-
-                      // HDNTL fallback: if constructed URL fails fatally, fetch API once per track
                       hls.on(Hls.Events.ERROR, async (_evt: any, data: any) => {
                           if (!isCurrent || hlsErrorHandled || !data?.fatal) return;
                           hlsErrorHandled = true;
@@ -1309,7 +1150,6 @@ export default function MiniPlayer() {
                           hlsApiRetryAttemptedRef.current.add(tid);
                           try {
                               console.warn('[HLS] Fatal error on track', tid, 'type:', data.type, 'details:', data.details, '— falling back to stream API');
-                              // Remove bad cached stream URL so retry uses fresh API response
                               await deleteCache(`gaana_stream_${tid}`);
                               const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
                               if (streamRes.ok && isCurrent) {
@@ -1323,24 +1163,19 @@ export default function MiniPlayer() {
                               }
                           } catch (e) {}
                       });
-
                       if (isPlaying && !isVideoMode) {
                           const p = audioRef.current.play();
                           if (p !== undefined) p.catch(() => setJamPlayBlocked(true));
                       }
                   } else if (audioRef.current.canPlayType('application/vnd.apple.mpegurl')) {
                       audioRef.current.src = audioUrl;
-                      if (isPlaying && !isVideoMode) {
-                          audioRef.current.play().catch(()=>setJamPlayBlocked(true));
-                      }
+                      if (isPlaying && !isVideoMode) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); }
                   }
               } catch(e) {}
           } else {
               if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
               audioRef.current.src = audioUrl;
-              if (isPlaying && !isVideoMode) {
-                  audioRef.current.play().catch(()=>setJamPlayBlocked(true));
-              }
+              if (isPlaying && !isVideoMode) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); }
           }
       };
       if (isCurrent) setupAudio();
@@ -1353,13 +1188,10 @@ export default function MiniPlayer() {
       const songTitleSlug = decodeEntities(displayTitle).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
       const sId = currentSong.track_id || currentSong.id || currentSong.entity_id || '';
       const shareUrl = `https://ayushgaana.vercel.app/play/song/${songTitleSlug}/${sId}`;
-
       if (navigator.share) {
         try { await navigator.share({ url: shareUrl }); } 
         catch(e) { await navigator.clipboard.writeText(shareUrl); alert("Link copied to clipboard!"); }
-      } else { 
-        await navigator.clipboard.writeText(shareUrl); alert("Link copied to clipboard!"); 
-      }
+      } else { await navigator.clipboard.writeText(shareUrl); alert("Link copied to clipboard!"); }
     } catch (e) { console.error("Error sharing:", e); }
   };
 
@@ -1402,12 +1234,8 @@ export default function MiniPlayer() {
        const ws = localStorage.getItem('word_sync_enabled'); if (ws !== null) setIsWordSyncEnabled(ws === 'true');
        const mws = localStorage.getItem('mini_word_sync_enabled'); if (mws !== null) setIsMiniWordSyncEnabled(mws === 'true');
        const lsr = localStorage.getItem('lyrics_server'); if (lsr !== null) setLyricsServer(lsr);
-
        const storedLang = localStorage.getItem('lyrics_lang');
-       if (storedLang === 'hi' || storedLang === 'en' || storedLang === 'original') {
-           setLyricsLang(storedLang as 'original'|'hi'|'en');
-       }
-
+       if (storedLang === 'hi' || storedLang === 'en' || storedLang === 'original') { setLyricsLang(storedLang as 'original'|'hi'|'en'); }
        const storedSong = localStorage.getItem('last_session_song');
        if (storedSong && !currentSong && !isSessionRestored) {
           try {
@@ -1424,40 +1252,18 @@ export default function MiniPlayer() {
 
   useEffect(() => {
       let isCancelled = false;
-      
-      if (!lyrics || lyrics.length === 0) {
-          setDisplayLyrics([]);
-          return;
-      }
-      
-      if (lyricsLang === 'original') {
-          setDisplayLyrics(lyrics);
-          return;
-      }
-
+      if (!lyrics || lyrics.length === 0) { setDisplayLyrics([]); return; }
+      if (lyricsLang === 'original') { setDisplayLyrics(lyrics); return; }
       const process = async () => {
           setIsTransliterating(true);
           const cacheKey = `trans_lyrics_${currentTrackRef.current?.id || currentTrackRef.current?.track_id}_${lyricsLang}`;
           const cached = await getCache(cacheKey);
-          if (cached) {
-              if (!isCancelled) {
-                  setDisplayLyrics(cached);
-                  setIsTransliterating(false);
-              }
-              return;
-          }
-          
+          if (cached) { if (!isCancelled) { setDisplayLyrics(cached); setIsTransliterating(false); } return; }
           if (!isCancelled && displayLyrics.length === 0) setDisplayLyrics(lyrics);
-
           const result = await transliterateLyrics(lyrics, lyricsLang);
-          if (!isCancelled) {
-              setDisplayLyrics(result);
-              setIsTransliterating(false);
-              setCache(cacheKey, result);
-          }
+          if (!isCancelled) { setDisplayLyrics(result); setIsTransliterating(false); setCache(cacheKey, result); }
       };
       process();
-
       return () => { isCancelled = true; };
   }, [lyrics, lyricsLang]);
 
@@ -1474,15 +1280,11 @@ export default function MiniPlayer() {
   useEffect(() => { isLyricsEnabledRef.current = isLyricsEnabled; if (!isLyricsEnabled) setIsLyricsFullScreen(false); },[isLyricsEnabled]);
   useEffect(() => { if (currentSong) localStorage.setItem('last_session_song', JSON.stringify(currentSong)); },[currentSong]);
   useEffect(() => { if (upcomingQueue && upcomingQueue.length > 0) localStorage.setItem('last_session_queue', JSON.stringify(upcomingQueue)); },[upcomingQueue]);
-  
-  useEffect(() => { 
-      setIsCanvasLoaded(false); 
-  }, [canvasData?.canvasUrl]);
+  useEffect(() => { setIsCanvasLoaded(false); }, [canvasData?.canvasUrl]);
 
   const rawTitle = currentSong ? decodeEntities(currentSong.track_title || currentSong.title || currentSong.name || "Unknown") : "";
   const rawArtists = currentSong ? decodeEntities(getArtistsText(currentSong)) : "";
   const rawImage = currentSong ? getImageUrl(currentSong) : "";
-
   const displayTitle = songDetails?.track_title ? decodeEntities(songDetails.track_title) : rawTitle;
   const displayArtists = songDetails ? decodeEntities(getArtistsText(songDetails)) : rawArtists;
   const displayImage = songDetails?.artwork_large ? getImageUrl(songDetails) : rawImage;
@@ -1506,7 +1308,6 @@ export default function MiniPlayer() {
       const query = `${songTitle} ${songArtists.split(',').slice(0, 2).join(' ')} official music video`;
       let cachedVid = await getCache(`vid_id_${query}`);
       if (cachedVid) { prefetchedYtIdRef.current = cachedVid; return cachedVid; }
-
       const data = await fetchJina(`https://ayushvid.vercel.app/api?q=${encodeURIComponent(query)}`, { referrerPolicy: "no-referrer" });
       if (data?.top_result?.videoId) { 
         prefetchedYtIdRef.current = data.top_result.videoId;
@@ -1517,7 +1318,7 @@ export default function MiniPlayer() {
     return null;
   };
 
-  // --- QUALITY CHANGE ENGINE (supports BOTH old .mp4.master.m3u8 format AND new /{q}/hdntl=... format) ---
+  // --- QUALITY CHANGE ENGINE (supports old .mp4.master.m3u8 AND new /{q}/hdntl=... format) ---
   useEffect(() => {
     if (streamBaseUrl) {
         const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
@@ -1527,62 +1328,74 @@ export default function MiniPlayer() {
     }
   },[streamBaseUrl, selectedQuality]);
 
-  // --- PRELOAD NEXT TRACK (info + stream URL) so the next song starts instantly with zero API calls ---
+  // --- PRELOAD NEXT TRACK — retries until HDNTL is cached ---
+  // The prefetch fires on song change but HDNTL might still be empty (race with fetchStreamTask).
+  // It retries every 500ms up to ~20 attempts (~10s) until the token is available, then caches the
+  // constructed URL so the next song is a pure cache hit.
   useEffect(() => {
       if (!upcomingQueue || upcomingQueue.length === 0) return;
-      const nextTrack = upcomingQueue[0];
-      if (!nextTrack) return;
-      const nextTrackId = nextTrack.track_id || nextTrack.id;
-      if (!nextTrackId) return;
-      const nextTrackIdStr = String(nextTrackId);
-      
       let cancelled = false;
-      (async () => {
-          // If stream URL already cached, nothing to do
+      let attempts = 0;
+      const MAX_ATTEMPTS = 20;
+
+      const tryPrefetch = async () => {
+          if (cancelled) return;
+          attempts++;
+          
+          const nextTrack = upcomingQueue[0];
+          if (!nextTrack) return;
+          const nextTrackId = nextTrack.track_id || nextTrack.id || nextTrack.entity_id;
+          if (!nextTrackId) return;
+          const nextTrackIdStr = String(nextTrackId);
+
+          // Already cached? Done.
           const streamCached = await getCache(`gaana_stream_${nextTrackIdStr}`);
-          if ((streamCached?.data?.hlsUrl || streamCached?.data?.url) || cancelled) return;
-          
-          // Resolve albumId from track object first
+          if (streamCached?.data?.hlsUrl || streamCached?.data?.url) {
+              console.log(`[Prefetch] ✓ Next track ${nextTrackIdStr} already cached`);
+              return;
+          }
+          if (cancelled) return;
+
+          // Resolve albumId — first from track object, then from info cache / API
           let albumId = getAlbumIdFromSong(nextTrack);
-          
-          // Fallback: cached info
           if (!albumId) {
-              const infoCached = await getCache(`gaana_info_${nextTrackIdStr}`);
+              const info = await ensureInfoForTrack(nextTrackIdStr);
               if (cancelled) return;
-              if (infoCached?.data) {
-                  albumId = infoCached.data.album_id || infoCached.data.albumid || null;
-              }
+              if (info) albumId = info.album_id || info.albumid || info.albumId || null;
           }
-          
-          // Fallback: prefetch info API (needed anyway for song details; no extra net calls long-run)
-          if (!albumId && !cancelled) {
-              try {
-                  const res = await fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/superserch/track/info?track_id=${nextTrackIdStr}`, { referrerPolicy: "no-referrer" });
-                  if (res.ok && !cancelled) {
-                      const data = await res.json();
-                      if (data?.data) {
-                          await setCache(`gaana_info_${nextTrackIdStr}`, data);
-                          albumId = data.data.album_id || data.data.albumid || null;
-                          console.log('[Prefetch] Cached info for next track:', nextTrackIdStr, 'albumId:', albumId);
-                      }
-                  }
-              } catch(e) {}
+          if (cancelled) return;
+
+          if (!albumId) {
+              if (attempts < MAX_ATTEMPTS) { setTimeout(tryPrefetch, 500); }
+              else { console.warn(`[Prefetch] ✗ Gave up after ${MAX_ATTEMPTS} attempts: no albumId for ${nextTrackIdStr}`); }
+              return;
           }
-          
-          if (!albumId || cancelled) return;
-          
+
+          // Wait for HDNTL to be populated by song 1's fetchStreamTask
+          const hdntlNow = await getHdntlCache();
+          if (!hdntlNow?.hdntl) {
+              if (attempts < MAX_ATTEMPTS) { setTimeout(tryPrefetch, 500); return; }
+              console.warn(`[Prefetch] ✗ Gave up after ${MAX_ATTEMPTS} attempts: HDNTL never populated`);
+              return;
+          }
+
           const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
           const constructedUrl = await getCachedHdntlUrl(String(albumId), nextTrackIdStr, targetQ);
-          if (constructedUrl && !cancelled) {
+          if (cancelled) return;
+
+          if (constructedUrl) {
               await setCache(`gaana_stream_${nextTrackIdStr}`, { data: { hlsUrl: constructedUrl } });
-              console.log('[Prefetch] Cached constructed stream URL for next track:', nextTrackIdStr);
-          } else if (!cancelled) {
-              console.log('[Prefetch] Could not construct stream URL for next track:', nextTrackIdStr);
+              console.log(`[Prefetch] ✓ Cached constructed stream URL for next track ${nextTrackIdStr} (albumId=${albumId})`);
+          } else if (attempts < MAX_ATTEMPTS) {
+              setTimeout(tryPrefetch, 500);
+          } else {
+              console.warn(`[Prefetch] ✗ Gave up after ${MAX_ATTEMPTS} attempts for ${nextTrackIdStr}`);
           }
-      })();
-      
+      };
+
+      tryPrefetch();
       return () => { cancelled = true; };
-  }, [upcomingQueue, selectedQuality]);
+  }, [upcomingQueue, selectedQuality, ensureInfoForTrack]);
 
   useEffect(() => {
     if (!currentSong) return;
@@ -1591,8 +1404,7 @@ export default function MiniPlayer() {
     if (isSystemSongChangeRef.current) {
         isSystemSongChangeRef.current = false;
         currentTrackRef.current = currentSong;
-        setIsCanvasLoaded(false); 
-        setIsUiHidden(false);     
+        setIsCanvasLoaded(false); setIsUiHidden(false);     
         return;
     }
 
@@ -1604,7 +1416,9 @@ export default function MiniPlayer() {
     let isCurrent = true;
     const trackId = currentSong.track_id || currentSong.id || currentSong.entity_id;
     
-    if (lastFetchedTrackIdRef.current === trackId) {
+    // FIX: only skip if stream has actually been resolved. Old check skipped on React 18 strict-mode
+    // double-invoke (first effect aborts → second effect sees same trackId → returns → nothing runs).
+    if (lastFetchedTrackIdRef.current === trackId && streamBaseUrlRef.current) {
         currentTrackRef.current = currentSong;
         return;
     }
@@ -1638,7 +1452,6 @@ export default function MiniPlayer() {
     setStreamBaseUrl(null);
     setBuffered(0);
 
-    let sDetails: any = null;
     let skipSpotifyLyrics = false;
 
     // --- STREAM TASK (HDNTL-aware, 3-tier resolution) ---
@@ -1651,9 +1464,8 @@ export default function MiniPlayer() {
             // TIER 1 — per-track stream cache (fastest)
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (streamJson?.data?.hlsUrl) {
-                console.log('[Stream] TIER 1: per-track stream cache hit for', trackIdStr);
+                console.log('[Stream] TIER 1 ✓ per-track stream cache hit for', trackIdStr);
                 if (!isCurrent || signal.aborted) return;
-                // Refresh HDNTL cache in case it changed (harmless if same)
                 await extractAndCacheHdntl(streamJson.data.hlsUrl);
                 if (!isCurrent || signal.aborted) return;
                 setStreamBaseUrl(streamJson.data.hlsUrl);
@@ -1661,59 +1473,48 @@ export default function MiniPlayer() {
                 return;
             }
             if (streamJson?.data?.url) {
-                console.log('[Stream] TIER 1: per-track direct-url cache hit for', trackIdStr);
+                console.log('[Stream] TIER 1 ✓ per-track direct-url cache hit for', trackIdStr);
                 if (!isCurrent || signal.aborted) return;
                 setAudioUrl(streamJson.data.url);
                 setIsStreamLoading(false);
                 return;
             }
             if (streamJson?.notFound) {
-                console.log('[Stream] TIER 1: known not-found, stopping');
+                console.log('[Stream] TIER 1 ✗ known not-found for', trackIdStr);
                 setIsStreamLoading(false);
                 return;
             }
 
-            // TIER 2 — construct from cached HDNTL token
+            // TIER 2 — construct from cached HDNTL token (needs albumId)
             let albumId = getAlbumIdFromSong(currentSong);
             let albumIdSource = 'currentSong';
             if (!albumId) {
-                const infoCached = await getCache(`gaana_info_${trackId}`);
-                if (infoCached?.data) {
-                    albumId = infoCached.data.album_id || infoCached.data.albumid || null;
-                    if (albumId) albumIdSource = 'infoCache';
-                }
+                // Await info (dedup'd with fetchInfoTask) instead of racing
+                const info = await ensureInfoForTrack(trackIdStr);
+                if (!isCurrent || signal.aborted) return;
+                if (info) { albumId = info.album_id || info.albumid || info.albumId || null; albumIdSource = 'infoAPI'; }
             }
-            if (!albumId && sDetails) {
-                albumId = sDetails.album_id || sDetails.albumid || null;
-                if (albumId) albumIdSource = 'sDetails';
-            }
-            if (!albumId && streamJson?.data?.hlsUrl) {
-                albumId = extractAlbumIdFromHlsUrl(streamJson.data.hlsUrl);
-                if (albumId) albumIdSource = 'previousUrl';
-            }
-
-            console.log('[Stream] albumId resolved:', albumId, 'via', albumIdSource, 'for track', trackIdStr);
+            console.log('[Stream] albumId resolved:', albumId || 'null', 'via', albumId ? albumIdSource : 'NONE', 'for track', trackIdStr);
 
             if (albumId) {
                 const constructedUrl = await getCachedHdntlUrl(String(albumId), trackIdStr, targetQ);
                 if (constructedUrl) {
-                    console.log('[Stream] TIER 2: constructed URL from HDNTL token');
+                    console.log('[Stream] TIER 2 ✓ constructed URL from HDNTL token');
                     if (!isCurrent || signal.aborted) return;
-                    // Cache constructed stream URL so replay is instant and doesn't even need HDNTL lookup
                     await setCache(`gaana_stream_${trackId}`, { data: { hlsUrl: constructedUrl } });
                     if (!isCurrent || signal.aborted) return;
                     setStreamBaseUrl(constructedUrl);
                     setIsStreamLoading(false);
                     return;
                 } else {
-                    console.log('[Stream] TIER 2 failed: HDNTL cache empty/expired for track', trackIdStr);
+                    console.log('[Stream] TIER 2 ✗ HDNTL cache empty/expired');
                 }
             } else {
-                console.log('[Stream] TIER 2 failed: no albumId available for track', trackIdStr);
+                console.log('[Stream] TIER 2 ✗ no albumId available');
             }
 
             // TIER 3 — API fallback
-            console.log('[Stream] TIER 3: calling stream API for track', trackIdStr);
+            console.log('[Stream] TIER 3 → calling stream API for', trackIdStr);
             const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
             if (streamRes.ok) {
                 streamJson = await streamRes.json();
@@ -1721,13 +1522,12 @@ export default function MiniPlayer() {
                     await setCache(`gaana_stream_${trackId}`, streamJson);
                     if (streamJson.data.hlsUrl) {
                         await extractAndCacheHdntl(streamJson.data.hlsUrl);
-                        console.log('[Stream] TIER 3 success: stream API + HDNTL cached for future tracks');
+                        console.log('[Stream] TIER 3 ✓ stream API + HDNTL cached for future tracks');
                     }
                 } else {
                     await setCache(`gaana_stream_${trackId}`, { notFound: true });
                 }
             }
-
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
@@ -1738,19 +1538,8 @@ export default function MiniPlayer() {
 
     const fetchInfoTask = async () => {
         try {
-            let infoJson = await getCache(`gaana_info_${trackId}`);
-            if (!infoJson) {
-                const infoRes = await fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer", signal });
-                if (infoRes.ok) {
-                    infoJson = await infoRes.json();
-                    if (infoJson?.data) await setCache(`gaana_info_${trackId}`, infoJson);
-                    else await setCache(`gaana_info_${trackId}`, { notFound: true });
-                }
-            }
-            if (infoJson?.data && isCurrent && !signal.aborted) { 
-                sDetails = infoJson.data; 
-                setSongDetails(infoJson.data); 
-            }
+            const info = await ensureInfoForTrack(String(trackId));
+            if (info && isCurrent && !signal.aborted) { setSongDetails(info); }
 
             const currentLyricsServer = localStorage.getItem('lyrics_server') || "Spotify"; 
             if (currentLyricsServer === "Gaana" && !signal.aborted) {
@@ -1782,13 +1571,10 @@ export default function MiniPlayer() {
     const triggerSpotifyFallback = async (songData: any, skipLyrics: boolean = false) => {
        const cacheKey = `spotify_match_ak47_${trackId}`;
        let cachedMatch = await getCache(cacheKey);
-
        const execExtras = async (sId: string, sUrl: string) => {
            if (!isCurrent || signal.aborted) return;
            setSpotifyId(sId); setSpotifyUrl(sUrl);
-           
            if (!isCanvasEnabledRef.current && (!isLyricsEnabledRef.current || skipLyrics)) return;
-           
            try {
                let dataJson = await getCache(`spotify_data_${sId}`);
                if (!dataJson) {
@@ -1797,33 +1583,21 @@ export default function MiniPlayer() {
                    else dataJson = { notFound: true };
                }
                if (isCurrent && dataJson && !dataJson.notFound && !signal.aborted) {
-                   if (isCanvasEnabledRef.current && dataJson.data?.canvas?.canvasesList?.length > 0) {
-                       setCanvasData(dataJson.data.canvas.canvasesList[0]);
-                   }
+                   if (isCanvasEnabledRef.current && dataJson.data?.canvas?.canvasesList?.length > 0) { setCanvasData(dataJson.data.canvas.canvasesList[0]); }
                    if (isLyricsEnabledRef.current && !skipLyrics && dataJson.data?.lyrics?.lyrics?.lines) {
-                       const parsedLyrics = dataJson.data.lyrics.lyrics.lines.map((l: any) => ({
-                           time: Number(l.startTimeMs) / 1000,
-                           words: l.words
-                       }));
+                       const parsedLyrics = dataJson.data.lyrics.lyrics.lines.map((l: any) => ({ time: Number(l.startTimeMs) / 1000, words: l.words }));
                        setLyrics(parsedLyrics);
                        setSyncType(dataJson.data.lyrics.lyrics.syncType);
                    }
                }
            } catch(e) {}
        };
-
-       if (cachedMatch) { 
-           if (!cachedMatch.notFound) await execExtras(cachedMatch.id, cachedMatch.url); 
-           return; 
-       }
-
+       if (cachedMatch) { if (!cachedMatch.notFound) await execExtras(cachedMatch.id, cachedMatch.url); return; }
        const searchTitle = decodeEntities(songData.track_title || songData.title || songData.name || "Unknown");
        const searchArtistsFull = decodeEntities(getArtistsText(songData));
        const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
        const query = `${searchTitle} ${searchArtist}`.trim();
-
        let matchFound = false;
-
        try {
            const auth = await getAuthData();
            if (auth && auth.accessToken && !signal.aborted) {
@@ -1835,48 +1609,26 @@ export default function MiniPlayer() {
                        if (match) {
                           const sId = match.id || match.spotify_url?.split('/track/')[1]?.split('?')[0] || match.external_urls?.spotify?.split('/track/')[1]?.split('?')[0];
                           const sUrl = match.spotify_url || match.external_urls?.spotify || `https://open.spotify.com/track/${sId}`;
-                          if (sId) {
-                              matchFound = true;
-                              await setCache(cacheKey, { id: sId, url: sUrl });
-                              await execExtras(sId, sUrl);
-                              return;
-                          }
+                          if (sId) { matchFound = true; await setCache(cacheKey, { id: sId, url: sUrl }); await execExtras(sId, sUrl); return; }
                        }
                    }
                }
            }
        } catch (e: any) { }
-
        if (matchFound || signal.aborted) return;
-
        let matchData = null;
        const searchUrl = `https://${RAPID_API_HOST}/search?q=${encodeURIComponent(query)}&type=tracks&offset=0&limit=25&numberOfTopResults=5`;
-       
        try {
            const response = await fetch(searchUrl, { method: 'GET', headers: { 'x-rapidapi-key': RAPID_KEYS[rapidKeyIdxRef.current], 'x-rapidapi-host': RAPID_API_HOST }, referrerPolicy: "no-referrer", signal });
-           if (response.ok) { 
-               matchData = await response.json(); 
-           } else if ([429, 401, 403].includes(response.status)) {
-               rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length;
-           }
-       } catch (e: any) { 
-           if (e.name !== 'AbortError') rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; 
-       }
-       
+           if (response.ok) { matchData = await response.json(); } 
+           else if ([429, 401, 403].includes(response.status)) { rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; }
+       } catch (e: any) { if (e.name !== 'AbortError') rapidKeyIdxRef.current = (rapidKeyIdxRef.current + 1) % RAPID_KEYS.length; }
        if (!isCurrent || signal.aborted) return;
-
        if (matchData) {
           const match: any = performMatching(matchData, searchTitle, searchArtist);
-          if (match) { 
-             const newUrl = `https://open.spotify.com/track/${match.id}`;
-             await setCache(cacheKey, { id: match.id, url: newUrl });
-             await execExtras(match.id, newUrl);
-          } else {
-             await setCache(cacheKey, { notFound: true });
-          }
-       } else {
-          await setCache(cacheKey, { notFound: true });
-       }
+          if (match) { const newUrl = `https://open.spotify.com/track/${match.id}`; await setCache(cacheKey, { id: match.id, url: newUrl }); await execExtras(match.id, newUrl); }
+          else { await setCache(cacheKey, { notFound: true }); }
+       } else { await setCache(cacheKey, { notFound: true }); }
     };
 
     const executeHeavyFetches = async () => {
@@ -1899,40 +1651,28 @@ export default function MiniPlayer() {
         }
 
         await new Promise(r => setTimeout(r, 500));
-        
         if (!isCurrent || signal.aborted) return;
         
-        await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
+        await triggerSpotifyFallback(songDetailsRef.current || currentSong, skipSpotifyLyrics);
         
         if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current && isCurrent && !signal.aborted) {
             ablyChannelRef.current.publish('sync', {
-                type: 'FULL_SYNC',
-                senderId: clientIdRef.current,
+                type: 'FULL_SYNC', senderId: clientIdRef.current,
                 payload: {
-                    song: currentTrackRef.current,
-                    songDetails: songDetailsRef.current,
-                    audioUrl: audioUrlRef.current,
-                    streamBaseUrl: streamBaseUrlRef.current,
-                    lyrics: lyricsRef.current,
-                    syncType: syncTypeRef.current,
-                    canvasData: canvasDataRef.current,
-                    isVideoMode: isVideoModeRef.current,
-                    ytVideoId: ytVideoIdRef.current,
-                    isPlaying: isPlayingRef.current,
+                    song: currentTrackRef.current, songDetails: songDetailsRef.current,
+                    audioUrl: audioUrlRef.current, streamBaseUrl: streamBaseUrlRef.current,
+                    lyrics: lyricsRef.current, syncType: syncTypeRef.current,
+                    canvasData: canvasDataRef.current, isVideoMode: isVideoModeRef.current,
+                    ytVideoId: ytVideoIdRef.current, isPlaying: isPlayingRef.current,
                     time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
-                    queue: upcomingQueueRef.current,
-                    playContext: playContextRef.current
+                    queue: upcomingQueueRef.current, playContext: playContextRef.current
                 }
             });
         }
     };
 
     executeHeavyFetches();
-
-    return () => { 
-        isCurrent = false; 
-        abortController.abort(); 
-    };
+    return () => { isCurrent = false; abortController.abort(); };
   },[currentSong]);
 
   useEffect(() => {
@@ -1953,14 +1693,11 @@ export default function MiniPlayer() {
         if (e.data.duration) {
           if (duration !== e.data.duration) setDuration(e.data.duration);
           if (!isSeekingRef.current && isExpanded) setProgress((e.data.time / e.data.duration) * 100);
-        } else if (duration > 0 && !isSeekingRef.current && isExpanded) {
-           setProgress((e.data.time / duration) * 100);
-        }
+        } else if (duration > 0 && !isSeekingRef.current && isExpanded) { setProgress((e.data.time / duration) * 100); }
       } else {
         let stateCode = null;
         if (e.data?.type === 'YTP_STATE') stateCode = e.data.state;
         else if (e.data?.event === 'onStateChange') stateCode = e.data.info;
-        
         if (stateCode !== null) {
             if (stateCode === 1 || String(stateCode) === '1') { audioRef.current?.pause(); setIsPlaying(true); } 
             else if (stateCode === 2 || String(stateCode) === '2') { setIsPlaying(false); } 
@@ -1977,39 +1714,29 @@ export default function MiniPlayer() {
   const handlePlayPauseToggle = (e?: any) => {
     if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
-
     localActionTimeRef.current = Date.now();
     const newState = !isPlaying;
     setIsPlaying(newState);
-    
     if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
         ablyChannelRef.current.publish('sync', {
-            type: 'STATE',
-            senderId: clientIdRef.current,
-            isPlaying: newState,
+            type: 'STATE', senderId: clientIdRef.current, isPlaying: newState,
             time: isVideoModeRef.current ? videoStartTimeRef.current : (audioRef.current?.currentTime || 0),
             isVideoMode: isVideoModeRef.current
         });
     }
-
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = newState ? 'playing' : 'paused';
-    
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
       videoIframeRef.current.contentWindow.postMessage({ type: newState ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
     } else {
-      if (newState) {
-        const playPromise = audioRef.current?.play();
-        if (playPromise !== undefined) playPromise.catch(()=>setJamPlayBlocked(true));
-      } else audioRef.current?.pause();
+      if (newState) { const playPromise = audioRef.current?.play(); if (playPromise !== undefined) playPromise.catch(()=>setJamPlayBlocked(true)); }
+      else audioRef.current?.pause();
     }
   };
 
   const toggleVideoMode = async (e?: React.MouseEvent) => {
     if (e && e.stopPropagation) e.stopPropagation();
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
-    
     localActionTimeRef.current = Date.now();
-
     if (isVideoMode) {
       setIsVideoMode(false);
       if (audioRef.current) { 
@@ -2030,21 +1757,17 @@ export default function MiniPlayer() {
       setTimeout(() => broadcastFullSync(), 500);
       return;
     }
-    
     setIsVideoLoading(true);
     if (audioRef.current) audioRef.current.pause(); setIsPlaying(false);
     const newVid = await prefetchVideoId(displayTitle, displayArtists); 
     if (newVid) { setYtVideoId(newVid); setIsVideoMode(true); } 
     else if (audioRef.current) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); setIsPlaying(true); }
     setIsVideoLoading(false);
-    
     setTimeout(() => broadcastFullSync(), 500);
   };
 
   useEffect(() => {
-    if (!displayImage || displayImage.includes('via.placeholder.com')) {
-      setDominantColor("rgb(83, 83, 83)"); return;
-    }
+    if (!displayImage || displayImage.includes('via.placeholder.com')) { setDominantColor("rgb(83, 83, 83)"); return; }
     const img = new Image(); img.crossOrigin = "Anonymous"; 
     img.src = `https://wsrv.nl/?url=${encodeURIComponent(displayImage)}&w=50&h=50&output=jpg`;
     img.onload = () => {
@@ -2064,16 +1787,13 @@ export default function MiniPlayer() {
   },[displayImage]);
 
   useEffect(() => {
-    if (audioRef.current && audioUrl && !audioUrl.includes('.m3u8')) {
-      audioRef.current.volume = volume / 100;
-    }
+    if (audioRef.current && audioUrl && !audioUrl.includes('.m3u8')) { audioRef.current.volume = volume / 100; }
   },[isPlaying, audioUrl, volume, isVideoMode]);
 
   useEffect(() => {
     let timeoutId: any;
     const video = canvasVideoRef.current;
     if (!video) return;
-
     const shouldPlay = isPlaying && !isScrolledPastMain && isExpanded && !showQueue && !isVideoMode && !isLyricsFullScreen && isCanvasEnabled;
     if (shouldPlay) { if (video.paused) { timeoutId = setTimeout(() => { video.play().catch(() => {}); }, 150); } } 
     else { if (!video.paused) { video.pause(); } }
@@ -2084,12 +1804,9 @@ export default function MiniPlayer() {
     const isAutoPlay = e === true;
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     if (isAutoPlay && jamRoleRef.current === 'admin' && jamStatus === 'connected') return;
-
     localActionTimeRef.current = Date.now();
-
     if (sleepTimer === 'end') { setIsPlaying(false); setSleepTimer(null); if (audioRef.current) audioRef.current.pause(); return; }
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
-    
     if (repeatMode === 2 && audioRef.current) { 
       audioRef.current.currentTime = 0; setRepeatMode(0); const p = audioRef.current.play(); if (p!==undefined) p.catch(()=>setJamPlayBlocked(true)); return; 
     }
@@ -2107,9 +1824,7 @@ export default function MiniPlayer() {
 
   const playPrev = () => {
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
-    
     localActionTimeRef.current = Date.now();
-
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
     if (audioRef.current && audioRef.current.currentTime > 3) { audioRef.current.currentTime = 0; return; }
     if (historyQueue.length > 0) {
@@ -2139,7 +1854,6 @@ export default function MiniPlayer() {
        try {
            navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: displayImage ?[{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] :[] });
        } catch (e) {}
-       
        navigator.mediaSession.setActionHandler('play', () => {
           setIsPlaying(true); navigator.mediaSession.playbackState = 'playing';
           if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
@@ -2163,12 +1877,10 @@ export default function MiniPlayer() {
   const handleTimeUpdate = () => {
     if (audioRef.current && !isVideoMode) {
       const c = audioRef.current.currentTime; const d = audioRef.current.duration;
-      
       if (audioRef.current.buffered.length > 0 && d > 0) {
          const bufferedEnd = audioRef.current.buffered.end(audioRef.current.buffered.length - 1);
          setBuffered((bufferedEnd / d) * 100);
       }
-
       const now = Date.now();
       if (!isSeekingRef.current && now - lastTimeUpdateRef.current < 250) {
          if (isLyricsEnabled && syncType === "LINE_SYNCED" && displayLyrics.length > 0 && isExpanded) {
@@ -2180,14 +1892,11 @@ export default function MiniPlayer() {
          return; 
       }
       lastTimeUpdateRef.current = now;
-      
       setCurrentTime(c); setDuration(d || 0);
-      
       if (d > 0 && !isSeekingRef.current && isExpanded) {
         const currentPercent = (c / d) * 100;
         setProgress(currentPercent);
         if (currentPercent > maxListenRef.current) maxListenRef.current = currentPercent;
-
         if (currentPercent >= 98 && !hasCachedCurrentSongRef.current && audioUrl && !audioUrl.startsWith('blob:') && !audioUrl.includes('.m3u8')) {
             hasCachedCurrentSongRef.current = true;
             (async () => {
@@ -2201,9 +1910,7 @@ export default function MiniPlayer() {
             })();
         }
       }
-
       if (c > 0 && Math.abs(c - (parseFloat(localStorage.getItem('last_session_time')||'0'))) > 2) localStorage.setItem('last_session_time', c.toString());
-
       if (isLyricsEnabled && syncType === "LINE_SYNCED" && displayLyrics.length > 0 && !isSeekingRef.current) {
         let activeIdx = -1;
         const offsetTime = c + 0.4; 
@@ -2225,51 +1932,39 @@ export default function MiniPlayer() {
             const elapsed = currentTime - currentLineTime;
             const rawProgress = duration > 0 ? (elapsed / duration) * 100 : 100;
             const boundedProgress = Math.max(0, Math.min(100, rawProgress));
-
             const processContainer = (container: HTMLElement | null, selector: string, activeSyncEnabled: boolean) => {
                 if (!container || !activeSyncEnabled) return;
                 const words = container.querySelectorAll(selector) as NodeListOf<HTMLElement>;
                 if (!words.length) return;
-                
                 let totalChars = 0;
                 if (container.dataset.activeIdx !== activeLyricIndex.toString()) {
                     words.forEach(w => totalChars += (w.textContent || '').length);
                     container.dataset.totalChars = totalChars.toString();
                     container.dataset.activeIdx = activeLyricIndex.toString();
                 } else totalChars = parseInt(container.dataset.totalChars || '0', 10);
-                
                 if (totalChars === 0) return;
-                
                 let charAccumulator = 0;
                 words.forEach((wordNode: any) => {
                     const wordLen = (wordNode.textContent || '').length;
                     const wordStartPct = (charAccumulator / totalChars) * 100;
                     const wordEndPct = ((charAccumulator + wordLen) / totalChars) * 100;
-
-                    if (boundedProgress >= wordEndPct) {
-                        if (wordNode._lastProg !== 120) { wordNode._lastProg = 120; wordNode.style.setProperty('--p', '120%'); }
-                    } else if (boundedProgress <= wordStartPct) {
-                        if (wordNode._lastProg !== -15) { wordNode._lastProg = -15; wordNode.style.setProperty('--p', '-15%'); }
-                    } else {
+                    if (boundedProgress >= wordEndPct) { if (wordNode._lastProg !== 120) { wordNode._lastProg = 120; wordNode.style.setProperty('--p', '120%'); } } 
+                    else if (boundedProgress <= wordStartPct) { if (wordNode._lastProg !== -15) { wordNode._lastProg = -15; wordNode.style.setProperty('--p', '-15%'); } } 
+                    else {
                         const localProgress = ((boundedProgress - wordStartPct) / (wordEndPct - wordStartPct)) * 120;
-                        if (Math.abs((wordNode._lastProg || 0) - localProgress) > 1.0) {
-                            wordNode._lastProg = localProgress; wordNode.style.setProperty('--p', `${localProgress.toFixed(1)}%`);
-                        }
+                        if (Math.abs((wordNode._lastProg || 0) - localProgress) > 1.0) { wordNode._lastProg = localProgress; wordNode.style.setProperty('--p', `${localProgress.toFixed(1)}%`); }
                     }
                     charAccumulator += wordLen;
                 });
             };
-
             processContainer(fullActiveLyricRef.current, '.lyric-word-sync', isWordSyncEnabled);
             processContainer(activeLyricRef.current, '.lyric-word-sync', isWordSyncEnabled);
             processContainer(miniActiveLyricRef.current, '.lyric-word-sync', isMiniWordSyncEnabled);
         }
         if (isPlaying && isExpanded) animationFrameId = requestAnimationFrame(updateProgress);
     };
-
     if (isPlaying && isExpanded) animationFrameId = requestAnimationFrame(updateProgress);
     else updateProgress(); 
-
     return () => { if (animationFrameId) cancelAnimationFrame(animationFrameId); };
   },[isWordSyncEnabled, isMiniWordSyncEnabled, isLyricsEnabled, isVideoMode, activeLyricIndex, displayLyrics, isPlaying, isExpanded]);
 
@@ -2287,10 +1982,8 @@ export default function MiniPlayer() {
   const handleLyricClick = (time: number) => {
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
     localActionTimeRef.current = Date.now();
-    
     if (isVideoMode && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: time }, '*');
     else if (audioRef.current && duration > 0) { audioRef.current.currentTime = time; setCurrentTime(time); syncPosition(); }
-    
     if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
         ablyChannelRef.current.publish('sync', { type: 'TIME', senderId: clientIdRef.current, time: time, isVideoMode: isVideoModeRef.current });
     }
@@ -2317,11 +2010,9 @@ export default function MiniPlayer() {
     isSeekingRef.current = false;
     localActionTimeRef.current = Date.now();
     const val = parseFloat(e.currentTarget.value); const newTime = (val / 100) * duration;
-    
     if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current) {
         ablyChannelRef.current.publish('sync', { type: 'TIME', senderId: clientIdRef.current, time: newTime, isVideoMode: isVideoModeRef.current });
     }
-
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: newTime }, '*');
       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_HIDE_UI' }, '*');
@@ -2337,7 +2028,6 @@ export default function MiniPlayer() {
     const diff = currentY - startY + (queueContainerRef.current.scrollTop - startScrollTop);
     const targetIndex = Math.max(0, Math.min(upcomingQueue.length - 1, activeIndex + Math.round(diff / 60)));
     dragRef.current.targetIndex = targetIndex;
-
     const items = queueContainerRef.current.querySelectorAll('.queue-item');
     items.forEach((item: any, i) => {
         if (i === activeIndex) {
@@ -2369,7 +2059,6 @@ export default function MiniPlayer() {
     e.preventDefault(); 
     const clientY = 'touches' in e ? (e as TouchEvent).touches[0].clientY : (e as MouseEvent).clientY;
     dragRef.current.currentY = clientY;
-
     if (queueContainerRef.current) {
         const rect = queueContainerRef.current.getBoundingClientRect();
         if (clientY < rect.top + 80) dragRef.current.scrollSpeed = -12; else if (clientY > rect.bottom - 80) dragRef.current.scrollSpeed = 12; else dragRef.current.scrollSpeed = 0;
@@ -2406,47 +2095,32 @@ export default function MiniPlayer() {
   },[dragActiveIndex, handleDragMove, handleDragEnd]);
 
   const handleTouchStart = (e: React.TouchEvent) => { touchStartX.current = e.touches[0].clientX; };
-  const handleTouchMove = (e: React.TouchEvent) => { 
-      const diff = e.touches[0].clientX - touchStartX.current; 
-      if (diff > 0 && !isExpanded && !showQueue) setSwipeX(diff); 
-  };
-  const handleTouchEnd = () => { 
-      if (swipeX > window.innerWidth * 0.4 && !isExpanded && !showQueue) { 
-          setCurrentSong(null); setIsPlaying(false); closeMainPlayer(); 
-      } 
-      setSwipeX(0); 
-  };
+  const handleTouchMove = (e: React.TouchEvent) => { const diff = e.touches[0].clientX - touchStartX.current; if (diff > 0 && !isExpanded && !showQueue) setSwipeX(diff); };
+  const handleTouchEnd = () => { if (swipeX > window.innerWidth * 0.4 && !isExpanded && !showQueue) { setCurrentSong(null); setIsPlaying(false); closeMainPlayer(); } setSwipeX(0); };
 
   const executeMp3PackerDownload = async (url: string, quality: string) => {
     setDlState({ type: "music", status: "downloading", progress: 0, packStep: "Fetching Audio..." });
     try {
       await loadLameJS();
       setDlState(prev => ({...prev, packStep: "Downloading Media...", progress: 10}));
-      
       const[audioResp, imgResp] = await Promise.all([ fetch(url, { referrerPolicy: "no-referrer" }), fetch(displayImage || "https://via.placeholder.com/500", { referrerPolicy: "no-referrer" }) ]);
       const audioFileBuffer = await audioResp.arrayBuffer();
       const coverBuffer = await imgResp.arrayBuffer();
-
       setDlState(prev => ({...prev, progress: 30, packStep: "Decoding Audio..."}));
       const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const audioBuffer = await audioCtx.decodeAudioData(audioFileBuffer);
-
       setDlState(prev => ({...prev, progress: 40, packStep: "Encoding to MP3..."}));
       await new Promise(r => setTimeout(r, 10)); 
-      
       const channels = 1; 
       const sampleRate = audioBuffer.sampleRate;
       const kbps = parseInt(quality.replace('kbps','')) || 128;
       const mp3encoder = new (window as any).lamejs.Mp3Encoder(channels, sampleRate, kbps);
-      
       let samples = audioBuffer.getChannelData(0); 
       const buffer = new Int16Array(samples.length);
       for (let i = 0, len = samples.length; i < len; i++) { let s = samples[i]; buffer[i] = s < 0 ? s * 32768 : s * 32767; }
-
       const mp3Data =[];
       const blockSize = 1152 * 500; 
       let lastYield = Date.now();
-      
       for (let i = 0; i < buffer.length; i += blockSize) {
           const chunk = buffer.subarray(i, i + blockSize);
           const mp3buf = mp3encoder.encodeBuffer(chunk);
@@ -2458,24 +2132,19 @@ export default function MiniPlayer() {
       }
       const endBuf = mp3encoder.flush();
       if (endBuf.length > 0) mp3Data.push(endBuf);
-
       const mp3Blob = new Blob(mp3Data, { type: 'audio/mp3' });
       setDlState(prev => ({...prev, progress: 95, packStep: "Injecting Metadata..."}));
       const mp3ArrayBuffer = await mp3Blob.arrayBuffer();
-
       const cleanTitle = decodeEntities(displayTitle);
       const cleanArtist = decodeEntities(displayArtists);
       const cleanAlbum = decodeEntities(songDetails?.album_title || displayTitle);
-
       const taggedBuffer = NativeID3.tag({ audio: mp3ArrayBuffer, image: coverBuffer, title: cleanTitle, artist: cleanArtist, album: cleanAlbum });
-
       setDlState(prev => ({...prev, progress: 100, packStep: "Complete!"}));
       const finalBlob = new Blob([taggedBuffer], { type: 'audio/mp3' });
       const dlUrl = URL.createObjectURL(finalBlob);
       const a = document.createElement('a'); a.href = dlUrl; a.download = `${cleanTitle} - ${cleanArtist}.mp3`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
       setDlState({ type: null, status: "idle" });
-
     } catch (e) {
       console.warn("Packer failed, using raw fallback", e);
       const a = document.createElement("a"); a.href = url; a.target = "_blank"; a.download = `${decodeEntities(displayTitle)} - ${decodeEntities(displayArtists)}.m4a`; 
@@ -2491,11 +2160,9 @@ export default function MiniPlayer() {
       const contentLength = res.headers.get('content-length');
       const total = parseInt(contentLength || '0', 10);
       let loaded = 0;
-      
       if (!res.body) throw new Error("No body stream");
       const reader = res.body.getReader();
       const chunks =[];
-      
       while(true) {
          const {done, value} = await reader.read();
          if (done) break;
@@ -2503,9 +2170,7 @@ export default function MiniPlayer() {
          loaded += value.length;
          if (total) setDlState(prev => ({...prev, progress: Math.round((loaded/total)*100)}));
       }
-
       if (isVideoMux) { setDlState(prev => ({...prev, status: "merging", packStep: "Merging..."})); await new Promise(r => setTimeout(r, 2800)); }
-
       const blob = new Blob(chunks);
       const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = decodeEntities(filename);
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
@@ -2519,46 +2184,30 @@ export default function MiniPlayer() {
 
   const downloadLrcFile = () => {
     if (!displayLyrics || displayLyrics.length === 0 || syncType !== "LINE_SYNCED") return false;
-
     const cleanTitle = decodeEntities(displayTitle);
     const cleanArtist = decodeEntities(displayArtists);
     const cleanAlbum = decodeEntities(songDetails?.album_title || displayTitle);
     const lenStr = formatTime(duration > 0 ? duration : (Number(songDetails?.duration) || 0));
-
     let lrcContent = `[ar:${cleanArtist}]\n[al:${cleanAlbum}]\n[ti:${cleanTitle}]\n[au:${cleanArtist}]\n[length:${lenStr}]\n`;
-
     displayLyrics.forEach((line: any) => {
         const t = Number(line.time) || 0;
         const [secPart, msPart] = t.toFixed(2).split('.');
         const mins = Math.floor(Number(secPart) / 60).toString().padStart(2, '0');
         const secs = (Number(secPart) % 60).toString().padStart(2, '0');
-        
         lrcContent += `[${mins}:${secs}.${msPart}]${line.words || ""}\n`;
     });
-
     const safeFileName = `${cleanTitle}`.replace(/[/\\:*?<>|]/g, "").trim();
     const finalName = `${safeFileName}.lrc`;
-
     const data: any[] = [];
     data.push(lrcContent);
     const properties = { type: 'plain/text' }; 
-    
     let fileObj;
-    try {
-        fileObj = new File(data, finalName, properties);
-    } catch (e) {
-        fileObj = new Blob(data, properties);
-    }
-
+    try { fileObj = new File(data, finalName, properties); } 
+    catch (e) { fileObj = new Blob(data, properties); }
     const url = (window.URL || window.webkitURL).createObjectURL(fileObj);
     const a = document.createElement('a');
-    
-    a.target = '_blank';
-    a.download = finalName;
-    a.href = url;
-
+    a.target = '_blank'; a.download = finalName; a.href = url;
     a.click();
-    
     setTimeout(() => (window.URL || window.webkitURL).revokeObjectURL(url), 3000);
     return true; 
   };
@@ -2571,33 +2220,23 @@ export default function MiniPlayer() {
           const cleanAlbum = encodeURIComponent(songDetails?.album_title || displayTitle);
           const cleanImg = encodeURIComponent(displayImage || "https://via.placeholder.com/500");
           const m3u8Safe = encodeURIComponent(optUrl);
-
-          const composerStr = (songDetails?.composers && songDetails.composers.length > 0) 
-              ? songDetails.composers.map((c: any) => c.name).join(", ") 
-              : "Ayush Kumar Yadav"; 
-          
+          const composerStr = (songDetails?.composers && songDetails.composers.length > 0) ? songDetails.composers.map((c: any) => c.name).join(", ") : "Ayush Kumar Yadav"; 
           const yearStr = songDetails?.release_date ? songDetails.release_date.split("-")[0] : "";
           const genreStr = songDetails?.tags?.[0]?.tag_name || "";
-
           const cleanComposer = encodeURIComponent(decodeEntities(composerStr));
           const cleanYear = encodeURIComponent(yearStr);
           const cleanGenre = encodeURIComponent(decodeEntities(genreStr));
-
           const downloadApiUrl = `https://ayushdownload.vercel.app/api/dl?url=${m3u8Safe}&format=mp3&title=${cleanTitle}&artist=${cleanArtist}&album=${cleanAlbum}&imageUrl=${cleanImg}&composer=${cleanComposer}&year=${cleanYear}&genre=${cleanGenre}`;
           const hasLrc = downloadLrcFile();
-
           const delayTime = hasLrc ? 3000 : 0;
-
           setTimeout(() => {
               const a = document.createElement("a");
               a.href = downloadApiUrl;
               document.body.appendChild(a); 
               a.click();
               document.body.removeChild(a);
-
               setTimeout(() => setDlState({ type: null, status: "idle" }), 1500);
           }, delayTime);
-
       } catch (e) {
           console.error("Download API failed", e);
           setDlState({ type: null, status: "idle" });
@@ -2608,23 +2247,12 @@ export default function MiniPlayer() {
       setShowSettingsMenu(false);
       let opts: any[] =[];
       const durSecs = duration > 0 ? duration : (Number(songDetails?.duration) || 0);
-
       if (streamBaseUrl) {['16', '64', '128', '320'].forEach(q => {
               let sizeStr = "";
-              if (durSecs > 0) {
-                  const bitrate = parseInt(q);
-                  const sizeMB = (durSecs * bitrate) / 8 / 1024;
-                  sizeStr = `${sizeMB.toFixed(1)}MB`;
-              }
+              if (durSecs > 0) { const bitrate = parseInt(q); const sizeMB = (durSecs * bitrate) / 8 / 1024; sizeStr = `${sizeMB.toFixed(1)}MB`; }
               let optUrl = streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${q}.mp4.master.m3u8`);
               optUrl = optUrl.replace(/\/(\d+)\/hdntl=/g, `/${q}/hdntl=`);
-              opts.push({ 
-                  url: optUrl, 
-                  quality: `${q}kbps`, 
-                  label: QUALITY_MAP[q] || `${q}kbps`, 
-                  num: parseInt(q),
-                  size: sizeStr
-              });
+              opts.push({ url: optUrl, quality: `${q}kbps`, label: QUALITY_MAP[q] || `${q}kbps`, num: parseInt(q), size: sizeStr });
           });
       } else if (audioUrl && !audioUrl.includes('.m3u8')) {
           opts.push({ url: audioUrl, quality: `128kbps`, label: `128kbps`, num: 128, size: "" });
@@ -2638,10 +2266,7 @@ export default function MiniPlayer() {
                      const numStr = (u.quality || "").replace(/\D/g, '');
                      const qNum = parseInt(numStr) || 128;
                      let sStr = "";
-                     if (durSecs > 0 && qNum > 0) {
-                         const sizeMB = (durSecs * qNum) / 8 / 1024;
-                         sStr = `${sizeMB.toFixed(1)}MB`;
-                }
+                     if (durSecs > 0 && qNum > 0) { const sizeMB = (durSecs * qNum) / 8 / 1024; sStr = `${sizeMB.toFixed(1)}MB`; }
                      return { url: u.url, quality: u.quality, label: u.quality, num: qNum, size: sStr };
                  });
              }
@@ -2650,10 +2275,7 @@ export default function MiniPlayer() {
       setDlState({ type: "music", status: "options", options: opts.sort((a, b) => b.num - a.num) });
   };
   
-  const handleDownloadVideoInit = () => { 
-      setShowSettingsMenu(false); 
-      setDlState({ type: "video", status: "servers" }); 
-  };
+  const handleDownloadVideoInit = () => { setShowSettingsMenu(false); setDlState({ type: "video", status: "servers" }); };
 
   const triggerVideoServer = async (serverNum: number) => {
     setDlState({ type: "video", status: "verifying", server: serverNum });
@@ -2694,11 +2316,8 @@ export default function MiniPlayer() {
         arr.forEach(artist => {
             if (!artist || !artist.name) return;
             const key = artist.seokey || artist.id || artist.name;
-            if (map.has(key)) {
-                if (!map.get(key).roles.includes(roleName)) map.get(key).roles.push(roleName);
-            } else {
-                map.set(key, { ...artist, roles:[roleName] });
-            }
+            if (map.has(key)) { if (!map.get(key).roles.includes(roleName)) map.get(key).roles.push(roleName); } 
+            else { map.set(key, { ...artist, roles:[roleName] }); }
         });
     };
     addRole(songDetails.singers, "Singer");
@@ -2719,7 +2338,6 @@ export default function MiniPlayer() {
             if (diff === 0) { transform = 'translateY(0px) scale(1)'; op = 1; }
             else if (diff > 0) { transform = 'translateY(35px) scale(0.9)'; op = 0; } 
             else return null; 
-            
             return (
                <div key={idx} ref={diff === 0 ? miniActiveLyricRef : null} className={`absolute left-0 w-full text-left pr-2 no-select-text font-extrabold drop-shadow-xl leading-snug transition-all duration-[1500ms] ease-[cubic-bezier(0.25,1,0.5,1)] ${getLineFontSize()}`} style={{ transform, opacity: op, color: 'white', zIndex: diff === 0 ? 10 : 1, transformOrigin: 'left center' }}>
                  {isMiniWordSyncEnabled ? (line.words || "♪").split(' ').map((word: string, wIdx: number, arr: any[]) => <span key={wIdx} className="lyric-word-sync inline-block">{word}{wIdx < arr.length - 1 ? '\u00A0' : ''}</span>) : (line.words || "♪")}
@@ -2737,11 +2355,9 @@ export default function MiniPlayer() {
       const isPast = idx < activeLyricIndex;
       const isFuture = idx > activeLyricIndex;
       const fzClass = getCardFontSizeClass(isLyricsFullScreen);
-      
       const activeClasses = `text-white ${fzClass} font-black drop-shadow-2xl leading-tight opacity-100`;
       const pastClasses = `text-white ${fzClass} font-bold hover:text-white/80 leading-tight opacity-50 -translate-y-2`;
       const futureClasses = `text-black/80 ${fzClass} font-black drop-shadow-md leading-tight opacity-70 translate-y-3`;
-
       return (
         <p key={idx} ref={isActive ? (isLyricsFullScreen ? fullActiveLyricRef : activeLyricRef) : null} onClick={() => { if (syncType === "LINE_SYNCED" && !isVideoMode) handleLyricClick(line.time); }} className={`cursor-pointer transition-all duration-[800ms] ease-out origin-left no-select-text transform ${isActive ? activeClasses : isPast ? pastClasses : futureClasses}`}>
            {isWordSyncEnabled ? (line.words || "♪").split(' ').map((word: string, wIdx: number, arr: any[]) => <span key={wIdx} className={isActive ? "lyric-word-sync inline-block" : "inline-block"}>{word}{wIdx < arr.length - 1 ? '\u00A0' : ''}</span>) : (line.words || "♪")}
@@ -2756,27 +2372,21 @@ export default function MiniPlayer() {
       return (
         <div key={(track.id||track.track_id||track.entity_id) + index} data-index={index} className={`queue-item flex items-center justify-between w-full group p-2 rounded-lg cursor-pointer relative bg-transparent hover:bg-white/5`}>
           {isQueueEditMode && (
-            <div className="flex-shrink-0 mr-3 pl-1" onClick={(e) => {
-               e.stopPropagation();
-               setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]);
-            }}>
+            <div className="flex-shrink-0 mr-3 pl-1" onClick={(e) => { e.stopPropagation(); setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) : [...prev, index]); }}>
                <div className={`w-[22px] h-[22px] rounded-full border-[2px] flex items-center justify-center transition-colors ${isSelected ? 'bg-[#1db954] border-[#1db954]' : 'border-white/40'}`}>
                   {isSelected && <Check size={14} className="text-black stroke-[3px]" />}
                </div>
             </div>
           )}
-
           <div className="flex items-center gap-3 overflow-hidden flex-1 min-w-0" onClick={() => { 
              if(isQueueEditMode) { setSelectedQueueItems(prev => prev.includes(index) ? prev.filter(i => i !== index) :[...prev, index]); return; }
              if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
-             
              localActionTimeRef.current = Date.now();
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
           }}>
             <div className="w-[44px] h-[44px] flex-shrink-0 rounded-[4px] bg-[#282828] overflow-hidden"><img draggable={false} src={getImageUrl(track) || "https://via.placeholder.com/150"} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" /></div>
             <div className="flex flex-col min-w-0 pr-2 overflow-hidden"><span className="text-[15px] font-bold text-white truncate">{decodeEntities(track.track_title || track.title || track.name)}</span><span className="text-[13px] font-medium text-white/60 truncate">{decodeEntities(getArtistsText(track))}</span></div>
           </div>
-
           {!isQueueEditMode && (
              <div className={`flex-shrink-0 px-3 py-2 text-white/50 touch-none ${isGuestLocked ? 'opacity-20 cursor-not-allowed' : 'cursor-grab active:cursor-grabbing'}`} onPointerDown={(e) => { e.stopPropagation(); handleDragStart(e, index); }}><Menu size={20} /></div>
           )}
@@ -2809,28 +2419,9 @@ export default function MiniPlayer() {
         .no-select-text { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
         .queue-item { transform-origin: center; will-change: transform; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); }
         .lyric-word-sync { background: linear-gradient(to right, #ffffff calc(var(--p, 0%) - 15%), rgba(255,255,255,0.2) var(--p, 0%)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; color: transparent; will-change: background; transform: translateZ(0); }
-        
         @keyframes spin-buffer { 100% { transform: rotate(360deg); } }
-        
-        .spotify-spinner {
-            position: absolute;
-            inset: -4px;
-            border-radius: 50%;
-            background: conic-gradient(from 0deg, transparent 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,1) 100%);
-            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
-            mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px));
-            animation: spin-buffer 1s linear infinite;
-        }
-        
-        .spotify-spinner-mini {
-            position: absolute;
-            inset: -6px;
-            border-radius: 50%;
-            background: conic-gradient(from 0deg, transparent 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,1) 100%);
-            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px));
-            mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px));
-            animation: spin-buffer 1s linear infinite;
-        }
+        .spotify-spinner { position: absolute; inset: -4px; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,1) 100%); -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #fff calc(100% - 2.5px)); animation: spin-buffer 1s linear infinite; }
+        .spotify-spinner-mini { position: absolute; inset: -6px; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,1) 100%); -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px)); mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #fff calc(100% - 1.5px)); animation: spin-buffer 1s linear infinite; }
       `}} />
 
       <audio 
@@ -3076,7 +2667,6 @@ export default function MiniPlayer() {
           </div>
         </div>
 
-        {/* --- LIVE CHAT OVERLAY --- */}
         {showChat && (
             <div className="absolute bottom-[80px] right-5 z-[100] w-[320px] max-w-[calc(100vw-40px)] flex flex-col overflow-hidden transition-all duration-300 origin-bottom-right scale-100 opacity-100 h-[400px] max-h-[50vh] bg-[#000000]/80 backdrop-blur-3xl border border-white/10 rounded-3xl shadow-[0_20px_40px_rgba(0,0,0,0.7)] pointer-events-auto">
                 <div className="p-3 border-b border-white/10 flex justify-between items-center bg-white/5 shadow-sm">
@@ -3124,7 +2714,6 @@ export default function MiniPlayer() {
             </div>
         )}
 
-        {/* --- JAM ERROR MODAL --- */}
         {jamError && (
             <div className="absolute inset-0 z-[100020] bg-black/80 flex items-center justify-center p-6 backdrop-blur-md pointer-events-auto" onClick={() => setJamError(null)}>
                 <div className="w-full max-w-sm bg-[#121212] border border-white/10 rounded-3xl p-8 flex flex-col items-center text-center shadow-2xl animate-in zoom-in duration-300" onClick={e => e.stopPropagation()}>
@@ -3138,7 +2727,6 @@ export default function MiniPlayer() {
             </div>
         )}
 
-        {/* --- JIM JAM MODAL MENU --- */}
         {showJamMenu && (
           <div className="absolute inset-0 z-[100010] bg-black/60 flex items-center justify-center p-6 backdrop-blur-md pointer-events-auto" onClick={() => setShowJamMenu(false)}>
              <div className="w-full max-w-sm bg-[#0a0a0a]/95 backdrop-blur-3xl border border-white/10 rounded-[32px] p-8 shadow-[0_30px_60px_rgba(0,0,0,0.8)] flex flex-col gap-5 animate-in fade-in zoom-in-95 duration-300 origin-center" onClick={e => e.stopPropagation()}>
@@ -3527,4 +3115,4 @@ export default function MiniPlayer() {
       </div>
     </>
   );
-}
+                              }
