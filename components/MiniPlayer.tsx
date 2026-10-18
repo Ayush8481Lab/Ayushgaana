@@ -101,36 +101,68 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
   } catch(e) {}
 };
 
+const deleteCache = async (key: string): Promise<void> => {
+  try {
+    const db = await initDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      tx.objectStore(STORE_NAME).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch(e) {}
+};
+
 // --- HDNTL CACHE ENGINE (HLS CDN Token Reuse) ---
-// The gaana HLS URLs embed a CDN-wide signed token `hdntl=exp=...~acl=%2f*~data=hdntl~hmac=...`.
-// Reusing this token for other tracks on the same CDN avoids hitting the stream API per song.
+// Reads the token directly from IndexedDB ignoring the 30-min generic CACHE_EXPIRY_MS.
+// Honors ONLY the token's own `exp` claim.
 const HDNTL_CACHE_KEY = 'gaana_hdntl_token';
 const HDNTL_MIN_REMAINING_MS = 60 * 60 * 1000; // Stop using when < 1 hour remains before exp
+
+const getHdntlCache = (): Promise<any> => new Promise(async (resolve) => {
+  try {
+    const db = await initDB();
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).get(HDNTL_CACHE_KEY);
+    req.onsuccess = () => {
+      const res = req.result;
+      if (res && res.data) resolve(res.data);
+      else resolve(null);
+    };
+    req.onerror = () => resolve(null);
+  } catch(e) { resolve(null); }
+});
 
 const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
   try {
     const hdntlMatch = hlsUrl.match(/(\/hdntl=[^\/]+)\//);
-    if (!hdntlMatch) return null;
+    if (!hdntlMatch) { console.log('[HDNTL] No token found in URL'); return null; }
     const hdntlParam = hdntlMatch[1].substring(1); // strip leading slash
 
     const expMatch = hdntlParam.match(/exp=(\d+)/);
-    if (!expMatch) return null;
+    if (!expMatch) { console.log('[HDNTL] No exp field'); return null; }
     const exp = parseInt(expMatch[1], 10);
     if (!exp || isNaN(exp)) return null;
 
     const urlObj = new URL(hlsUrl);
     const hostPrefixMatch = urlObj.pathname.match(/^(\/hls\/[^\/]+)\//);
-    if (!hostPrefixMatch) return null;
+    if (!hostPrefixMatch) { console.log('[HDNTL] Could not derive hostPrefix'); return null; }
     const hostPrefix = `${urlObj.protocol}//${urlObj.host}${hostPrefixMatch[1]}`;
 
     const cacheEntry = { hdntl: hdntlParam, hostPrefix, exp, cachedAt: Date.now() };
+    const remainingHrs = ((exp * 1000) - Date.now()) / (60 * 60 * 1000);
+    console.log(`[HDNTL] Token extracted. Valid for ${remainingHrs.toFixed(2)}h. hostPrefix=${hostPrefix}`);
 
     // Only cache when more than 1 hour remains before expiration
     if ((exp * 1000) - Date.now() > HDNTL_MIN_REMAINING_MS) {
       await setCache(HDNTL_CACHE_KEY, cacheEntry);
+      console.log('[HDNTL] Token cached');
+    } else {
+      console.log('[HDNTL] Token too close to expiry, not cached');
     }
     return cacheEntry;
   } catch (e) {
+    console.warn('[HDNTL] extractAndCacheHdntl failed:', e);
     return null;
   }
 };
@@ -138,19 +170,49 @@ const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
 const getCachedHdntlUrl = async (albumId: string, trackId: string, quality: string): Promise<string | null> => {
   try {
     if (!albumId || !trackId) return null;
-    const cached = await getCache(HDNTL_CACHE_KEY);
+    const cached = await getHdntlCache(); // custom getter bypasses CACHE_EXPIRY_MS
     if (!cached?.hdntl || !cached?.hostPrefix || !cached?.exp) return null;
-    if ((cached.exp * 1000) - Date.now() < HDNTL_MIN_REMAINING_MS) return null;
+    const remainingMs = (cached.exp * 1000) - Date.now();
+    if (remainingMs < HDNTL_MIN_REMAINING_MS) {
+      console.log(`[HDNTL] Token expires in ${(remainingMs/60000).toFixed(1)}m < 60m, ignoring`);
+      return null;
+    }
     return `${cached.hostPrefix}/${albumId}/${trackId}/${quality}/${cached.hdntl}/index.m3u8`;
   } catch (e) {
     return null;
   }
 };
 
+const extractAlbumIdFromHlsUrl = (hlsUrl: string | undefined | null): string | null => {
+  if (!hlsUrl) return null;
+  try {
+    // Format: .../hls/23/{albumId}/{trackId}/{quality}/hdntl=.../index.m3u8
+    const m = hlsUrl.match(/\/hls\/[^\/]+\/([^\/]+)\/[^\/]+\/[^\/]+\//);
+    return m ? m[1] : null;
+  } catch(e) { return null; }
+};
+
 const getAlbumIdFromSong = (song: any): string | null => {
   if (!song) return null;
-  const id = song.album_id || song.albumid || song.album?.id || song.album?.album_id;
-  return id !== undefined && id !== null && id !== '' ? String(id) : null;
+  const candidates = [
+    song.album_id, song.albumid, song.albumId,
+    song.album?.id, song.album?.album_id,
+    song.meta?.album_id,
+  ];
+  for (const c of candidates) {
+    if (c !== undefined && c !== null && c !== '' && (typeof c === 'string' || typeof c === 'number')) {
+      return String(c);
+    }
+  }
+  // Check entity_info (some gaana responses carry it there)
+  if (Array.isArray(song.entity_info)) {
+    const albumInfo = song.entity_info.find((e: any) => e && (e.key === 'album' || e.key === 'albums'));
+    if (albumInfo && Array.isArray(albumInfo.value) && albumInfo.value[0]) {
+      const a = albumInfo.value[0];
+      if (a.id !== undefined && a.id !== null && a.id !== '') return String(a.id);
+    }
+  }
+  return null;
 };
 
 // --- FLAWLESS LYRICS TRANSLITERATION ENGINE ---
@@ -691,7 +753,6 @@ export default function MiniPlayer() {
   const isLyricsEnabledRef = useRef(true);
 
   // --- HDNTL FALLBACK TRACKING ---
-  // Tracks for which we already attempted an API fallback (construct URL failed). Prevents infinite loops.
   const hlsApiRetryAttemptedRef = useRef<Set<string>>(new Set());
 
   const songDetailsRef = useRef(songDetails);
@@ -1247,7 +1308,9 @@ export default function MiniPlayer() {
                           if (hlsApiRetryAttemptedRef.current.has(tid)) return;
                           hlsApiRetryAttemptedRef.current.add(tid);
                           try {
-                              console.warn('[HLS] Fatal error, falling back to stream API for track:', tid);
+                              console.warn('[HLS] Fatal error on track', tid, 'type:', data.type, 'details:', data.details, '— falling back to stream API');
+                              // Remove bad cached stream URL so retry uses fresh API response
+                              await deleteCache(`gaana_stream_${tid}`);
                               const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
                               if (streamRes.ok && isCurrent) {
                                   const streamJson = await streamRes.json();
@@ -1464,6 +1527,63 @@ export default function MiniPlayer() {
     }
   },[streamBaseUrl, selectedQuality]);
 
+  // --- PRELOAD NEXT TRACK (info + stream URL) so the next song starts instantly with zero API calls ---
+  useEffect(() => {
+      if (!upcomingQueue || upcomingQueue.length === 0) return;
+      const nextTrack = upcomingQueue[0];
+      if (!nextTrack) return;
+      const nextTrackId = nextTrack.track_id || nextTrack.id;
+      if (!nextTrackId) return;
+      const nextTrackIdStr = String(nextTrackId);
+      
+      let cancelled = false;
+      (async () => {
+          // If stream URL already cached, nothing to do
+          const streamCached = await getCache(`gaana_stream_${nextTrackIdStr}`);
+          if ((streamCached?.data?.hlsUrl || streamCached?.data?.url) || cancelled) return;
+          
+          // Resolve albumId from track object first
+          let albumId = getAlbumIdFromSong(nextTrack);
+          
+          // Fallback: cached info
+          if (!albumId) {
+              const infoCached = await getCache(`gaana_info_${nextTrackIdStr}`);
+              if (cancelled) return;
+              if (infoCached?.data) {
+                  albumId = infoCached.data.album_id || infoCached.data.albumid || null;
+              }
+          }
+          
+          // Fallback: prefetch info API (needed anyway for song details; no extra net calls long-run)
+          if (!albumId && !cancelled) {
+              try {
+                  const res = await fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/superserch/track/info?track_id=${nextTrackIdStr}`, { referrerPolicy: "no-referrer" });
+                  if (res.ok && !cancelled) {
+                      const data = await res.json();
+                      if (data?.data) {
+                          await setCache(`gaana_info_${nextTrackIdStr}`, data);
+                          albumId = data.data.album_id || data.data.albumid || null;
+                          console.log('[Prefetch] Cached info for next track:', nextTrackIdStr, 'albumId:', albumId);
+                      }
+                  }
+              } catch(e) {}
+          }
+          
+          if (!albumId || cancelled) return;
+          
+          const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
+          const constructedUrl = await getCachedHdntlUrl(String(albumId), nextTrackIdStr, targetQ);
+          if (constructedUrl && !cancelled) {
+              await setCache(`gaana_stream_${nextTrackIdStr}`, { data: { hlsUrl: constructedUrl } });
+              console.log('[Prefetch] Cached constructed stream URL for next track:', nextTrackIdStr);
+          } else if (!cancelled) {
+              console.log('[Prefetch] Could not construct stream URL for next track:', nextTrackIdStr);
+          }
+      })();
+      
+      return () => { cancelled = true; };
+  }, [upcomingQueue, selectedQuality]);
+
   useEffect(() => {
     if (!currentSong) return;
     songStartTrackingRef.current = Date.now();
@@ -1521,51 +1641,96 @@ export default function MiniPlayer() {
     let sDetails: any = null;
     let skipSpotifyLyrics = false;
 
-    // --- STREAM TASK (HDNTL-aware) ---
+    // --- STREAM TASK (HDNTL-aware, 3-tier resolution) ---
     const fetchStreamTask = async () => {
         setIsStreamLoading(true);
         try {
             const trackIdStr = String(trackId);
             const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
 
-            // 1. Track-specific cache (fast path, existing behavior)
+            // TIER 1 — per-track stream cache (fastest)
             let streamJson = await getCache(`gaana_stream_${trackId}`);
-
-            // 2. If no track cache, try constructing URL from cached hdntl token (API-saving path)
-            if (!streamJson || !streamJson.data) {
-                const albumId = getAlbumIdFromSong(currentSong) || sDetails?.album_id || sDetails?.albumid;
-                if (albumId) {
-                    const constructedUrl = await getCachedHdntlUrl(String(albumId), trackIdStr, targetQ);
-                    if (constructedUrl) {
-                        if (!isCurrent || signal.aborted) return;
-                        console.log('[Stream] Using cached hdntl token for track', trackIdStr);
-                        setStreamBaseUrl(constructedUrl);
-                        setIsStreamLoading(false);
-                        return;
-                    }
-                }
+            if (streamJson?.data?.hlsUrl) {
+                console.log('[Stream] TIER 1: per-track stream cache hit for', trackIdStr);
+                if (!isCurrent || signal.aborted) return;
+                // Refresh HDNTL cache in case it changed (harmless if same)
+                await extractAndCacheHdntl(streamJson.data.hlsUrl);
+                if (!isCurrent || signal.aborted) return;
+                setStreamBaseUrl(streamJson.data.hlsUrl);
+                setIsStreamLoading(false);
+                return;
+            }
+            if (streamJson?.data?.url) {
+                console.log('[Stream] TIER 1: per-track direct-url cache hit for', trackIdStr);
+                if (!isCurrent || signal.aborted) return;
+                setAudioUrl(streamJson.data.url);
+                setIsStreamLoading(false);
+                return;
+            }
+            if (streamJson?.notFound) {
+                console.log('[Stream] TIER 1: known not-found, stopping');
+                setIsStreamLoading(false);
+                return;
             }
 
-            // 3. Fallback to API (if no cache and no valid hdntl)
-            if (!streamJson || !streamJson.data) {
-                const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
-                if (streamRes.ok) {
-                    streamJson = await streamRes.json();
-                    if (streamJson?.data) await setCache(`gaana_stream_${trackId}`, streamJson);
-                    else await setCache(`gaana_stream_${trackId}`, { notFound: true });
+            // TIER 2 — construct from cached HDNTL token
+            let albumId = getAlbumIdFromSong(currentSong);
+            let albumIdSource = 'currentSong';
+            if (!albumId) {
+                const infoCached = await getCache(`gaana_info_${trackId}`);
+                if (infoCached?.data) {
+                    albumId = infoCached.data.album_id || infoCached.data.albumid || null;
+                    if (albumId) albumIdSource = 'infoCache';
+                }
+            }
+            if (!albumId && sDetails) {
+                albumId = sDetails.album_id || sDetails.albumid || null;
+                if (albumId) albumIdSource = 'sDetails';
+            }
+            if (!albumId && streamJson?.data?.hlsUrl) {
+                albumId = extractAlbumIdFromHlsUrl(streamJson.data.hlsUrl);
+                if (albumId) albumIdSource = 'previousUrl';
+            }
+
+            console.log('[Stream] albumId resolved:', albumId, 'via', albumIdSource, 'for track', trackIdStr);
+
+            if (albumId) {
+                const constructedUrl = await getCachedHdntlUrl(String(albumId), trackIdStr, targetQ);
+                if (constructedUrl) {
+                    console.log('[Stream] TIER 2: constructed URL from HDNTL token');
+                    if (!isCurrent || signal.aborted) return;
+                    // Cache constructed stream URL so replay is instant and doesn't even need HDNTL lookup
+                    await setCache(`gaana_stream_${trackId}`, { data: { hlsUrl: constructedUrl } });
+                    if (!isCurrent || signal.aborted) return;
+                    setStreamBaseUrl(constructedUrl);
+                    setIsStreamLoading(false);
+                    return;
+                } else {
+                    console.log('[Stream] TIER 2 failed: HDNTL cache empty/expired for track', trackIdStr);
+                }
+            } else {
+                console.log('[Stream] TIER 2 failed: no albumId available for track', trackIdStr);
+            }
+
+            // TIER 3 — API fallback
+            console.log('[Stream] TIER 3: calling stream API for track', trackIdStr);
+            const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
+            if (streamRes.ok) {
+                streamJson = await streamRes.json();
+                if (streamJson?.data) {
+                    await setCache(`gaana_stream_${trackId}`, streamJson);
+                    if (streamJson.data.hlsUrl) {
+                        await extractAndCacheHdntl(streamJson.data.hlsUrl);
+                        console.log('[Stream] TIER 3 success: stream API + HDNTL cached for future tracks');
+                    }
+                } else {
+                    await setCache(`gaana_stream_${trackId}`, { notFound: true });
                 }
             }
 
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
-
-            if (streamJson?.data?.hlsUrl) {
-                // Cache the hdntl token for future tracks
-                await extractAndCacheHdntl(streamJson.data.hlsUrl);
-                if (!isCurrent || signal.aborted) return;
-                setStreamBaseUrl(streamJson.data.hlsUrl);
-            } else if (streamJson?.data?.url) {
-                setAudioUrl(streamJson.data.url);
-            }
+            if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
+            else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
         } catch (e: any) { } finally {
             setIsStreamLoading(false);
         }
@@ -3362,4 +3527,4 @@ export default function MiniPlayer() {
       </div>
     </>
   );
-                              }
+}
