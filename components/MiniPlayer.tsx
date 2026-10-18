@@ -1,5 +1,3 @@
-
-
 /* eslint-disable @next/next/no-img-element */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable react-hooks/exhaustive-deps */
@@ -19,9 +17,87 @@ import {
 const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 const bypassHeaders = { "x-vercel-protection-bypass": AUTOMATION_SECRET };
 
+// --- GAANA HDNTL TOKEN ENGINE ---
+const GAANA_CDN_HOST = "https://vodhlsgaana-ebw.akamaized.net";
+const HDNTL_GLOBAL_KEY = "gaana_hdntl_global";
+const TRACK_META_PREFIX = "gaana_track_meta_";
+const HDNTL_SAFETY_MS = 60 * 60 * 1000;
+
 const fetchProtected = async (url: string, options: any = {}) => {
   return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
 };
+
+// --- HDNTL TOKEN HELPERS ---
+type HdntlGlobal = { token: string; shard: string; host: string; expiresAt: number; fetchedAt: number };
+type TrackMeta = { basePath: string; shard: string; albumId: string };
+
+const parseHdntlExpiry = (token: string): number => {
+  const m = token.match(/exp=(\d+)/);
+  return m ? parseInt(m[1], 10) * 1000 : 0;
+};
+
+const getValidGlobalHdntl = (): HdntlGlobal | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(HDNTL_GLOBAL_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw) as HdntlGlobal;
+    if (d.token && d.expiresAt && Date.now() + HDNTL_SAFETY_MS < d.expiresAt) return d;
+    return null;
+  } catch { return null; }
+};
+
+const saveGlobalHdntl = (token: string, shard: string, host: string, force = false) => {
+  if (typeof window === "undefined") return;
+  const exp = parseHdntlExpiry(token);
+  if (!exp) return;
+  if (!force) {
+    const existing = getValidGlobalHdntl();
+    if (existing && existing.expiresAt > exp) return;
+  }
+  try {
+    localStorage.setItem(HDNTL_GLOBAL_KEY, JSON.stringify({
+      token, shard, host, expiresAt: exp, fetchedAt: Date.now()
+    } as HdntlGlobal));
+  } catch {}
+};
+
+const getTrackMeta = (trackId: string): TrackMeta | null => {
+  if (typeof window === "undefined" || !trackId) return null;
+  try {
+    const raw = localStorage.getItem(TRACK_META_PREFIX + trackId);
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+};
+
+const saveTrackMeta = (trackId: string, meta: TrackMeta) => {
+  if (typeof window === "undefined" || !trackId) return;
+  try {
+    localStorage.setItem(TRACK_META_PREFIX + trackId, JSON.stringify(meta));
+  } catch {}
+};
+
+const parseStreamUrl = (url: string): { host: string; shard: string; albumId: string; trackId: string; token: string; basePath: string } | null => {
+  try {
+    const parts = url.split("/");
+    const hdntlIdx = parts.findIndex(p => p.startsWith("hdntl="));
+    if (hdntlIdx < 4) return null;
+    const shard = parts[hdntlIdx - 4];
+    const albumId = parts[hdntlIdx - 3];
+    const trackId = parts[hdntlIdx - 2];
+    const token = parts[hdntlIdx];
+    if (!shard || !albumId || !trackId || !token) return null;
+    const host = `${parts[0]}//${parts[2]}`;
+    const basePath = parts.slice(0, hdntlIdx - 1).join("/");
+    return { host, shard, albumId, trackId, token, basePath };
+  } catch { return null; }
+};
+
+const buildHdntlUrl = (basePath: string, quality: string, token: string): string =>
+  `${basePath}/${quality}/${token}/index.m3u8`;
+
+const qualityFromSelection = (q: string): string =>
+  q === "16" ? "16" : q === "64" ? "64" : q === "320" ? "320" : "128";
 
 // Advanced Parser for r.jina.ai
 const fetchJina = async (targetUrl: string, options: any = {}) => {
@@ -493,9 +569,10 @@ export default function MiniPlayer() {
   } = useAppContext();
   
   const[audioUrl, setAudioUrl] = useState("");
-const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
-const[hdntlBasePath, setHdntlBasePath] = useState<string | null>(null);
-const[hdntlToken, setHdntlToken] = useState<string | null>(null);
+  const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
+  const[hdntlBasePath, setHdntlBasePath] = useState<string | null>(null);
+  const[hdntlToken, setHdntlToken] = useState<string | null>(null);
+  
   // Buffering States
   const[isStreamLoading, setIsStreamLoading] = useState(false);
   const[isAudioBuffering, setIsAudioBuffering] = useState(false);
@@ -599,7 +676,8 @@ const[hdntlToken, setHdntlToken] = useState<string | null>(null);
   const hasCachedCurrentSongRef = useRef(false);
   
   const rapidKeyIdxRef = useRef(0);
-const lastAppliedQualityRef = useRef<string | null>(null);
+  const lastAppliedQualityRef = useRef<string | null>(null);
+  const lastHdntlErrorRef = useRef<string | null>(null);
   const[spotifyId, setSpotifyId] = useState<string | null>(null);
   const[spotifyUrl, setSpotifyUrl] = useState<string | null>(null);
   const[lyrics, setLyrics] = useState<any[]>([]);
@@ -657,6 +735,8 @@ const lastAppliedQualityRef = useRef<string | null>(null);
   const songDetailsRef = useRef(songDetails);
   const audioUrlRef = useRef(audioUrl);
   const streamBaseUrlRef = useRef(streamBaseUrl);
+  const hdntlBasePathRef = useRef<string | null>(null);
+  const hdntlTokenRef = useRef<string | null>(null);
   const lyricsRef = useRef(lyrics);
   const syncTypeRef = useRef(syncType);
   const canvasDataRef = useRef(canvasData);
@@ -665,6 +745,8 @@ const lastAppliedQualityRef = useRef<string | null>(null);
   useEffect(() => { songDetailsRef.current = songDetails; }, [songDetails]);
   useEffect(() => { audioUrlRef.current = audioUrl; }, [audioUrl]);
   useEffect(() => { streamBaseUrlRef.current = streamBaseUrl; }, [streamBaseUrl]);
+  useEffect(() => { hdntlBasePathRef.current = hdntlBasePath; }, [hdntlBasePath]);
+  useEffect(() => { hdntlTokenRef.current = hdntlToken; }, [hdntlToken]);
   useEffect(() => { lyricsRef.current = lyrics; }, [lyrics]);
   useEffect(() => { syncTypeRef.current = syncType; }, [syncType]);
   useEffect(() => { canvasDataRef.current = canvasData; }, [canvasData]);
@@ -712,6 +794,8 @@ const lastAppliedQualityRef = useRef<string | null>(null);
               songDetails: songDetailsRef.current,
               audioUrl: audioUrlRef.current,
               streamBaseUrl: streamBaseUrlRef.current,
+              hdntlBasePath: hdntlBasePathRef.current,
+              hdntlToken: hdntlTokenRef.current,
               lyrics: lyricsRef.current,
               syncType: syncTypeRef.current,
               canvasData: canvasDataRef.current,
@@ -771,6 +855,8 @@ const lastAppliedQualityRef = useRef<string | null>(null);
                   carryPayload: shouldCarry ? {
                       audioUrl: audioUrlRef.current,
                       streamBaseUrl: streamBaseUrlRef.current,
+                      hdntlBasePath: hdntlBasePathRef.current,
+                      hdntlToken: hdntlTokenRef.current,
                       lyrics: lyricsRef.current,
                       syncType: syncTypeRef.current,
                       canvasData: canvasDataRef.current,
@@ -949,9 +1035,10 @@ const lastAppliedQualityRef = useRef<string | null>(null);
                   setSongDetails(p.songDetails);
                   setAudioUrl(p.audioUrl);
                   setStreamBaseUrl(p.streamBaseUrl);
-                  setHdntlBasePath(null);
-                  setHdntlToken(null);
+                  setHdntlBasePath(p.hdntlBasePath || null);
+                  setHdntlToken(p.hdntlToken || null);
                   lastAppliedQualityRef.current = null;
+                  lastHdntlErrorRef.current = null;
                   setLyrics(p.lyrics);
                   setSyncType(p.syncType);
                   setCanvasData(p.canvasData);
@@ -995,6 +1082,8 @@ const lastAppliedQualityRef = useRef<string | null>(null);
                           const cp = data.carryPayload;
                           if (cp.audioUrl && cp.audioUrl !== audioUrlRef.current) setAudioUrl(cp.audioUrl);
                           if (cp.streamBaseUrl && cp.streamBaseUrl !== streamBaseUrlRef.current) setStreamBaseUrl(cp.streamBaseUrl);
+                          if (cp.hdntlBasePath && cp.hdntlBasePath !== hdntlBasePathRef.current) setHdntlBasePath(cp.hdntlBasePath);
+                          if (cp.hdntlToken && cp.hdntlToken !== hdntlTokenRef.current) setHdntlToken(cp.hdntlToken);
                           if (cp.lyrics && cp.lyrics.length !== lyricsRef.current.length) setLyrics(cp.lyrics);
                           if (cp.syncType && cp.syncType !== syncTypeRef.current) setSyncType(cp.syncType);
                           if (cp.canvasData && cp.canvasData.canvasUrl !== canvasDataRef.current?.canvasUrl) setCanvasData(cp.canvasData);
@@ -1422,23 +1511,27 @@ const lastAppliedQualityRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!streamBaseUrl && !hdntlBasePath) return;
-    const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
-
+    const targetQ = qualityFromSelection(selectedQuality);
     const lastQ = lastAppliedQualityRef.current;
     const isQualityChange = lastQ !== null && lastQ !== targetQ;
     lastAppliedQualityRef.current = targetQ;
 
-    // On a REAL quality change (or if no hlsUrl at all), prefer the long-lived hdntl URL format:
-    // {base}/{quality}/{hdntl=...}/index.m3u8
-    if ((isQualityChange || !streamBaseUrl) && hdntlBasePath && hdntlToken) {
-        setAudioUrl(`${hdntlBasePath}/${targetQ}/${hdntlToken}/index.m3u8`);
-    } else if (streamBaseUrl) {
-        // First play / fallback: original hlsUrl behavior
+    // Quality switch: prefer long-lived hdntl URL
+    if (isQualityChange && hdntlBasePath && hdntlToken) {
+        setAudioUrl(buildHdntlUrl(hdntlBasePath, targetQ, hdntlToken));
+        return;
+    }
+    // Initial play or quality change where hdntl unavailable: use hlsUrl
+    if (streamBaseUrl) {
         setAudioUrl(streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`));
-    } else if (hdntlBasePath && hdntlToken) {
-        setAudioUrl(`${hdntlBasePath}/${targetQ}/${hdntlToken}/index.m3u8`);
+        return;
+    }
+    // No hlsUrl (stream API was skipped): use hdntl for initial play
+    if (hdntlBasePath && hdntlToken) {
+        setAudioUrl(buildHdntlUrl(hdntlBasePath, targetQ, hdntlToken));
     }
 }, [streamBaseUrl, hdntlBasePath, hdntlToken, selectedQuality]);
+
   useEffect(() => {
     if (!currentSong) return;
     songStartTrackingRef.current = Date.now();
@@ -1492,12 +1585,13 @@ const lastAppliedQualityRef = useRef<string | null>(null);
     setYtVideoId(currentSong.ytVideoId || null);
     setSpotifyId(null); setSpotifyUrl(null); setLyrics([]); setSyncType(null); setCanvasData(null);
     setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
-        setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
+    setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
     iframeInitialTimeRef.current = 0;
     setStreamBaseUrl(null);
     setHdntlBasePath(null);
     setHdntlToken(null);
     lastAppliedQualityRef.current = null;
+    lastHdntlErrorRef.current = null;
     setBuffered(0);
 
     let sDetails: any = null;
@@ -1506,6 +1600,32 @@ const lastAppliedQualityRef = useRef<string | null>(null);
     const fetchStreamTask = async () => {
         setIsStreamLoading(true);
         try {
+            // ---- FAST PATH: skip stream API entirely ----
+            const globalHdntl = getValidGlobalHdntl();
+            if (globalHdntl) {
+                const cachedMeta = getTrackMeta(trackId);
+                const songAlbumId = (currentSong as any)?.album_id || (songDetailsRef.current as any)?.album_id;
+                let basePath = cachedMeta?.basePath;
+                if (!basePath) {
+                    const shard = cachedMeta?.shard || globalHdntl.shard;
+                    const albumId = cachedMeta?.albumId || songAlbumId;
+                    if (shard && albumId) {
+                        basePath = `${globalHdntl.host}/hls/${shard}/${albumId}/${trackId}`;
+                    }
+                }
+                if (basePath) {
+                    const q = qualityFromSelection(selectedQuality);
+                    if (!isCurrent || signal.aborted) return;
+                    setHdntlBasePath(basePath);
+                    setHdntlToken(globalHdntl.token);
+                    lastAppliedQualityRef.current = q;
+                    setAudioUrl(buildHdntlUrl(basePath, q, globalHdntl.token));
+                    setIsStreamLoading(false);
+                    return; // ← stream API call avoided
+                }
+            }
+
+            // ---- SLOW PATH: call stream API once ----
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (!streamJson) {
                 const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
@@ -1515,26 +1635,20 @@ const lastAppliedQualityRef = useRef<string | null>(null);
                     else await setCache(`gaana_stream_${trackId}`, { notFound: true });
                 }
             }
-                        if (!isCurrent || signal.aborted || streamJson?.notFound) return;
+            if (!isCurrent || signal.aborted || streamJson?.notFound) return;
+
+            // Parse & cache the long-lived hdntl token + this track's base path
+            if (streamJson?.data?.url) {
+                const parsed = parseStreamUrl(streamJson.data.url);
+                if (parsed) {
+                    saveGlobalHdntl(parsed.token, parsed.shard, parsed.host);
+                    saveTrackMeta(trackId, { basePath: parsed.basePath, shard: parsed.shard, albumId: parsed.albumId });
+                    setHdntlBasePath(parsed.basePath);
+                    setHdntlToken(parsed.token);
+                }
+            }
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
-
-            // Extract the long-lived hdntl token from the direct segment URL:
-            // https://vodhlsgaana-ebw.akamaized.net/hls/{shard}/{albumId}/{trackId}/{quality}/hdntl=.../segment-N.ts
-            if (streamJson?.data?.url) {
-                try {
-                    const urlParts: string[] = streamJson.data.url.split('/');
-                    const hdntlIdx = urlParts.findIndex((p: string) => p.startsWith('hdntl='));
-                    if (hdntlIdx >= 2) {
-                        const token = urlParts[hdntlIdx];
-                        const basePath = urlParts.slice(0, hdntlIdx - 1).join('/');
-                        if (basePath && token) {
-                            setHdntlBasePath(basePath);
-                            setHdntlToken(token);
-                        }
-                    }
-                } catch (e) {}
-            }
         } catch (e: any) { } finally {
             setIsStreamLoading(false);
         }
@@ -1720,6 +1834,8 @@ const lastAppliedQualityRef = useRef<string | null>(null);
                     songDetails: songDetailsRef.current,
                     audioUrl: audioUrlRef.current,
                     streamBaseUrl: streamBaseUrlRef.current,
+                    hdntlBasePath: hdntlBasePathRef.current,
+                    hdntlToken: hdntlTokenRef.current,
                     lyrics: lyricsRef.current,
                     syncType: syncTypeRef.current,
                     canvasData: canvasDataRef.current,
@@ -2648,6 +2764,28 @@ const lastAppliedQualityRef = useRef<string | null>(null);
         onWaiting={() => setIsAudioBuffering(true)}
         onPlaying={() => setIsAudioBuffering(false)}
         onCanPlay={() => setIsAudioBuffering(false)}
+        onError={() => {
+          const tid = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
+          if (!tid) return;
+          if (!hdntlBasePath || !hdntlToken) return;
+          if (lastHdntlErrorRef.current === tid) return; // already retried this track
+          lastHdntlErrorRef.current = tid;
+          (async () => {
+            try {
+              const res = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
+              if (!res.ok) return;
+              const json = await res.json();
+              if (!json?.data?.url) return;
+              const parsed = parseStreamUrl(json.data.url);
+              if (!parsed) return;
+              saveGlobalHdntl(parsed.token, parsed.shard, parsed.host, true);
+              saveTrackMeta(tid, { basePath: parsed.basePath, shard: parsed.shard, albumId: parsed.albumId });
+              setHdntlBasePath(parsed.basePath);
+              setHdntlToken(parsed.token);
+              if (json.data.hlsUrl) setStreamBaseUrl(json.data.hlsUrl);
+            } catch {}
+          })();
+        }}
         crossOrigin="anonymous" 
         onLoadedMetadata={() => { 
            const dur = audioRef.current?.duration || 0; setDuration(dur); 
@@ -3335,4 +3473,4 @@ const lastAppliedQualityRef = useRef<string | null>(null);
       </div>
     </>
   );
-}
+  }
