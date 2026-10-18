@@ -17,127 +17,8 @@ import {
 const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 const bypassHeaders = { "x-vercel-protection-bypass": AUTOMATION_SECRET };
 
-// --- GAANA HDNTL TOKEN ENGINE ---
-const GAANA_CDN_HOST = "https://vodhlsgaana-ebw.akamaized.net";
-const HDNTL_GLOBAL_KEY = "gaana_hdntl_global";
-const TRACK_META_PREFIX = "gaana_track_meta_";
-const HDNTL_SAFETY_MS = 60 * 60 * 1000; // refresh 1h before expiry
-
 const fetchProtected = async (url: string, options: any = {}) => {
   return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
-};
-
-// --- HDNTL TOKEN HELPERS ---
-type HdntlGlobal = { token: string; shard: string; host: string; expiresAt: number; fetchedAt: number };
-type TrackMeta = { basePath: string; shard: string; albumId: string };
-
-const parseHdntlExpiry = (token: string): number => {
-  const m = token.match(/exp=(\d+)/);
-  return m ? parseInt(m[1], 10) * 1000 : 0;
-};
-
-const getValidGlobalHdntl = (): HdntlGlobal | null => {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(HDNTL_GLOBAL_KEY);
-    if (!raw) return null;
-    const d = JSON.parse(raw) as HdntlGlobal;
-    if (d.token && d.expiresAt && Date.now() + HDNTL_SAFETY_MS < d.expiresAt) return d;
-    return null;
-  } catch { return null; }
-};
-
-const saveGlobalHdntl = (token: string, shard: string, host: string, force = false) => {
-  if (typeof window === "undefined") return;
-  const exp = parseHdntlExpiry(token);
-  if (!exp) return;
-  if (!force) {
-    const existing = getValidGlobalHdntl();
-    if (existing && existing.expiresAt > exp) return; // don't downgrade
-  }
-  try {
-    localStorage.setItem(HDNTL_GLOBAL_KEY, JSON.stringify({
-      token, shard, host, expiresAt: exp, fetchedAt: Date.now()
-    } as HdntlGlobal));
-  } catch {}
-};
-
-const getTrackMeta = (trackId: string): TrackMeta | null => {
-  if (typeof window === "undefined" || !trackId) return null;
-  try {
-    const raw = localStorage.getItem(TRACK_META_PREFIX + trackId);
-    return raw ? JSON.parse(raw) : null;
-  } catch { return null; }
-};
-
-const saveTrackMeta = (trackId: string, meta: TrackMeta) => {
-  if (typeof window === "undefined" || !trackId) return;
-  try {
-    localStorage.setItem(TRACK_META_PREFIX + trackId, JSON.stringify(meta));
-  } catch {}
-};
-
-const parseStreamUrl = (url: string): { host: string; shard: string; albumId: string; trackId: string; token: string; basePath: string } | null => {
-  try {
-    const parts = url.split("/");
-    const hdntlIdx = parts.findIndex(p => p.startsWith("hdntl="));
-    if (hdntlIdx < 4) return null;
-    const shard = parts[hdntlIdx - 4];
-    const albumId = parts[hdntlIdx - 3];
-    const trackId = parts[hdntlIdx - 2];
-    const token = parts[hdntlIdx];
-    if (!shard || !albumId || !trackId || !token) return null;
-    const host = `${parts[0]}//${parts[2]}`;
-    const basePath = parts.slice(0, hdntlIdx - 1).join("/");
-    return { host, shard, albumId, trackId, token, basePath };
-  } catch { return null; }
-};
-
-const buildHdntlUrl = (basePath: string, quality: string, token: string): string =>
-  `${basePath}/${quality}/${token}/index.m3u8`;
-
-const qualityFromSelection = (q: string): string =>
-  q === "16" ? "16" : q === "64" ? "64" : q === "320" ? "320" : "128";
-
-// --- CORRECTED: Obtain hdntl by following the redirect from hlsUrl ---
-const extractHdntlFromHlsUrl = async (hlsUrl: string, signal?: AbortSignal): Promise<{ token: string; basePath: string; host: string } | null> => {
-  try {
-    // Fetch the hlsUrl with redirect set to 'manual' to capture the Location header
-    const res = await fetch(hlsUrl, {
-      method: "GET",
-      referrerPolicy: "no-referrer",
-      signal,
-      redirect: "manual",
-      // credentials are not needed for redirect capture
-    });
-
-    // The CDN returns a 302 with a Location header that contains the hdntl token
-    const location = res.headers.get("location");
-    if (!location) return null;
-
-    // The Location header looks like:
-    // .../128/hdntl=exp=...~acl=%2f*~data=hdntl~hmac=.../index.m3u8
-    // Parse it to extract the token and the base path
-    const parsed = parseStreamUrl(location);
-    if (parsed) {
-      return { token: parsed.token, basePath: parsed.basePath, host: parsed.host };
-    }
-
-    // If parseStreamUrl fails, try a simpler regex fallback
-    const match = location.match(/\/(hdntl=[^\/]+)\/index\.m3u8/);
-    if (match) {
-      const token = match[1];
-      // Build basePath by removing the token and index.m3u8 from the location
-      const basePath = location.replace(/\/hdntl=[^\/]+\/index\.m3u8$/, "");
-      const host = new URL(location).origin;
-      return { token, basePath, host };
-    }
-
-    return null;
-  } catch (e) {
-    console.warn("extractHdntlFromHlsUrl failed", e);
-    return null;
-  }
 };
 
 // Advanced Parser for r.jina.ai
@@ -220,17 +101,65 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
   } catch(e) {}
 };
 
+// --- HDNTL CACHE ENGINE (HLS CDN Token Reuse) ---
+// The gaana HLS URLs embed a CDN-wide signed token `hdntl=exp=...~acl=%2f*~data=hdntl~hmac=...`.
+// Reusing this token for other tracks on the same CDN avoids hitting the stream API per song.
+const HDNTL_CACHE_KEY = 'gaana_hdntl_token';
+const HDNTL_MIN_REMAINING_MS = 60 * 60 * 1000; // Stop using when < 1 hour remains before exp
+
+const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
+  try {
+    const hdntlMatch = hlsUrl.match(/(\/hdntl=[^\/]+)\//);
+    if (!hdntlMatch) return null;
+    const hdntlParam = hdntlMatch[1].substring(1); // strip leading slash
+
+    const expMatch = hdntlParam.match(/exp=(\d+)/);
+    if (!expMatch) return null;
+    const exp = parseInt(expMatch[1], 10);
+    if (!exp || isNaN(exp)) return null;
+
+    const urlObj = new URL(hlsUrl);
+    const hostPrefixMatch = urlObj.pathname.match(/^(\/hls\/[^\/]+)\//);
+    if (!hostPrefixMatch) return null;
+    const hostPrefix = `${urlObj.protocol}//${urlObj.host}${hostPrefixMatch[1]}`;
+
+    const cacheEntry = { hdntl: hdntlParam, hostPrefix, exp, cachedAt: Date.now() };
+
+    // Only cache when more than 1 hour remains before expiration
+    if ((exp * 1000) - Date.now() > HDNTL_MIN_REMAINING_MS) {
+      await setCache(HDNTL_CACHE_KEY, cacheEntry);
+    }
+    return cacheEntry;
+  } catch (e) {
+    return null;
+  }
+};
+
+const getCachedHdntlUrl = async (albumId: string, trackId: string, quality: string): Promise<string | null> => {
+  try {
+    if (!albumId || !trackId) return null;
+    const cached = await getCache(HDNTL_CACHE_KEY);
+    if (!cached?.hdntl || !cached?.hostPrefix || !cached?.exp) return null;
+    if ((cached.exp * 1000) - Date.now() < HDNTL_MIN_REMAINING_MS) return null;
+    return `${cached.hostPrefix}/${albumId}/${trackId}/${quality}/${cached.hdntl}/index.m3u8`;
+  } catch (e) {
+    return null;
+  }
+};
+
+const getAlbumIdFromSong = (song: any): string | null => {
+  if (!song) return null;
+  const id = song.album_id || song.albumid || song.album?.id || song.album?.album_id;
+  return id !== undefined && id !== null && id !== '' ? String(id) : null;
+};
+
 // --- FLAWLESS LYRICS TRANSLITERATION ENGINE ---
 const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'original') => {
     if (!originalLyrics || !originalLyrics.length || lang === 'original') return originalLyrics;
     
     const wordMap = new Map<string, string>();
-    
-    // Regex strictly captures pure letters and marks with optional internal hyphens/apostrophes (o-re, don't).
-    // Ignores all punctuation like ..... , ? ! seamlessly.
     const tokenRegex = /[\p{L}\p{M}]+(?:['-][\p{L}\p{M}]+)*/gu; 
     
-    // 1. Extract and deduplicate all words to conserve strict network bandwidth
     originalLyrics.forEach(line => {
         if (!line.words) return;
         const matches = line.words.match(tokenRegex);
@@ -242,13 +171,11 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
     });
 
     const uniqueWords = Array.from(wordMap.keys());
-    
-    // Intelligently separate languages to assign them their optimal APIs
     const englishWords = uniqueWords.filter(w => /^[a-zA-Z'-]+$/.test(w));
     const nonEnglishWords = uniqueWords.filter(w => /[^\x00-\x7F]/.test(w));
 
     const processInBatches = async (items: string[], processor: (batch: string[]) => Promise<void>) => {
-        const chunkSize = 15; // Smooth batch limits for high-speed concurrent network
+        const chunkSize = 15;
         for (let i = 0; i < items.length; i += chunkSize) {
             await processor(items.slice(i, i + chunkSize));
         }
@@ -259,7 +186,6 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
             await processInBatches(englishWords, async (batch) => {
                 const promises = batch.map(async (word) => {
                     try {
-                        // Prepending a space mathematically triggers Svar evaluations (" उई") instead of Matras ("ुई") for standalone words
                         const queryText = encodeURIComponent(" " + word);
                         const res = await fetch(`https://inputtools.google.com/request?text=${queryText}&itc=hi-t-i0-und&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`);
                         const data = await res.json();
@@ -272,7 +198,6 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
             });
         }
         if (nonEnglishWords.length > 0) {
-            // Evaluates Urdu, Punjabi, Malayalam, Arabic, etc., while safely skipping already Devanagari text
             const needsIndicToDevanagari = nonEnglishWords.filter(w => !/^[\u0900-\u097F\p{M}'-]+$/u.test(w));
             if (needsIndicToDevanagari.length > 0) {
                 const query = needsIndicToDevanagari.join('\n');
@@ -302,7 +227,6 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
         }
     }
 
-    // 3. Reconstruct back exactly into their native places leaving periods and punctuation strictly alone
     return originalLyrics.map(line => {
         if (!line.words) return line;
         const newWords = line.words.replace(tokenRegex, (match: string) => {
@@ -611,8 +535,6 @@ export default function MiniPlayer() {
   
   const[audioUrl, setAudioUrl] = useState("");
   const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
-  const[hdntlBasePath, setHdntlBasePath] = useState<string | null>(null);
-  const[hdntlToken, setHdntlToken] = useState<string | null>(null);
   
   // Buffering States
   const[isStreamLoading, setIsStreamLoading] = useState(false);
@@ -663,9 +585,8 @@ export default function MiniPlayer() {
   const clientIdRef = useRef<string | null>(null);
   const isSystemSongChangeRef = useRef(false);
   
-  // High-performance action lockout to prevent UI fights
   const localActionTimeRef = useRef<number>(0);
-  const requestedDataForTrackRef = useRef<string | null>(null); // Prevents infinite data request loop
+  const requestedDataForTrackRef = useRef<string | null>(null);
   
   const upcomingQueueRef = useRef<any[]>([]);
   const playContextRef = useRef<any>(null);
@@ -691,7 +612,6 @@ export default function MiniPlayer() {
       }
   }, [jamChatMessages, showChat]);
 
-  // High-performance payload broadcast tracking
   const songStartTrackingRef = useRef<number>(Date.now());
   const lastFetchedTrackIdRef = useRef<string | null>(null);
   
@@ -717,8 +637,6 @@ export default function MiniPlayer() {
   const hasCachedCurrentSongRef = useRef(false);
   
   const rapidKeyIdxRef = useRef(0);
-  const lastAppliedQualityRef = useRef<string | null>(null);
-  const lastHdntlErrorRef = useRef<string | null>(null);
   const[spotifyId, setSpotifyId] = useState<string | null>(null);
   const[spotifyUrl, setSpotifyUrl] = useState<string | null>(null);
   const[lyrics, setLyrics] = useState<any[]>([]);
@@ -772,12 +690,13 @@ export default function MiniPlayer() {
   const isCanvasEnabledRef = useRef(true);
   const isLyricsEnabledRef = useRef(true);
 
-  // Deep refs for Host payload building
+  // --- HDNTL FALLBACK TRACKING ---
+  // Tracks for which we already attempted an API fallback (construct URL failed). Prevents infinite loops.
+  const hlsApiRetryAttemptedRef = useRef<Set<string>>(new Set());
+
   const songDetailsRef = useRef(songDetails);
   const audioUrlRef = useRef(audioUrl);
   const streamBaseUrlRef = useRef(streamBaseUrl);
-  const hdntlBasePathRef = useRef<string | null>(null);
-  const hdntlTokenRef = useRef<string | null>(null);
   const lyricsRef = useRef(lyrics);
   const syncTypeRef = useRef(syncType);
   const canvasDataRef = useRef(canvasData);
@@ -786,8 +705,6 @@ export default function MiniPlayer() {
   useEffect(() => { songDetailsRef.current = songDetails; }, [songDetails]);
   useEffect(() => { audioUrlRef.current = audioUrl; }, [audioUrl]);
   useEffect(() => { streamBaseUrlRef.current = streamBaseUrl; }, [streamBaseUrl]);
-  useEffect(() => { hdntlBasePathRef.current = hdntlBasePath; }, [hdntlBasePath]);
-  useEffect(() => { hdntlTokenRef.current = hdntlToken; }, [hdntlToken]);
   useEffect(() => { lyricsRef.current = lyrics; }, [lyrics]);
   useEffect(() => { syncTypeRef.current = syncType; }, [syncType]);
   useEffect(() => { canvasDataRef.current = canvasData; }, [canvasData]);
@@ -801,13 +718,9 @@ export default function MiniPlayer() {
   const isCanvasActive = isCanvasLoaded && isCanvasEnabled && !isVideoMode && !isLyricsFullScreen && canvasData?.canvasUrl;
   const isBuffering = isStreamLoading || isAudioBuffering || isVideoLoading;
 
-  // Admin is NOT guest locked for UI
   const isGuestLocked = jamRole === 'guest' && jamStatus === 'connected';
-
-  // Context Switcher for UI
   const displayContext = (jamStatus === 'connected' && jamRole !== 'host') ? jamPlayContext : playContext;
 
-  // --- SILENT AUTOPLAY BYPASS ---
   useEffect(() => {
       const unlockAudio = () => {
           if (jamPlayBlockedRef.current && audioRef.current) {
@@ -824,7 +737,6 @@ export default function MiniPlayer() {
       };
   }, []);
 
-  // --- HOST/ADMIN SYNC BROADCASTER ---
   const broadcastFullSync = useCallback(() => {
       if ((jamRoleRef.current !== 'host' && jamRoleRef.current !== 'admin') || !ablyChannelRef.current) return;
       ablyChannelRef.current.publish('sync', {
@@ -835,8 +747,6 @@ export default function MiniPlayer() {
               songDetails: songDetailsRef.current,
               audioUrl: audioUrlRef.current,
               streamBaseUrl: streamBaseUrlRef.current,
-              hdntlBasePath: hdntlBasePathRef.current,
-              hdntlToken: hdntlTokenRef.current,
               lyrics: lyricsRef.current,
               syncType: syncTypeRef.current,
               canvasData: canvasDataRef.current,
@@ -850,17 +760,14 @@ export default function MiniPlayer() {
       });
   }, []);
 
-  // Guest requesting Data if Missing
   useEffect(() => {
       if ((jamRole === 'guest' || jamRole === 'admin') && jamStatus === 'connected' && currentSong) {
           const trackId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
-          
-          if (requestedDataForTrackRef.current === trackId) return; // Prevent infinite request loop
-
+          if (requestedDataForTrackRef.current === trackId) return;
           if (!canvasData || lyrics.length === 0 || !songDetails) {
               const timeout = setTimeout(() => {
                   if (ablyChannelRef.current) {
-                      requestedDataForTrackRef.current = trackId; // Mark as requested
+                      requestedDataForTrackRef.current = trackId;
                       ablyChannelRef.current.publish('sync', { 
                           type: 'REQUEST_DATA',
                           senderId: clientIdRef.current,
@@ -873,19 +780,13 @@ export default function MiniPlayer() {
       }
   }, [currentSong, canvasData, lyrics, songDetails, jamRole, jamStatus]);
 
-  // --- AUTOMATION HEARTBEAT + METADATA CARRIER ---
   useEffect(() => {
       if (jamRole === 'host' && jamStatus === 'connected') {
           const interval = setInterval(() => {
               if (!ablyChannelRef.current) return;
-              
-              // Prevent heartbeat if host recently executed an action or received an authoritative FULL_SYNC
               if (Date.now() - localActionTimeRef.current < 8000) return;
-
-              // Beam metadata for 35 seconds to guarantee perfect async payload loading on Guests
               const timeSinceStart = Date.now() - (songStartTrackingRef.current || 0);
               const shouldCarry = timeSinceStart < 35000 || !hasCachedCurrentSongRef.current;
-
               ablyChannelRef.current.publish('sync', {
                   type: 'HEARTBEAT',
                   senderId: clientIdRef.current,
@@ -896,8 +797,6 @@ export default function MiniPlayer() {
                   carryPayload: shouldCarry ? {
                       audioUrl: audioUrlRef.current,
                       streamBaseUrl: streamBaseUrlRef.current,
-                      hdntlBasePath: hdntlBasePathRef.current,
-                      hdntlToken: hdntlTokenRef.current,
                       lyrics: lyricsRef.current,
                       syncType: syncTypeRef.current,
                       canvasData: canvasDataRef.current,
@@ -907,12 +806,11 @@ export default function MiniPlayer() {
                       playContext: playContextRef.current
                   } : null
               });
-          }, 20000); // 20 Seconds Heartbeat Lock
+          }, 20000);
           return () => clearInterval(interval);
       }
   }, [jamRole, jamStatus]);
 
-  // --- JIM JAM CONNECTION LOGIC ---
   const connectToAbly = async (roomId: string, role: 'host' | 'admin' | 'guest', customName: string) => {
       try {
           setJamStatus('connecting');
@@ -950,12 +848,11 @@ export default function MiniPlayer() {
               if (action === 'enter' || action === 'leave') {
                   const isEnter = action === 'enter';
                   setJamLogs(prev => {
-                      const newLogs = [...prev, { id: Date.now(), text: `${p.name} ${isEnter ? 'joined the Jam.' : 'left.'}`}];
+                      const newLogs = [...prev, { id: Date.now(), text: `${p.name} ${isEnter ? 'joined the Jam.' : 'left.'}` }];
                       return newLogs.slice(-10);
                   });
               }
 
-              // Update participant list safely
               channel.presence.get().then((result: any) => {
                   const members = Array.isArray(result) ? result : (result.items || []);
                   setJamParticipants(members.map((m: any) => ({ ...m.data, clientId: m.clientId })));
@@ -973,7 +870,6 @@ export default function MiniPlayer() {
               role: role
           });
 
-          // Role Assign Listener
           channel.subscribe('role_assign', (msg: any) => {
               if (msg.data.targetClientId === clientIdRef.current) {
                   setJamRole(msg.data.newRole);
@@ -988,7 +884,6 @@ export default function MiniPlayer() {
               }
           });
 
-          // Chat Listener
           channel.subscribe('chat_msg', (msg: any) => {
               setJamChatMessages(prev => [...prev, msg.data].slice(-50));
           });
@@ -996,7 +891,6 @@ export default function MiniPlayer() {
               setIsChatEnabled(msg.data.enabled);
           });
 
-          // Kick User Listener
           channel.subscribe('kick_user', (msg: any) => {
               if (msg.data.targetClientId === clientIdRef.current) {
                   setJamError("You have been removed from the Jam session by the host.");
@@ -1004,12 +898,11 @@ export default function MiniPlayer() {
               }
           });
 
-          // CENTRALIZED SYNC RECEIVER (Handles Host, Admin, and Guest syncing dynamically)
           channel.subscribe('sync', (msg: any) => {
               const data = msg.data;
               const currentRole = jamRoleRef.current;
               
-              if (data.senderId === clientIdRef.current) return; // Ignore own sync broadcasts
+              if (data.senderId === clientIdRef.current) return;
 
               if (data.type === 'ROOM_CLOSED') {
                   setJamError("The host has ended the Jam session.");
@@ -1046,16 +939,13 @@ export default function MiniPlayer() {
                   return;
               }
 
-              // --- CONFLICT RESOLUTION ENGINE ---
               const isDriver = currentRole === 'admin' || currentRole === 'host';
               const recentlyActed = isDriver && (Date.now() - localActionTimeRef.current < 10000);
 
-              // Ignore routine packets if we just performed a local action (like a song change) to stop reverting
               if (recentlyActed && ['HEARTBEAT', 'TIME', 'STATE', 'QUEUE_UPDATE'].includes(data.type)) {
                   return; 
               }
 
-              // Apply sync payload universally based on message type
               if (data.type === 'DATA_UPDATE') {
                   const p = data.payload;
                   const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
@@ -1069,17 +959,13 @@ export default function MiniPlayer() {
               } else if (data.type === 'QUEUE_UPDATE') {
                   setUpcomingQueue(data.payload.queue);
               } else if (data.type === 'FULL_SYNC') {
-                  localActionTimeRef.current = Date.now(); // Respect the authoritative switch, lock out our own actions
+                  localActionTimeRef.current = Date.now();
                   const p = data.payload;
-                  isSystemSongChangeRef.current = true; // Prevents local fetch and purge
+                  isSystemSongChangeRef.current = true;
                   
                   setSongDetails(p.songDetails);
                   setAudioUrl(p.audioUrl);
                   setStreamBaseUrl(p.streamBaseUrl);
-                  setHdntlBasePath(p.hdntlBasePath || null);
-                  setHdntlToken(p.hdntlToken || null);
-                  lastAppliedQualityRef.current = null;
-                  lastHdntlErrorRef.current = null;
                   setLyrics(p.lyrics);
                   setSyncType(p.syncType);
                   setCanvasData(p.canvasData);
@@ -1090,12 +976,11 @@ export default function MiniPlayer() {
                   if (p.isVideoMode !== isVideoModeRef.current) setIsVideoMode(p.isVideoMode);
 
                   let targetTime = p.time;
-                  // Only add buffer offset explicitly on initial FULL_SYNC to avoid regular stutter
                   if (p.isPlaying) targetTime += 0.8; 
                   iframeInitialTimeRef.current = targetTime;
 
                   if (p.song && p.song.id !== currentTrackRef.current?.id) {
-                      setCurrentSong(p.song); // Triggers useEffect, but isSystemSongChangeRef prevents fetch/purge
+                      setCurrentSong(p.song);
                   } else {
                       currentTrackRef.current = p.song;
                   }
@@ -1105,7 +990,6 @@ export default function MiniPlayer() {
                       videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_SEEK', time: targetTime }, '*');
                       videoIframeRef.current.contentWindow.postMessage({ type: p.isPlaying ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
                   } else if (!p.isVideoMode && audioRef.current) {
-                      // Apply the 4.0 second tolerance to FULL_SYNC so it doesn't flicker current audio
                       const currentId = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
                       const payloadId = p.song?.id || p.song?.track_id;
                       if (Math.abs(audioRef.current.currentTime - targetTime) > 4.0 || payloadId !== currentId) {
@@ -1123,8 +1007,6 @@ export default function MiniPlayer() {
                           const cp = data.carryPayload;
                           if (cp.audioUrl && cp.audioUrl !== audioUrlRef.current) setAudioUrl(cp.audioUrl);
                           if (cp.streamBaseUrl && cp.streamBaseUrl !== streamBaseUrlRef.current) setStreamBaseUrl(cp.streamBaseUrl);
-                          if (cp.hdntlBasePath && cp.hdntlBasePath !== hdntlBasePathRef.current) setHdntlBasePath(cp.hdntlBasePath);
-                          if (cp.hdntlToken && cp.hdntlToken !== hdntlTokenRef.current) setHdntlToken(cp.hdntlToken);
                           if (cp.lyrics && cp.lyrics.length !== lyricsRef.current.length) setLyrics(cp.lyrics);
                           if (cp.syncType && cp.syncType !== syncTypeRef.current) setSyncType(cp.syncType);
                           if (cp.canvasData && cp.canvasData.canvasUrl !== canvasDataRef.current?.canvasUrl) setCanvasData(cp.canvasData);
@@ -1139,7 +1021,6 @@ export default function MiniPlayer() {
                       setIsVideoMode(data.isVideoMode);
                   }
 
-                  // Standardized Time alignment - strictly guarded against manual scrubbing
                   let targetTime = data.time;
                   
                   if (data.isVideoMode || isVideoModeRef.current) {
@@ -1291,7 +1172,6 @@ export default function MiniPlayer() {
       }
   };
 
-  // Re-establish session if within 5 hours
   useEffect(() => {
       const session = localStorage.getItem(JAM_STORAGE_KEY);
       if (session) {
@@ -1345,6 +1225,7 @@ export default function MiniPlayer() {
 
   useEffect(() => {
       let isCurrent = true;
+      let hlsErrorHandled = false;
       const setupAudio = async () => {
           if (!audioRef.current || !audioUrl) return;
           if (audioUrl.includes('.m3u8')) {
@@ -1356,6 +1237,30 @@ export default function MiniPlayer() {
                       hls.loadSource(audioUrl);
                       hls.attachMedia(audioRef.current);
                       hlsRef.current = hls;
+
+                      // HDNTL fallback: if constructed URL fails fatally, fetch API once per track
+                      hls.on(Hls.Events.ERROR, async (_evt: any, data: any) => {
+                          if (!isCurrent || hlsErrorHandled || !data?.fatal) return;
+                          hlsErrorHandled = true;
+                          const tid = String(currentTrackRef.current?.track_id || currentTrackRef.current?.id || '');
+                          if (!tid) return;
+                          if (hlsApiRetryAttemptedRef.current.has(tid)) return;
+                          hlsApiRetryAttemptedRef.current.add(tid);
+                          try {
+                              console.warn('[HLS] Fatal error, falling back to stream API for track:', tid);
+                              const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
+                              if (streamRes.ok && isCurrent) {
+                                  const streamJson = await streamRes.json();
+                                  if (streamJson?.data?.hlsUrl) {
+                                      await setCache(`gaana_stream_${tid}`, streamJson);
+                                      await extractAndCacheHdntl(streamJson.data.hlsUrl);
+                                      restoreTimeRef.current = audioRef.current?.currentTime || 0;
+                                      setStreamBaseUrl(streamJson.data.hlsUrl);
+                                  }
+                              }
+                          } catch (e) {}
+                      });
+
                       if (isPlaying && !isVideoMode) {
                           const p = audioRef.current.play();
                           if (p !== undefined) p.catch(() => setJamPlayBlocked(true));
@@ -1454,7 +1359,6 @@ export default function MiniPlayer() {
     }
   },[currentSong, isSessionRestored, setCurrentSong, setUpcomingQueue]);
 
-  // --- LYRICS TRANSLITERATION EFFECT ---
   useEffect(() => {
       let isCancelled = false;
       
@@ -1480,7 +1384,7 @@ export default function MiniPlayer() {
               return;
           }
           
-          if (!isCancelled && displayLyrics.length === 0) setDisplayLyrics(lyrics); // Fallback to avoid blinking empty state
+          if (!isCancelled && displayLyrics.length === 0) setDisplayLyrics(lyrics);
 
           const result = await transliterateLyrics(lyrics, lyricsLang);
           if (!isCancelled) {
@@ -1550,47 +1454,30 @@ export default function MiniPlayer() {
     return null;
   };
 
+  // --- QUALITY CHANGE ENGINE (supports BOTH old .mp4.master.m3u8 format AND new /{q}/hdntl=... format) ---
   useEffect(() => {
-    if (!streamBaseUrl && !hdntlBasePath) return;
-    const targetQ = qualityFromSelection(selectedQuality);
-    const lastQ = lastAppliedQualityRef.current;
-    const isQualityChange = lastQ !== null && lastQ !== targetQ;
-    lastAppliedQualityRef.current = targetQ;
-
-    // Quality switch: prefer long-lived hdntl URL
-    if (isQualityChange && hdntlBasePath && hdntlToken) {
-        setAudioUrl(buildHdntlUrl(hdntlBasePath, targetQ, hdntlToken));
-        return;
-    }
-    // Initial play or quality change where hdntl unavailable: use hlsUrl
     if (streamBaseUrl) {
-        setAudioUrl(streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`));
-        return;
+        const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
+        let finalUrl = streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`);
+        finalUrl = finalUrl.replace(/\/(\d+)\/hdntl=/g, `/${targetQ}/hdntl=`);
+        setAudioUrl(finalUrl);
     }
-    // No hlsUrl (stream API was skipped): use hdntl for initial play
-    if (hdntlBasePath && hdntlToken) {
-        setAudioUrl(buildHdntlUrl(hdntlBasePath, targetQ, hdntlToken));
-    }
-}, [streamBaseUrl, hdntlBasePath, hdntlToken, selectedQuality]);
+  },[streamBaseUrl, selectedQuality]);
 
   useEffect(() => {
     if (!currentSong) return;
     songStartTrackingRef.current = Date.now();
     
-    // IF THIS SONG CHANGE IS TRIGGERED BY A SYNC EVENT:
     if (isSystemSongChangeRef.current) {
         isSystemSongChangeRef.current = false;
         currentTrackRef.current = currentSong;
-        
         setIsCanvasLoaded(false); 
         setIsUiHidden(false);     
-        
-        return; // SKIP LOCAL FETCHING AND PURGING - SYNC ALREADY HANDLED IT
+        return;
     }
 
-    // Normal Guest protection - block local navigation unless via sync
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') {
-        setCurrentSong(currentTrackRef.current); // Revert
+        setCurrentSong(currentTrackRef.current);
         return;
     }
 
@@ -1629,46 +1516,38 @@ export default function MiniPlayer() {
     setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
     iframeInitialTimeRef.current = 0;
     setStreamBaseUrl(null);
-    setHdntlBasePath(null);
-    setHdntlToken(null);
-    lastAppliedQualityRef.current = null;
-    lastHdntlErrorRef.current = null;
     setBuffered(0);
 
     let sDetails: any = null;
     let skipSpotifyLyrics = false;
 
+    // --- STREAM TASK (HDNTL-aware) ---
     const fetchStreamTask = async () => {
         setIsStreamLoading(true);
         try {
-            // ---- FAST PATH: skip stream API entirely ----
-            const globalHdntl = getValidGlobalHdntl();
-            if (globalHdntl) {
-                const cachedMeta = getTrackMeta(trackId);
-                const songAlbumId = (currentSong as any)?.album_id || (songDetailsRef.current as any)?.album_id;
-                let basePath = cachedMeta?.basePath;
-                if (!basePath) {
-                    const shard = cachedMeta?.shard || globalHdntl.shard;
-                    const albumId = cachedMeta?.albumId || songAlbumId;
-                    if (shard && albumId) {
-                        basePath = `${globalHdntl.host}/hls/${shard}/${albumId}/${trackId}`;
+            const trackIdStr = String(trackId);
+            const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
+
+            // 1. Track-specific cache (fast path, existing behavior)
+            let streamJson = await getCache(`gaana_stream_${trackId}`);
+
+            // 2. If no track cache, try constructing URL from cached hdntl token (API-saving path)
+            if (!streamJson || !streamJson.data) {
+                const albumId = getAlbumIdFromSong(currentSong) || sDetails?.album_id || sDetails?.albumid;
+                if (albumId) {
+                    const constructedUrl = await getCachedHdntlUrl(String(albumId), trackIdStr, targetQ);
+                    if (constructedUrl) {
+                        if (!isCurrent || signal.aborted) return;
+                        console.log('[Stream] Using cached hdntl token for track', trackIdStr);
+                        setStreamBaseUrl(constructedUrl);
+                        setIsStreamLoading(false);
+                        return;
                     }
-                }
-                if (basePath) {
-                    const q = qualityFromSelection(selectedQuality);
-                    if (!isCurrent || signal.aborted) return;
-                    setHdntlBasePath(basePath);
-                    setHdntlToken(globalHdntl.token);
-                    lastAppliedQualityRef.current = q;
-                    setAudioUrl(buildHdntlUrl(basePath, q, globalHdntl.token));
-                    setIsStreamLoading(false);
-                    return; // ← stream API call avoided
                 }
             }
 
-            // ---- SLOW PATH: call stream API once ----
-            let streamJson = await getCache(`gaana_stream_${trackId}`);
-            if (!streamJson) {
+            // 3. Fallback to API (if no cache and no valid hdntl)
+            if (!streamJson || !streamJson.data) {
                 const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
                 if (streamRes.ok) {
                     streamJson = await streamRes.json();
@@ -1676,29 +1555,15 @@ export default function MiniPlayer() {
                     else await setCache(`gaana_stream_${trackId}`, { notFound: true });
                 }
             }
+
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
 
-            // --- CORRECTED: Extract hdntl by following the redirect from hlsUrl ---
             if (streamJson?.data?.hlsUrl) {
-                const hlsUrl = streamJson.data.hlsUrl;
-                setStreamBaseUrl(hlsUrl); // keep for fallback
-
-                const extracted = await extractHdntlFromHlsUrl(hlsUrl, signal);
-                if (extracted) {
-                    saveGlobalHdntl(extracted.token, extracted.basePath.split('/')[3], extracted.host); // shard is index 3 of basePath (after /hls/)
-                    saveTrackMeta(trackId, { 
-                        basePath: extracted.basePath, 
-                        shard: extracted.basePath.split('/')[3], 
-                        albumId: extracted.basePath.split('/')[4] 
-                    });
-                    setHdntlBasePath(extracted.basePath);
-                    setHdntlToken(extracted.token);
-                } else {
-                    // Fallback: if extraction fails, use the hlsUrl directly
-                    setAudioUrl(hlsUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${qualityFromSelection(selectedQuality)}.mp4.master.m3u8`));
-                }
+                // Cache the hdntl token for future tracks
+                await extractAndCacheHdntl(streamJson.data.hlsUrl);
+                if (!isCurrent || signal.aborted) return;
+                setStreamBaseUrl(streamJson.data.hlsUrl);
             } else if (streamJson?.data?.url) {
-                // Fallback to old method if hlsUrl missing
                 setAudioUrl(streamJson.data.url);
             }
         } catch (e: any) { } finally {
@@ -1854,7 +1719,6 @@ export default function MiniPlayer() {
         const searchArtistsFull = decodeEntities(getArtistsText(currentSong));
         const searchArtist = searchArtistsFull ? searchArtistsFull.split(',').slice(0, 3).join(' ') : "";
         
-        // Unleash Fast Parallel Processes
         fetchStreamTask(); 
         fetchInfoTask();
         getAuthData();
@@ -1869,14 +1733,12 @@ export default function MiniPlayer() {
             prefetchVideoId(searchTitle, searchArtist);
         }
 
-        // Extremely fast 0.5s network clearance block for Vercel functions pacing (No playback block)
         await new Promise(r => setTimeout(r, 500));
         
         if (!isCurrent || signal.aborted) return;
         
         await triggerSpotifyFallback(sDetails || currentSong, skipSpotifyLyrics);
         
-        // If Host or Admin, broadcast completion sync
         if ((jamRoleRef.current === 'host' || jamRoleRef.current === 'admin') && jamStatus === 'connected' && ablyChannelRef.current && isCurrent && !signal.aborted) {
             ablyChannelRef.current.publish('sync', {
                 type: 'FULL_SYNC',
@@ -1886,8 +1748,6 @@ export default function MiniPlayer() {
                     songDetails: songDetailsRef.current,
                     audioUrl: audioUrlRef.current,
                     streamBaseUrl: streamBaseUrlRef.current,
-                    hdntlBasePath: hdntlBasePathRef.current,
-                    hdntlToken: hdntlTokenRef.current,
                     lyrics: lyricsRef.current,
                     syncType: syncTypeRef.current,
                     canvasData: canvasDataRef.current,
@@ -1995,7 +1855,7 @@ export default function MiniPlayer() {
         if (playPromise !== undefined) playPromise.catch(()=>setJamPlayBlocked(true));
         setIsPlaying(true);
       }
-      setTimeout(() => broadcastFullSync(), 500); // Broadcast state change immediately
+      setTimeout(() => broadcastFullSync(), 500);
       return;
     }
     iframeInitialTimeRef.current = Math.floor(currentTime);
@@ -2013,7 +1873,7 @@ export default function MiniPlayer() {
     else if (audioRef.current) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); setIsPlaying(true); }
     setIsVideoLoading(false);
     
-    setTimeout(() => broadcastFullSync(), 500); // Force sync network
+    setTimeout(() => broadcastFullSync(), 500);
   };
 
   useEffect(() => {
@@ -2056,10 +1916,8 @@ export default function MiniPlayer() {
   },[isPlaying, isScrolledPastMain, isCanvasLoaded, isExpanded, showQueue, isVideoMode, isLyricsFullScreen, isCanvasEnabled, canvasData]);
 
   const playNext = (e?: any) => {
-    const isAutoPlay = e === true; // Detect if called via automated onEnded event
+    const isAutoPlay = e === true;
     if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
-    
-    // Prevent Admin from auto-forcing the next song if it finishes; let the Host drive the timeline!
     if (isAutoPlay && jamRoleRef.current === 'admin' && jamStatus === 'connected') return;
 
     localActionTimeRef.current = Date.now();
@@ -2545,7 +2403,7 @@ export default function MiniPlayer() {
       try {
           const cleanTitle = encodeURIComponent(decodeEntities(displayTitle));
           const cleanArtist = encodeURIComponent(decodeEntities(displayArtists));
-          const cleanAlbum = encodeURIComponent(decodeEntities(songDetails?.album_title || displayTitle));
+          const cleanAlbum = encodeURIComponent(songDetails?.album_title || displayTitle);
           const cleanImg = encodeURIComponent(displayImage || "https://via.placeholder.com/500");
           const m3u8Safe = encodeURIComponent(optUrl);
 
@@ -2593,8 +2451,10 @@ export default function MiniPlayer() {
                   const sizeMB = (durSecs * bitrate) / 8 / 1024;
                   sizeStr = `${sizeMB.toFixed(1)}MB`;
               }
+              let optUrl = streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${q}.mp4.master.m3u8`);
+              optUrl = optUrl.replace(/\/(\d+)\/hdntl=/g, `/${q}/hdntl=`);
               opts.push({ 
-                  url: streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${q}.mp4.master.m3u8`), 
+                  url: optUrl, 
                   quality: `${q}kbps`, 
                   label: QUALITY_MAP[q] || `${q}kbps`, 
                   num: parseInt(q),
@@ -2746,7 +2606,6 @@ export default function MiniPlayer() {
              if (jamRoleRef.current === 'guest' && jamStatus === 'connected') return;
              
              localActionTimeRef.current = Date.now();
-             // Allow Host/Admin to naturally change song, effect will handle sync
              setCurrentSong(track); setUpcomingQueue((prev: any) => prev.filter((_: any, i: number) => i !== index)); setIsPlaying(true); 
           }}>
             <div className="w-[44px] h-[44px] flex-shrink-0 rounded-[4px] bg-[#282828] overflow-hidden"><img draggable={false} src={getImageUrl(track) || "https://via.placeholder.com/150"} alt="cover" className="w-full h-full object-cover no-select pointer-events-none" /></div>
@@ -2816,33 +2675,6 @@ export default function MiniPlayer() {
         onWaiting={() => setIsAudioBuffering(true)}
         onPlaying={() => setIsAudioBuffering(false)}
         onCanPlay={() => setIsAudioBuffering(false)}
-        onError={() => {
-          const tid = currentTrackRef.current?.id || currentTrackRef.current?.track_id;
-          if (!tid) return;
-          if (!hdntlBasePath || !hdntlToken) return;
-          if (lastHdntlErrorRef.current === tid) return; // already retried this track
-          lastHdntlErrorRef.current = tid;
-          (async () => {
-            try {
-              // Re-fetch the stream URL and extract hdntl from hlsUrl
-              const res = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
-              if (!res.ok) return;
-              const json = await res.json();
-              if (!json?.data?.hlsUrl) return;
-              const extracted = await extractHdntlFromHlsUrl(json.data.hlsUrl);
-              if (!extracted) return;
-              saveGlobalHdntl(extracted.token, extracted.basePath.split('/')[3], extracted.host, true);
-              saveTrackMeta(tid, { 
-                  basePath: extracted.basePath, 
-                  shard: extracted.basePath.split('/')[3], 
-                  albumId: extracted.basePath.split('/')[4] 
-              });
-              setHdntlBasePath(extracted.basePath);
-              setHdntlToken(extracted.token);
-              if (json.data.hlsUrl) setStreamBaseUrl(json.data.hlsUrl);
-            } catch {}
-          })();
-        }}
         crossOrigin="anonymous" 
         onLoadedMetadata={() => { 
            const dur = audioRef.current?.duration || 0; setDuration(dur); 
@@ -3530,4 +3362,4 @@ export default function MiniPlayer() {
       </div>
     </>
   );
-}
+                              }
