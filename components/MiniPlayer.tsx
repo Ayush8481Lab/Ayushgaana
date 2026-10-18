@@ -14,27 +14,178 @@ import {
 } from "lucide-react";
 
 // ==================== DEBUG TOGGLES ====================
-const DEBUG_STREAM = true;      // master switch for all stream/hdntl/prefetch logs
-const DEBUG_INFO   = true;      // info API response shape dumps
+const DEBUG_STREAM = true;
+const DEBUG_INFO   = true;
+
+// ==================== IN-APP LOG BUFFER (mobile-friendly) ====================
+type LogEntry = { id: number, ts: number, prefix: string, text: string, color: string };
+const logBuffer: LogEntry[] = [];
+const logListeners = new Set<(logs: LogEntry[]) => void>();
+let logIdCounter = 0;
+
+const pushLog = (prefix: string, args: any[], color: string) => {
+    let text = '';
+    try {
+        text = args.map((a: any) => {
+            if (a === null) return 'null';
+            if (a === undefined) return 'undefined';
+            if (typeof a === 'string') return a;
+            if (typeof a === 'number' || typeof a === 'boolean') return String(a);
+            try { return JSON.stringify(a); } catch(e) { return String(a); }
+        }).join(' ');
+    } catch(e) { text = '(unstringifiable)'; }
+    const entry: LogEntry = { id: logIdCounter++, ts: Date.now(), prefix, text, color };
+    logBuffer.push(entry);
+    if (logBuffer.length > 2000) logBuffer.shift();
+    logListeners.forEach(fn => { try { fn(logBuffer.slice()); } catch(e) {} });
+};
 
 const sdLog = (...args: any[]) => {
-    if (!DEBUG_STREAM) return;
-    console.log('%c[STREAM]', 'background:#1db954;color:#000;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_STREAM) console.log('%c[STREAM]', 'background:#1db954;color:#000;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_STREAM) pushLog('STREAM', args, '#1db954');
 };
 const hdLog = (...args: any[]) => {
-    if (!DEBUG_STREAM) return;
-    console.log('%c[HDNTL]', 'background:#ff8800;color:#000;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_STREAM) console.log('%c[HDNTL]', 'background:#ff8800;color:#000;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_STREAM) pushLog('HDNTL', args, '#ff8800');
 };
 const pfLog = (...args: any[]) => {
-    if (!DEBUG_STREAM) return;
-    console.log('%c[PREFETCH]', 'background:#3388ff;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_STREAM) console.log('%c[PREFETCH]', 'background:#3388ff;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_STREAM) pushLog('PREFETCH', args, '#3388ff');
 };
 const ifLog = (...args: any[]) => {
-    if (!DEBUG_INFO) return;
-    console.log('%c[INFO]', 'background:#aa44aa;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_INFO) console.log('%c[INFO]', 'background:#aa44aa;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    if (DEBUG_INFO) pushLog('INFO', args, '#aa44aa');
 };
 const bootLog = (...args: any[]) => {
     console.log('%c[BOOT]', 'background:#888;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    pushLog('BOOT', args, '#cccccc');
+};
+const diagLog = (...args: any[]) => {
+    console.log('%c[DIAG]', 'background:#aa00ff;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+    pushLog('DIAG', args, '#aa00ff');
+};
+
+// ==================== DEBUG LOG PANEL COMPONENT ====================
+const DebugLogPanel = ({ onClose }: { onClose: () => void }) => {
+    const [logs, setLogs] = useState<LogEntry[]>([...logBuffer]);
+    const [filter, setFilter] = useState('');
+    const [autoScroll, setAutoScroll] = useState(true);
+    const [copyMsg, setCopyMsg] = useState('');
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        const handler = (newLogs: LogEntry[]) => setLogs(newLogs);
+        logListeners.add(handler);
+        setLogs([...logBuffer]);
+        return () => { logListeners.delete(handler); };
+    }, []);
+
+    useEffect(() => {
+        if (autoScroll && containerRef.current) {
+            containerRef.current.scrollTop = containerRef.current.scrollHeight;
+        }
+    }, [logs.length, autoScroll]);
+
+    const filtered = filter 
+        ? logs.filter(l => l.text.toLowerCase().includes(filter.toLowerCase()) || l.prefix.toLowerCase().includes(filter.toLowerCase()))
+        : logs;
+
+    const copyAll = async () => {
+        const txt = filtered.map(l => {
+            const t = new Date(l.ts);
+            const ts = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}:${t.getSeconds().toString().padStart(2,'0')}.${t.getMilliseconds().toString().padStart(3,'0')}`;
+            return `[${ts}][${l.prefix}] ${l.text}`;
+        }).join('\n');
+        let ok = false;
+        try { await navigator.clipboard.writeText(txt); ok = true; }
+        catch(e) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = txt;
+                ta.style.position = 'fixed';
+                ta.style.left = '-9999px';
+                ta.style.top = '0';
+                document.body.appendChild(ta);
+                ta.focus();
+                ta.select();
+                const success = document.execCommand('copy');
+                document.body.removeChild(ta);
+                ok = success;
+            } catch(e2) { ok = false; }
+        }
+        setCopyMsg(ok ? `✓ Copied ${filtered.length} lines` : `✗ Copy failed — long-press to select manually`);
+        setTimeout(() => setCopyMsg(''), 3000);
+    };
+
+    const clearAll = () => {
+        logBuffer.length = 0;
+        setLogs([]);
+        logListeners.forEach(fn => { try { fn([]); } catch(e) {} });
+    };
+
+    const runDiag = async () => {
+        diagLog('Running __jamDiag()…');
+        if ((window as any).__jamDiag) {
+            try {
+                const r = await (window as any).__jamDiag();
+                diagLog('Result:', r);
+            } catch(e) { diagLog('Diag threw:', String(e)); }
+        } else {
+            diagLog('__jamDiag not available');
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-[999998] bg-black text-white flex flex-col" style={{ fontFamily: 'ui-monospace, monospace', fontSize: '11px' }}>
+            <div className="bg-[#1a1a1a] px-2 py-1 flex flex-wrap gap-1 items-center border-b border-white/20 flex-shrink-0">
+                <span className="text-[#1db954] font-bold whitespace-nowrap">LOGS ({filtered.length}/{logs.length})</span>
+                <input 
+                    type="text" 
+                    placeholder="filter…" 
+                    value={filter} 
+                    onChange={e => setFilter(e.target.value)}
+                    className="flex-1 min-w-[80px] bg-black border border-white/30 px-2 py-1 text-white rounded text-[11px]"
+                    style={{ fontSize: '11px' }}
+                />
+                <button onClick={copyAll} className="px-2 py-1 bg-[#1db954] text-black font-bold rounded whitespace-nowrap">Copy</button>
+                <button onClick={runDiag} className="px-2 py-1 bg-purple-600 text-white font-bold rounded whitespace-nowrap">Diag</button>
+                <button onClick={clearAll} className="px-2 py-1 bg-red-600 text-white font-bold rounded whitespace-nowrap">Clear</button>
+                <button onClick={onClose} className="px-2 py-1 bg-white/20 text-white font-bold rounded whitespace-nowrap">✕</button>
+            </div>
+            <div className="flex items-center gap-3 px-2 py-1 bg-[#0a0a0a] border-b border-white/10 text-[10px] flex-shrink-0">
+                <label className="flex items-center gap-1 cursor-pointer">
+                    <input type="checkbox" checked={autoScroll} onChange={e => setAutoScroll(e.target.checked)} />
+                    Auto-scroll
+                </label>
+                {copyMsg && <span className={copyMsg.startsWith('✓') ? 'text-[#1db954]' : 'text-red-400'}>{copyMsg}</span>}
+            </div>
+            <div 
+                ref={containerRef}
+                className="flex-1 overflow-y-auto p-2"
+                style={{ WebkitOverflowScrolling: 'touch' }}
+            >
+                {filtered.length === 0 && (
+                    <div className="text-white/40 text-center py-12">
+                        No logs yet.<br/>Play a song to trigger events.
+                    </div>
+                )}
+                {filtered.map(log => {
+                    const t = new Date(log.ts);
+                    const ts = `${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}:${t.getSeconds().toString().padStart(2,'0')}`;
+                    const lower = log.text.toLowerCase();
+                    const isErr = lower.includes('✗') || lower.includes('fail') || lower.includes('error') || lower.includes('threw') || lower.includes('gave up');
+                    return (
+                        <div key={log.id} className="mb-1 leading-snug break-words whitespace-pre-wrap" style={{ wordBreak: 'break-word' }}>
+                            <span className="text-white/40 mr-1">{ts}</span>
+                            <span style={{ color: log.color, fontWeight: 'bold' }}>[{log.prefix}]</span>
+                            {' '}
+                            <span className={isErr ? 'text-red-400' : 'text-white/90'}>{log.text}</span>
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
 };
 
 // --- VERCEL PROTECTION BYPASS ENGINE ---
@@ -101,7 +252,6 @@ const getCache = async (key: string): Promise<any> => {
   } catch(e) { return null; }
 };
 
-// Reads cache ignoring the 30-min CACHE_EXPIRY_MS. Used for HDNTL token which has its own exp.
 const getCacheRaw = async (key: string): Promise<any> => {
   try {
     const db = await initDB();
@@ -134,7 +284,7 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
         resolve();
       };
     });
-  } catch(e) { hdLog('setCache failed for', key, e); }
+  } catch(e) { hdLog('setCache failed for', key, String(e)); }
 };
 
 const deleteCache = async (key: string): Promise<void> => {
@@ -154,7 +304,6 @@ const HDNTL_CACHE_KEY = 'gaana_hdntl_token';
 const HDNTL_LS_KEY = 'gaana_hdntl_token_ls';
 const HDNTL_MIN_REMAINING_MS = 60 * 60 * 1000;
 
-// HTML-style extraction: split pathname by '/', locate hdntl= segment and hls/<ver> prefix.
 const extractHdntlParts = (url: string): { hdntl: string, hostPrefix: string, exp: number } | null => {
     try {
         if (!url) return null;
@@ -162,15 +311,14 @@ const extractHdntlParts = (url: string): { hdntl: string, hostPrefix: string, ex
         if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
         const urlObj = new URL(u);
         const parts = urlObj.pathname.split('/').filter(Boolean);
-        // typical: ['hls','23','17620223','80524747','128','hdntl=exp=...','index.m3u8']
         const hlsIdx = parts.indexOf('hls');
-        if (hlsIdx === -1) { hdLog('no "hls" segment in pathname:', urlObj.pathname); return null; }
+        if (hlsIdx === -1) { hdLog('✗ no "hls" segment in pathname:', urlObj.pathname); return null; }
         const version = parts[hlsIdx + 1];
-        if (!version) { hdLog('no version after "hls"'); return null; }
+        if (!version) { hdLog('✗ no version after "hls"'); return null; }
         const hdntlSeg = parts.find(p => p.startsWith('hdntl='));
-        if (!hdntlSeg) { hdLog('no hdntl= segment in pathname:', urlObj.pathname); return null; }
+        if (!hdntlSeg) { hdLog('✗ no hdntl= segment in pathname:', urlObj.pathname.slice(0, 100)); return null; }
         const expMatch = hdntlSeg.match(/exp=(\d+)/);
-        if (!expMatch) { hdLog('hdntl segment has no exp=', hdntlSeg.slice(0, 60) + '…'); return null; }
+        if (!expMatch) { hdLog('✗ hdntl segment has no exp=', hdntlSeg.slice(0, 60)); return null; }
         const exp = parseInt(expMatch[1], 10);
         if (!exp || isNaN(exp)) return null;
         return {
@@ -179,16 +327,14 @@ const extractHdntlParts = (url: string): { hdntl: string, hostPrefix: string, ex
             exp,
         };
     } catch(e) {
-        hdLog('extractHdntlParts threw:', e);
+        hdLog('✗ extractHdntlParts threw:', String(e));
         return null;
     }
 };
 
 const getHdntlCache = async (): Promise<any> => {
-    // Try IDB first (raw read bypassing 30-min expiry)
     const fromIdb = await getCacheRaw(HDNTL_CACHE_KEY);
     if (fromIdb?.hdntl) { return fromIdb; }
-    // Fallback: localStorage
     try {
         const ls = localStorage.getItem(HDNTL_LS_KEY);
         if (ls) {
@@ -200,14 +346,14 @@ const getHdntlCache = async (): Promise<any> => {
 };
 
 const setHdntlCache = async (entry: any): Promise<void> => {
-    try { await setCache(HDNTL_CACHE_KEY, entry); } catch(e) { hdLog('IDB write failed for hdntl'); }
-    try { localStorage.setItem(HDNTL_LS_KEY, JSON.stringify(entry)); } catch(e) { hdLog('LS write failed for hdntl'); }
+    try { await setCache(HDNTL_CACHE_KEY, entry); } catch(e) { hdLog('✗ IDB write failed'); }
+    try { localStorage.setItem(HDNTL_LS_KEY, JSON.stringify(entry)); } catch(e) { hdLog('✗ LS write failed'); }
 };
 
 const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
-    hdLog('--- extract start. URL:', hlsUrl?.slice(0, 120) + (hlsUrl?.length > 120 ? '…' : ''));
+    hdLog('--- extract start. URL:', (hlsUrl || '').slice(0, 140) + ((hlsUrl?.length || 0) > 140 ? '…' : ''));
     const parts = extractHdntlParts(hlsUrl);
-    if (!parts) { hdLog('✗ extraction failed (see above)'); return null; }
+    if (!parts) { hdLog('✗ extraction failed'); return null; }
 
     const remainingMs = (parts.exp * 1000) - Date.now();
     const remainingHrs = remainingMs / (60 * 60 * 1000);
@@ -232,20 +378,19 @@ const getCachedHdntlUrl = async (albumId: string, trackId: string, quality: stri
     const cached = await getHdntlCache();
     if (!cached) { hdLog('✗ construction failed: HDNTL cache empty'); return null; }
     if (!cached.hdntl || !cached.hostPrefix || !cached.exp) {
-        hdLog('✗ construction failed: cached entry incomplete', { hasHdntl: !!cached.hdntl, hasHost: !!cached.hostPrefix, hasExp: !!cached.exp });
+        hdLog('✗ construction failed: cached entry incomplete');
         return null;
     }
     const remainingMs = (cached.exp * 1000) - Date.now();
     if (remainingMs < HDNTL_MIN_REMAINING_MS) {
-        hdLog(`✗ construction failed: token has only ${(remainingMs/60000).toFixed(1)}m left (<60m)`);
+        hdLog(`✗ construction failed: token has only ${(remainingMs/60000).toFixed(1)}m left`);
         return null;
     }
     const url = `${cached.hostPrefix}/${albumId}/${trackId}/${quality}/${cached.hdntl}/index.m3u8`;
-    hdLog(`✓ constructed URL for track ${trackId} (albumId=${albumId}, q=${quality}):`, url.slice(0, 130) + '…');
+    hdLog(`✓ constructed URL for track ${trackId}:`, url.slice(0, 140) + '…');
     return url;
 };
 
-// Bounded-depth deep search — last-resort albumId finder
 const findAlbumIdDeep = (obj: any, depth = 0): string | null => {
     if (depth > 4 || !obj || typeof obj !== 'object') return null;
     const keys = ['album_id', 'albumid', 'albumId', 'albumID'];
@@ -635,6 +780,11 @@ export default function MiniPlayer() {
   const[showSettingsMenu, setShowSettingsMenu] = useState(false);
   const[showTimerMenu, setShowTimerMenu] = useState(false);
 
+  // --- DEBUG LOG PANEL STATES ---
+  const [showDebugLogs, setShowDebugLogs] = useState(false);
+  const [logCount, setLogCount] = useState(0);
+  const lastLogCountUpdateRef = useRef(0);
+
   const [lyricsLang, setLyricsLang] = useState<'original' | 'hi' | 'en'>('original');
   const [displayLyrics, setDisplayLyrics] = useState<any[]>([]);
   const [isTransliterating, setIsTransliterating] = useState(false);
@@ -675,6 +825,21 @@ export default function MiniPlayer() {
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
   useEffect(() => { jamRoleRef.current = jamRole; }, [jamRole]);
   useEffect(() => { jamPlayBlockedRef.current = jamPlayBlocked; }, [jamPlayBlocked]);
+
+  // Subscribe to log count updates (throttled) so the badge updates without re-rendering on every log
+  useEffect(() => {
+      setLogCount(logBuffer.length);
+      const handler = (logs: LogEntry[]) => {
+          const now = Date.now();
+          if (now - lastLogCountUpdateRef.current > 300) {
+              lastLogCountUpdateRef.current = now;
+              setLogCount(logs.length);
+          }
+      };
+      logListeners.add(handler);
+      return () => { logListeners.delete(handler); };
+  }, []);
+  useEffect(() => { if (showDebugLogs) setLogCount(logBuffer.length); }, [showDebugLogs]);
 
   useEffect(() => {
       if (typeof window !== 'undefined') {
@@ -786,7 +951,7 @@ export default function MiniPlayer() {
   useEffect(() => { canvasDataRef.current = canvasData; }, [canvasData]);
   useEffect(() => { ytVideoIdRef.current = ytVideoId; }, [ytVideoId]);
 
-  // === BOOT DIAGNOSTICS ===
+  // === BOOT DIAGNOSTICS + WINDOW HELPERS ===
   useEffect(() => {
       (async () => {
           bootLog('=== BOOT DIAGNOSTICS ===');
@@ -797,10 +962,10 @@ export default function MiniPlayer() {
               await setCache(testKey, { ok: true });
               const back = await getCache(testKey);
               if (back?.ok) bootLog('✓ IDB read/write round-trip OK');
-              else bootLog('✗ IDB round-trip FAILED (write succeeded but read returned null)');
+              else bootLog('✗ IDB round-trip FAILED');
               await deleteCache(testKey);
           } catch (e) {
-              bootLog('✗ IDB FAILED:', e);
+              bootLog('✗ IDB FAILED:', String(e));
           }
           try {
               localStorage.setItem('__boot_ls_test__', '1');
@@ -808,13 +973,12 @@ export default function MiniPlayer() {
               localStorage.removeItem('__boot_ls_test__');
               if (v === '1') bootLog('✓ localStorage OK');
               else bootLog('✗ localStorage FAILED');
-          } catch (e) { bootLog('✗ localStorage FAILED:', e); }
+          } catch (e) { bootLog('✗ localStorage FAILED:', String(e)); }
 
           const existing = await getHdntlCache();
           bootLog('existing HDNTL cache:', existing ? { hasHdntl: true, exp: existing.exp, hostPrefix: existing.hostPrefix } : null);
       })();
 
-      // Window helpers for manual inspection
       (window as any).__jamDiag = async () => {
           const hdntl = await getHdntlCache();
           const hdntlLs = localStorage.getItem(HDNTL_LS_KEY);
@@ -834,9 +998,9 @@ export default function MiniPlayer() {
               hdntlFromLs: hdntlLs ? JSON.parse(hdntlLs) : null,
               hdntlRemainingHrs: hdntl ? ((hdntl.exp * 1000 - Date.now()) / 3600000).toFixed(2) : 'N/A',
               allCacheKeys: allKeys,
-              currentSong: currentTrackRef.current ? { id: currentTrackRef.current.track_id || currentTrackRef.current.id } : null,
+              currentSong: currentTrackRef.current ? { id: currentTrackRef.current.track_id || currentTrackRef.current.id, album_id: currentTrackRef.current.album_id } : null,
           };
-          console.log('%c[JAM DIAGNOSTICS]', 'background:#aa00ff;color:#fff;padding:3px 8px;border-radius:4px;font-weight:bold;font-size:14px', diag);
+          diagLog('SNAPSHOT:', JSON.stringify(diag, null, 2));
           return diag;
       };
       (window as any).__jamPurge = async () => {
@@ -846,9 +1010,10 @@ export default function MiniPlayer() {
               tx.objectStore(STORE_NAME).clear();
               await new Promise((res) => { tx.oncomplete = res; tx.onerror = res; });
               localStorage.removeItem(HDNTL_LS_KEY);
-              console.log('%c[JAM PURGE] All caches cleared', 'background:#ff0000;color:#fff;padding:3px 8px;border-radius:4px;font-weight:bold');
-          } catch(e) { console.error('purge failed', e); }
+              diagLog('All caches cleared');
+          } catch(e) { diagLog('purge failed', String(e)); }
       };
+      (window as any).__jamLogs = () => logBuffer.slice();
   }, []);
 
   // Shared info fetcher (dedup)
@@ -868,10 +1033,10 @@ export default function MiniPlayer() {
               try {
                   ifLog('API fetch →', trackId);
                   const res = await fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer" });
-                  ifLog('API response status:', res.status, 'for', trackId);
+                  ifLog('API status:', res.status, 'for', trackId);
                   if (res.ok) {
                       const data = await res.json();
-                      ifLog('API response keys:', data ? Object.keys(data) : null);
+                      ifLog('response top keys:', data ? Object.keys(data) : null);
                       if (data?.data) {
                           ifLog('data.data keys:', Object.keys(data.data).slice(0, 20));
                           ifLog('data.data.album_id =', data.data.album_id, '| albumid =', data.data.albumid, '| entity_info present =', Array.isArray(data.data.entity_info));
@@ -880,7 +1045,7 @@ export default function MiniPlayer() {
                       }
                       await setCache(`gaana_info_${trackId}`, { notFound: true });
                   }
-              } catch(e) { ifLog('API threw:', e); }
+              } catch(e) { ifLog('API threw:', String(e)); }
               return null;
           })();
 
@@ -1269,7 +1434,7 @@ export default function MiniPlayer() {
       let hlsErrorHandled = false;
       const setupAudio = async () => {
           if (!audioRef.current || !audioUrl) return;
-          sdLog('setupAudio: audioUrl =', audioUrl.slice(0, 120) + (audioUrl.length > 120 ? '…' : ''));
+          sdLog('setupAudio: audioUrl =', audioUrl.slice(0, 130) + (audioUrl.length > 130 ? '…' : ''));
           if (audioUrl.includes('.m3u8')) {
               try {
                   const Hls = await loadHlsJS();
@@ -1286,7 +1451,7 @@ export default function MiniPlayer() {
                           if (!tid) return;
                           if (hlsApiRetryAttemptedRef.current.has(tid)) return;
                           hlsApiRetryAttemptedRef.current.add(tid);
-                          sdLog('⚠ HLS FATAL error on track', tid, '— type:', data.type, 'details:', data.details, '→ falling back to stream API');
+                          sdLog('⚠ HLS FATAL on', tid, '— type:', data.type, 'details:', data.details, '→ falling back to stream API');
                           try {
                               await deleteCache(`gaana_stream_${tid}`);
                               const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
@@ -1310,7 +1475,7 @@ export default function MiniPlayer() {
                       audioRef.current.src = audioUrl;
                       if (isPlaying && !isVideoMode) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); }
                   }
-              } catch(e) { sdLog('setupAudio threw:', e); }
+              } catch(e) { sdLog('setupAudio threw:', String(e)); }
           } else {
               if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
               audioRef.current.src = audioUrl;
@@ -1481,7 +1646,7 @@ export default function MiniPlayer() {
           const nextTrack = upcomingQueue[0];
           if (!nextTrack) { pfLog('no nextTrack'); return; }
           const nextTrackId = nextTrack.track_id || nextTrack.id || nextTrack.entity_id;
-          if (!nextTrackId) { pfLog('no nextTrackId (track keys:', Object.keys(nextTrack).slice(0, 10), ')'); return; }
+          if (!nextTrackId) { pfLog('no nextTrackId, track keys:', Object.keys(nextTrack).slice(0, 10)); return; }
           const nextTrackIdStr = String(nextTrackId);
 
           pfLog(`attempt ${attempts}/${MAX_ATTEMPTS} for next track ${nextTrackIdStr}`);
@@ -1493,7 +1658,6 @@ export default function MiniPlayer() {
           }
           if (cancelled) return;
 
-          // Resolve albumId
           let albumId = getAlbumIdFromSong(nextTrack);
           let albumIdSource = 'track';
           pfLog(`albumId from track = ${albumId}`);
@@ -1501,10 +1665,9 @@ export default function MiniPlayer() {
               const info = await ensureInfoForTrack(nextTrackIdStr);
               if (cancelled) return;
               if (info) {
-                  // Use getAlbumIdFromSong — handles entity_info, deep search, etc.
                   albumId = getAlbumIdFromSong(info);
                   albumIdSource = 'infoAPI';
-                  pfLog(`albumId from info = ${albumId} (top-level keys:`, Object.keys(info).slice(0, 15), ')');
+                  pfLog(`albumId from info = ${albumId} (top keys:`, Object.keys(info).slice(0, 15), ')');
               } else {
                   pfLog(`info fetch returned null for ${nextTrackIdStr}`);
               }
@@ -1517,7 +1680,6 @@ export default function MiniPlayer() {
               return;
           }
 
-          // Need HDNTL to be ready
           const hdntlNow = await getHdntlCache();
           if (!hdntlNow?.hdntl) {
               if (attempts < MAX_ATTEMPTS) { pfLog(`HDNTL not yet cached — retry in 500ms (attempt ${attempts})`); setTimeout(tryPrefetch, 500); return; }
@@ -1553,7 +1715,7 @@ export default function MiniPlayer() {
     sdLog('currentSong:', { id: currentSong.track_id || currentSong.id, title: currentSong.track_title || currentSong.title, album_id: currentSong.album_id, hasEntityInfo: Array.isArray(currentSong.entity_info) });
 
     if (isSystemSongChangeRef.current) {
-        sdLog('system song change (from jam sync) — skipping local fetch');
+        sdLog('system song change (jam sync) — skipping local fetch');
         isSystemSongChangeRef.current = false;
         currentTrackRef.current = currentSong;
         setIsCanvasLoaded(false); setIsUiHidden(false);     
@@ -1570,7 +1732,7 @@ export default function MiniPlayer() {
     sdLog('trackId =', trackId);
 
     if (lastFetchedTrackIdRef.current === trackId && streamBaseUrlRef.current) {
-        sdLog('⏭ same track, streamBaseUrl already set — skipping (cached)');
+        sdLog('⏭ same track, streamBaseUrl already set — skipping');
         currentTrackRef.current = currentSong;
         return;
     }
@@ -1613,12 +1775,11 @@ export default function MiniPlayer() {
             const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
             sdLog('--- fetchStreamTask START for', trackIdStr, 'quality', targetQ);
 
-            // TIER 1: per-track stream cache
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             sdLog('TIER 1 getCache(gaana_stream_' + trackIdStr + ') =', streamJson ? Object.keys(streamJson) : null);
             if (streamJson?.data?.hlsUrl) {
                 sdLog('✓ TIER 1 HIT (hlsUrl) for', trackIdStr);
-                if (!isCurrent || signal.aborted) { sdLog('  but effect aborted — bailing'); return; }
+                if (!isCurrent || signal.aborted) { sdLog('  effect aborted — bailing'); return; }
                 await extractAndCacheHdntl(streamJson.data.hlsUrl);
                 if (!isCurrent || signal.aborted) return;
                 setStreamBaseUrl(streamJson.data.hlsUrl);
@@ -1632,25 +1793,20 @@ export default function MiniPlayer() {
                 setIsStreamLoading(false);
                 return;
             }
-            if (streamJson?.notFound) {
-                sdLog('✗ TIER 1 says NOTFOUND for', trackIdStr, '— still trying TIER 2/3');
-            }
+            if (streamJson?.notFound) { sdLog('✗ TIER 1 says NOTFOUND for', trackIdStr); }
 
-            // TIER 2: construct from cached HDNTL
             let albumId = getAlbumIdFromSong(currentSong);
             let albumIdSource = 'currentSong';
             sdLog('TIER 2: albumId from currentSong =', albumId);
             if (!albumId) {
-                sdLog('TIER 2: currentSong had no albumId — awaiting info fetch');
+                sdLog('TIER 2: awaiting info fetch');
                 const info = await ensureInfoForTrack(trackIdStr);
                 if (!isCurrent || signal.aborted) return;
                 if (info) {
-                    albumId = getAlbumIdFromSong(info);  // FIX: was `info.album_id || info.albumid || info.albumId`
+                    albumId = getAlbumIdFromSong(info);
                     albumIdSource = 'infoAPI';
                     sdLog('TIER 2: albumId from infoAPI =', albumId);
-                } else {
-                    sdLog('TIER 2: info fetch returned null');
-                }
+                } else { sdLog('TIER 2: info fetch returned null'); }
             }
             sdLog('TIER 2 final albumId =', albumId, '(source:', albumIdSource + ')');
 
@@ -1664,25 +1820,20 @@ export default function MiniPlayer() {
                     setStreamBaseUrl(constructedUrl);
                     setIsStreamLoading(false);
                     return;
-                } else {
-                    sdLog('✗ TIER 2 construction failed (see [HDNTL] log above)');
-                }
-            } else {
-                sdLog('✗ TIER 2 skipped: no albumId');
-            }
+                } else { sdLog('✗ TIER 2 construction failed (see [HDNTL] log)'); }
+            } else { sdLog('✗ TIER 2 skipped: no albumId'); }
 
-            // TIER 3: API
             sdLog('→ TIER 3: calling stream API for', trackIdStr);
             const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
             sdLog('TIER 3 API response status:', streamRes.status);
             if (streamRes.ok) {
                 streamJson = await streamRes.json();
-                sdLog('TIER 3 API body keys:', streamJson ? Object.keys(streamJson) : null, '| data keys:', streamJson?.data ? Object.keys(streamJson.data) : null);
+                sdLog('TIER 3 body keys:', streamJson ? Object.keys(streamJson) : null, '| data keys:', streamJson?.data ? Object.keys(streamJson.data) : null);
                 if (streamJson?.data) {
                     await setCache(`gaana_stream_${trackId}`, streamJson);
                     if (streamJson.data.hlsUrl) {
                         await extractAndCacheHdntl(streamJson.data.hlsUrl);
-                        sdLog('✓ TIER 3 saved to cache + extracted hdntl for future tracks');
+                        sdLog('✓ TIER 3 saved + extracted hdntl for future tracks');
                     }
                 } else {
                     await setCache(`gaana_stream_${trackId}`, { notFound: true });
@@ -1691,7 +1842,7 @@ export default function MiniPlayer() {
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
-        } catch (e: any) { sdLog('fetchStreamTask threw:', e); } finally {
+        } catch (e: any) { sdLog('fetchStreamTask threw:', String(e)); } finally {
             setIsStreamLoading(false);
         }
     };
@@ -2557,10 +2708,34 @@ export default function MiniPlayer() {
 
   const formatSleepTimerStr = (secs: number) => { const m = Math.floor(secs / 60); const s = secs % 60; return `${m}:${s < 10 ? '0' : ''}${s}`; };
 
-  if (!currentSong) return null;
+  if (!currentSong) {
+      return (
+          <>
+              {DEBUG_STREAM && (
+                  <button
+                      onClick={() => setShowDebugLogs(true)}
+                      style={{ position: 'fixed', top: 'max(8px, env(safe-area-inset-top))', left: '8px', zIndex: 999997, background: 'rgba(0,0,0,0.85)', color: 'white', padding: '6px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: 'bold', border: '1px solid rgba(255,255,255,0.3)', fontFamily: 'monospace', boxShadow: '0 2px 8px rgba(0,0,0,0.5)', cursor: 'pointer', minHeight: '32px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  >
+                      🐛 {logCount}
+                  </button>
+              )}
+              {showDebugLogs && <DebugLogPanel onClose={() => setShowDebugLogs(false)} />}
+          </>
+      );
+  }
 
   return (
     <>
+      {DEBUG_STREAM && (
+          <button
+              onClick={() => setShowDebugLogs(true)}
+              style={{ position: 'fixed', top: 'max(8px, env(safe-area-inset-top))', left: '8px', zIndex: 999997, background: 'rgba(0,0,0,0.85)', color: 'white', padding: '6px 10px', borderRadius: '20px', fontSize: '11px', fontWeight: 'bold', border: '1px solid rgba(255,255,255,0.3)', fontFamily: 'monospace', boxShadow: '0 2px 8px rgba(0,0,0,0.5)', cursor: 'pointer', minHeight: '32px', display: 'flex', alignItems: 'center', gap: '4px' }}
+          >
+              🐛 {logCount}
+          </button>
+      )}
+      {showDebugLogs && <DebugLogPanel onClose={() => setShowDebugLogs(false)} />}
+
       <style dangerouslySetInnerHTML={{__html: `
         * { -webkit-tap-highlight-color: transparent; }
         .player-root { user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; touch-action: pan-y; }
@@ -3275,4 +3450,4 @@ export default function MiniPlayer() {
       </div>
     </>
   );
-  }
+                             }
