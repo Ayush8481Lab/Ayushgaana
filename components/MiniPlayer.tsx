@@ -13,6 +13,30 @@ import {
   Users, LogOut, Copy, Radio, Activity, MessageCircle, Send, MessageCircleOff, Shield, Crown, AlertTriangle, UserMinus, Languages
 } from "lucide-react";
 
+// ==================== DEBUG TOGGLES ====================
+const DEBUG_STREAM = true;      // master switch for all stream/hdntl/prefetch logs
+const DEBUG_INFO   = true;      // info API response shape dumps
+
+const sdLog = (...args: any[]) => {
+    if (!DEBUG_STREAM) return;
+    console.log('%c[STREAM]', 'background:#1db954;color:#000;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+};
+const hdLog = (...args: any[]) => {
+    if (!DEBUG_STREAM) return;
+    console.log('%c[HDNTL]', 'background:#ff8800;color:#000;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+};
+const pfLog = (...args: any[]) => {
+    if (!DEBUG_STREAM) return;
+    console.log('%c[PREFETCH]', 'background:#3388ff;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+};
+const ifLog = (...args: any[]) => {
+    if (!DEBUG_INFO) return;
+    console.log('%c[INFO]', 'background:#aa44aa;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+};
+const bootLog = (...args: any[]) => {
+    console.log('%c[BOOT]', 'background:#888;color:#fff;padding:1px 5px;border-radius:3px;font-weight:bold', ...args);
+};
+
 // --- VERCEL PROTECTION BYPASS ENGINE ---
 const AUTOMATION_SECRET = "pR3nSUsTI9HQxb2RbdasB5mjKqUoSP8m";
 const bypassHeaders = { "x-vercel-protection-bypass": AUTOMATION_SECRET };
@@ -45,20 +69,20 @@ const fetchJina = async (targetUrl: string, options: any = {}) => {
   return result;
 };
 
-// --- 30-MINUTE INDEXEDDB CACHE ENGINE ---
+// --- CACHE ENGINE ---
 const DB_NAME = "GrooveCacheDB";
 const STORE_NAME = "caches";
 const CACHE_EXPIRY_MS = 30 * 60 * 1000;
 
 const initDB = (): Promise<IDBDatabase> => new Promise((resolve, reject) => {
-  if (typeof window === 'undefined' || !window.indexedDB) return reject();
+  if (typeof window === 'undefined' || !window.indexedDB) return reject(new Error('no-indexedDB'));
   const req = indexedDB.open(DB_NAME, 1);
   req.onupgradeneeded = (e: any) => {
     const db = e.target.result;
     if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME, { keyPath: 'key' });
   };
   req.onsuccess = () => resolve(req.result);
-  req.onerror = () => reject();
+  req.onerror = () => reject(req.error || new Error('idb-open-error'));
 });
 
 const getCache = async (key: string): Promise<any> => {
@@ -72,6 +96,19 @@ const getCache = async (key: string): Promise<any> => {
         if (res && Date.now() - res.timestamp < CACHE_EXPIRY_MS) resolve(res.data);
         else resolve(null);
       };
+      req.onerror = () => resolve(null);
+    });
+  } catch(e) { return null; }
+};
+
+// Reads cache ignoring the 30-min CACHE_EXPIRY_MS. Used for HDNTL token which has its own exp.
+const getCacheRaw = async (key: string): Promise<any> => {
+  try {
+    const db = await initDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const req = tx.objectStore(STORE_NAME).get(key);
+      req.onsuccess = () => resolve(req.result?.data || null);
       req.onerror = () => resolve(null);
     });
   } catch(e) { return null; }
@@ -97,7 +134,7 @@ const setCache = async (key: string, data: any, isAudio = false): Promise<void> 
         resolve();
       };
     });
-  } catch(e) {}
+  } catch(e) { hdLog('setCache failed for', key, e); }
 };
 
 const deleteCache = async (key: string): Promise<void> => {
@@ -112,110 +149,146 @@ const deleteCache = async (key: string): Promise<void> => {
   } catch(e) {}
 };
 
-// --- HDNTL CACHE ENGINE (HLS CDN Token Reuse) ---
-// Reads the token directly from IndexedDB ignoring CACHE_EXPIRY_MS — honors only token's own `exp`.
+// --- HDNTL (HLS CDN Token) — dual-write to IDB + localStorage ---
 const HDNTL_CACHE_KEY = 'gaana_hdntl_token';
-const HDNTL_MIN_REMAINING_MS = 60 * 60 * 1000; // 1 hour
+const HDNTL_LS_KEY = 'gaana_hdntl_token_ls';
+const HDNTL_MIN_REMAINING_MS = 60 * 60 * 1000;
 
-const getHdntlCache = (): Promise<any> => new Promise(async (resolve) => {
-  try {
-    const db = await initDB();
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const req = tx.objectStore(STORE_NAME).get(HDNTL_CACHE_KEY);
-    req.onsuccess = () => {
-      const res = req.result;
-      if (res && res.data) resolve(res.data);
-      else resolve(null);
-    };
-    req.onerror = () => resolve(null);
-  } catch(e) { resolve(null); }
-});
-
-// HTML-parser-equivalent extraction:
-//   Input : https://vodhlsgaana-ebw.akamaized.net/hls/23/17620223/80524747/128/hdntl=exp=…~acl=%2f*~data=hdntl~hmac=…/index.m3u8
-//   Output: hdntl=exp=…~acl=%2f*~data=hdntl~hmac=…
-//           hostPrefix = https://vodhlsgaana-ebw.akamaized.net/hls/23
-const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
-  try {
-    if (!hlsUrl) return null;
-    // Handle protocol-less URLs like the exact case that was silently failing
-    let urlToParse = hlsUrl.trim();
-    if (!urlToParse.startsWith('http://') && !urlToParse.startsWith('https://')) {
-      urlToParse = 'https://' + urlToParse;
+// HTML-style extraction: split pathname by '/', locate hdntl= segment and hls/<ver> prefix.
+const extractHdntlParts = (url: string): { hdntl: string, hostPrefix: string, exp: number } | null => {
+    try {
+        if (!url) return null;
+        let u = url.trim();
+        if (!/^https?:\/\//i.test(u)) u = 'https://' + u;
+        const urlObj = new URL(u);
+        const parts = urlObj.pathname.split('/').filter(Boolean);
+        // typical: ['hls','23','17620223','80524747','128','hdntl=exp=...','index.m3u8']
+        const hlsIdx = parts.indexOf('hls');
+        if (hlsIdx === -1) { hdLog('no "hls" segment in pathname:', urlObj.pathname); return null; }
+        const version = parts[hlsIdx + 1];
+        if (!version) { hdLog('no version after "hls"'); return null; }
+        const hdntlSeg = parts.find(p => p.startsWith('hdntl='));
+        if (!hdntlSeg) { hdLog('no hdntl= segment in pathname:', urlObj.pathname); return null; }
+        const expMatch = hdntlSeg.match(/exp=(\d+)/);
+        if (!expMatch) { hdLog('hdntl segment has no exp=', hdntlSeg.slice(0, 60) + '…'); return null; }
+        const exp = parseInt(expMatch[1], 10);
+        if (!exp || isNaN(exp)) return null;
+        return {
+            hdntl: hdntlSeg,
+            hostPrefix: `${urlObj.protocol}//${urlObj.host}/hls/${version}`,
+            exp,
+        };
+    } catch(e) {
+        hdLog('extractHdntlParts threw:', e);
+        return null;
     }
+};
 
-    const hdntlMatch = urlToParse.match(/(\/hdntl=[^\/]+)\//);
-    if (!hdntlMatch) { console.warn('[HDNTL] ✗ no token segment in URL:', urlToParse); return null; }
-    const hdntlParam = hdntlMatch[1].substring(1);
-
-    const expMatch = hdntlParam.match(/exp=(\d+)/);
-    if (!expMatch) { console.warn('[HDNTL] ✗ no exp field in token'); return null; }
-    const exp = parseInt(expMatch[1], 10);
-    if (!exp || isNaN(exp)) return null;
-
-    const urlObj = new URL(urlToParse);
-    const hostPrefixMatch = urlObj.pathname.match(/^(\/hls\/[^\/]+)\//);
-    if (!hostPrefixMatch) { console.warn('[HDNTL] ✗ could not derive hostPrefix from', urlObj.pathname); return null; }
-    const hostPrefix = `${urlObj.protocol}//${urlObj.host}${hostPrefixMatch[1]}`;
-
-    const cacheEntry = { hdntl: hdntlParam, hostPrefix, exp, cachedAt: Date.now() };
-    const remainingHrs = ((exp * 1000) - Date.now()) / (60 * 60 * 1000);
-    console.log(`[HDNTL] ✓ Token extracted. Valid for ${remainingHrs.toFixed(2)}h. hostPrefix=${hostPrefix}`);
-
-    if ((exp * 1000) - Date.now() > HDNTL_MIN_REMAINING_MS) {
-      await setCache(HDNTL_CACHE_KEY, cacheEntry);
-      console.log('[HDNTL] ✓ Token cached for reuse across all tracks');
-    } else {
-      console.warn('[HDNTL] ✗ Token <1h to expiry, not cached');
-    }
-    return cacheEntry;
-  } catch (e) {
-    console.warn('[HDNTL] ✗ extractAndCacheHdntl threw:', e);
+const getHdntlCache = async (): Promise<any> => {
+    // Try IDB first (raw read bypassing 30-min expiry)
+    const fromIdb = await getCacheRaw(HDNTL_CACHE_KEY);
+    if (fromIdb?.hdntl) { return fromIdb; }
+    // Fallback: localStorage
+    try {
+        const ls = localStorage.getItem(HDNTL_LS_KEY);
+        if (ls) {
+            const parsed = JSON.parse(ls);
+            if (parsed?.hdntl) { return parsed; }
+        }
+    } catch(e) {}
     return null;
-  }
+};
+
+const setHdntlCache = async (entry: any): Promise<void> => {
+    try { await setCache(HDNTL_CACHE_KEY, entry); } catch(e) { hdLog('IDB write failed for hdntl'); }
+    try { localStorage.setItem(HDNTL_LS_KEY, JSON.stringify(entry)); } catch(e) { hdLog('LS write failed for hdntl'); }
+};
+
+const extractAndCacheHdntl = async (hlsUrl: string): Promise<any | null> => {
+    hdLog('--- extract start. URL:', hlsUrl?.slice(0, 120) + (hlsUrl?.length > 120 ? '…' : ''));
+    const parts = extractHdntlParts(hlsUrl);
+    if (!parts) { hdLog('✗ extraction failed (see above)'); return null; }
+
+    const remainingMs = (parts.exp * 1000) - Date.now();
+    const remainingHrs = remainingMs / (60 * 60 * 1000);
+    hdLog(`✓ extracted. exp=${parts.exp} (in ${remainingHrs.toFixed(2)}h). hostPrefix=${parts.hostPrefix}`);
+    hdLog('token prefix:', parts.hdntl.slice(0, 80) + '…');
+
+    const entry = { hdntl: parts.hdntl, hostPrefix: parts.hostPrefix, exp: parts.exp, cachedAt: Date.now() };
+    if (remainingMs > HDNTL_MIN_REMAINING_MS) {
+        await setHdntlCache(entry);
+        hdLog('✓ token persisted (IDB + LS)');
+    } else {
+        hdLog(`✗ token <1h to expiry (${(remainingMs/60000).toFixed(1)}m), not persisting`);
+    }
+    return entry;
 };
 
 const getCachedHdntlUrl = async (albumId: string, trackId: string, quality: string): Promise<string | null> => {
-  try {
-    if (!albumId || !trackId) return null;
+    if (!albumId || !trackId) {
+        hdLog('✗ construction skipped. albumId=', albumId, 'trackId=', trackId);
+        return null;
+    }
     const cached = await getHdntlCache();
-    if (!cached?.hdntl || !cached?.hostPrefix || !cached?.exp) return null;
+    if (!cached) { hdLog('✗ construction failed: HDNTL cache empty'); return null; }
+    if (!cached.hdntl || !cached.hostPrefix || !cached.exp) {
+        hdLog('✗ construction failed: cached entry incomplete', { hasHdntl: !!cached.hdntl, hasHost: !!cached.hostPrefix, hasExp: !!cached.exp });
+        return null;
+    }
     const remainingMs = (cached.exp * 1000) - Date.now();
     if (remainingMs < HDNTL_MIN_REMAINING_MS) {
-      console.warn(`[HDNTL] ✗ Token expires in ${(remainingMs/60000).toFixed(1)}m <60m, ignoring`);
-      return null;
+        hdLog(`✗ construction failed: token has only ${(remainingMs/60000).toFixed(1)}m left (<60m)`);
+        return null;
     }
-    return `${cached.hostPrefix}/${albumId}/${trackId}/${quality}/${cached.hdntl}/index.m3u8`;
-  } catch (e) {
+    const url = `${cached.hostPrefix}/${albumId}/${trackId}/${quality}/${cached.hdntl}/index.m3u8`;
+    hdLog(`✓ constructed URL for track ${trackId} (albumId=${albumId}, q=${quality}):`, url.slice(0, 130) + '…');
+    return url;
+};
+
+// Bounded-depth deep search — last-resort albumId finder
+const findAlbumIdDeep = (obj: any, depth = 0): string | null => {
+    if (depth > 4 || !obj || typeof obj !== 'object') return null;
+    const keys = ['album_id', 'albumid', 'albumId', 'albumID'];
+    for (const k of keys) {
+        const v = obj[k];
+        if (v !== undefined && v !== null && v !== '' && (typeof v === 'string' || typeof v === 'number')) return String(v);
+    }
+    if (Array.isArray(obj.entity_info)) {
+        const a = obj.entity_info.find((e: any) => e && (e.key === 'album' || e.key === 'albums'));
+        const v = a?.value?.[0];
+        if (v?.id !== undefined && v?.id !== null && v?.id !== '') return String(v.id);
+    }
+    try {
+        for (const k of Object.keys(obj)) {
+            const r = findAlbumIdDeep(obj[k], depth + 1);
+            if (r) return r;
+        }
+    } catch(e) {}
     return null;
-  }
 };
 
 const getAlbumIdFromSong = (song: any): string | null => {
-  if (!song) return null;
-  const candidates: any[] = [
-    song.album_id, song.albumid, song.albumId,
-    song.album?.id, song.album?.album_id,
-    song.meta?.album_id,
-  ];
-  // Numeric string fallback for cases where song.album is just the id string
-  if (typeof song.album === 'string' && /^\d+$/.test(song.album)) candidates.push(song.album);
-  for (const c of candidates) {
-    if (c !== undefined && c !== null && c !== '' && (typeof c === 'string' || typeof c === 'number')) {
-      return String(c);
+    if (!song) return null;
+    const candidates: any[] = [
+        song.album_id, song.albumid, song.albumId, song.albumID,
+        song.album?.id, song.album?.album_id,
+        song.meta?.album_id,
+    ];
+    if (typeof song.album === 'string' && /^\d+$/.test(song.album)) candidates.push(song.album);
+    for (const c of candidates) {
+        if (c !== undefined && c !== null && c !== '' && (typeof c === 'string' || typeof c === 'number')) {
+            return String(c);
+        }
     }
-  }
-  if (Array.isArray(song.entity_info)) {
-    const albumInfo = song.entity_info.find((e: any) => e && (e.key === 'album' || e.key === 'albums'));
-    if (albumInfo && Array.isArray(albumInfo.value) && albumInfo.value[0]) {
-      const a = albumInfo.value[0];
-      if (a.id !== undefined && a.id !== null && a.id !== '') return String(a.id);
+    if (Array.isArray(song.entity_info)) {
+        const albumInfo = song.entity_info.find((e: any) => e && (e.key === 'album' || e.key === 'albums'));
+        const a = albumInfo?.value?.[0];
+        if (a?.id !== undefined && a?.id !== null && a?.id !== '') return String(a.id);
     }
-  }
-  return null;
+    return findAlbumIdDeep(song);
 };
 
-// --- FLAWLESS LYRICS TRANSLITERATION ENGINE ---
+// --- LYRICS TRANSLITERATION ---
 const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'original') => {
     if (!originalLyrics || !originalLyrics.length || lang === 'original') return originalLyrics;
     const wordMap = new Map<string, string>();
@@ -223,9 +296,7 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
     originalLyrics.forEach(line => {
         if (!line.words) return;
         const matches = line.words.match(tokenRegex);
-        if (matches) {
-            matches.forEach((word: string) => { if (!wordMap.has(word)) wordMap.set(word, word); });
-        }
+        if (matches) { matches.forEach((word: string) => { if (!wordMap.has(word)) wordMap.set(word, word); }); }
     });
     const uniqueWords = Array.from(wordMap.keys());
     const englishWords = uniqueWords.filter(w => /^[a-zA-Z'-]+$/.test(w));
@@ -242,9 +313,7 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
                         const queryText = encodeURIComponent(" " + word);
                         const res = await fetch(`https://inputtools.google.com/request?text=${queryText}&itc=hi-t-i0-und&num=1&cp=0&cs=1&ie=utf-8&oe=utf-8&app=demopage`);
                         const data = await res.json();
-                        if (data[0] === 'SUCCESS' && data[1] && data[1][0] && data[1][0][1]) {
-                            wordMap.set(word, data[1][0][1][0].trim());
-                        }
+                        if (data[0] === 'SUCCESS' && data[1] && data[1][0] && data[1][0][1]) { wordMap.set(word, data[1][0][1][0].trim()); }
                     } catch(e) {}
                 });
                 await Promise.all(promises);
@@ -282,7 +351,7 @@ const transliterateLyrics = async (originalLyrics: any[], lang: 'hi' | 'en' | 'o
     });
 };
 
-// --- PRO AUTH ENGINE ---
+// --- AUTH ---
 const AUTH_STORAGE_KEY = 'spotify_app_auth';
 let ongoingAuthPromise: Promise<any> | null = null;
 
@@ -699,9 +768,6 @@ export default function MiniPlayer() {
   const isLyricsEnabledRef = useRef(true);
 
   const hlsApiRetryAttemptedRef = useRef<Set<string>>(new Set());
-
-  // Shared info-fetch promise cache — deduplicates concurrent calls for the same track between
-  // fetchStreamTask (needs albumId for TIER 2) and fetchInfoTask (needs full details)
   const infoFetchPromisesRef = useRef<Map<string, Promise<any>>>(new Map());
 
   const songDetailsRef = useRef(songDetails);
@@ -720,33 +786,104 @@ export default function MiniPlayer() {
   useEffect(() => { canvasDataRef.current = canvasData; }, [canvasData]);
   useEffect(() => { ytVideoIdRef.current = ytVideoId; }, [ytVideoId]);
 
-  // Shared, deduplicated info fetcher
+  // === BOOT DIAGNOSTICS ===
+  useEffect(() => {
+      (async () => {
+          bootLog('=== BOOT DIAGNOSTICS ===');
+          try {
+              const db = await initDB();
+              bootLog('✓ IndexedDB opened', db.name, 'v' + db.version);
+              const testKey = '__boot_test__';
+              await setCache(testKey, { ok: true });
+              const back = await getCache(testKey);
+              if (back?.ok) bootLog('✓ IDB read/write round-trip OK');
+              else bootLog('✗ IDB round-trip FAILED (write succeeded but read returned null)');
+              await deleteCache(testKey);
+          } catch (e) {
+              bootLog('✗ IDB FAILED:', e);
+          }
+          try {
+              localStorage.setItem('__boot_ls_test__', '1');
+              const v = localStorage.getItem('__boot_ls_test__');
+              localStorage.removeItem('__boot_ls_test__');
+              if (v === '1') bootLog('✓ localStorage OK');
+              else bootLog('✗ localStorage FAILED');
+          } catch (e) { bootLog('✗ localStorage FAILED:', e); }
+
+          const existing = await getHdntlCache();
+          bootLog('existing HDNTL cache:', existing ? { hasHdntl: true, exp: existing.exp, hostPrefix: existing.hostPrefix } : null);
+      })();
+
+      // Window helpers for manual inspection
+      (window as any).__jamDiag = async () => {
+          const hdntl = await getHdntlCache();
+          const hdntlLs = localStorage.getItem(HDNTL_LS_KEY);
+          let allKeys: string[] = [];
+          try {
+              const db = await initDB();
+              const tx = db.transaction(STORE_NAME, 'readonly');
+              const store = tx.objectStore(STORE_NAME);
+              const req = store.getAllKeys();
+              allKeys = await new Promise((resolve) => {
+                  req.onsuccess = () => resolve(req.result as string[]);
+                  req.onerror = () => resolve([]);
+              });
+          } catch(e) {}
+          const diag = {
+              hdntlFromIdb: hdntl,
+              hdntlFromLs: hdntlLs ? JSON.parse(hdntlLs) : null,
+              hdntlRemainingHrs: hdntl ? ((hdntl.exp * 1000 - Date.now()) / 3600000).toFixed(2) : 'N/A',
+              allCacheKeys: allKeys,
+              currentSong: currentTrackRef.current ? { id: currentTrackRef.current.track_id || currentTrackRef.current.id } : null,
+          };
+          console.log('%c[JAM DIAGNOSTICS]', 'background:#aa00ff;color:#fff;padding:3px 8px;border-radius:4px;font-weight:bold;font-size:14px', diag);
+          return diag;
+      };
+      (window as any).__jamPurge = async () => {
+          try {
+              const db = await initDB();
+              const tx = db.transaction(STORE_NAME, 'readwrite');
+              tx.objectStore(STORE_NAME).clear();
+              await new Promise((res) => { tx.oncomplete = res; tx.onerror = res; });
+              localStorage.removeItem(HDNTL_LS_KEY);
+              console.log('%c[JAM PURGE] All caches cleared', 'background:#ff0000;color:#fff;padding:3px 8px;border-radius:4px;font-weight:bold');
+          } catch(e) { console.error('purge failed', e); }
+      };
+  }, []);
+
+  // Shared info fetcher (dedup)
   const ensureInfoForTrack = useCallback(async (trackId: string): Promise<any> => {
       if (!trackId) return null;
       try {
           const cached = await getCache(`gaana_info_${trackId}`);
-          if (cached?.data) return cached.data;
-          if (cached?.notFound) return null;
-          
+          if (cached?.data) { ifLog('cache HIT for', trackId); return cached.data; }
+          if (cached?.notFound) { ifLog('cache NOTFOUND for', trackId); return null; }
+
           if (infoFetchPromisesRef.current.has(trackId)) {
+              ifLog('DEDUP: reusing in-flight fetch for', trackId);
               return infoFetchPromisesRef.current.get(trackId);
           }
-          
+
           const promise = (async () => {
               try {
+                  ifLog('API fetch →', trackId);
                   const res = await fetchProtected(`https://gaanaayush.wonder945177.workers.dev/api/superserch/track/info?track_id=${trackId}`, { referrerPolicy: "no-referrer" });
+                  ifLog('API response status:', res.status, 'for', trackId);
                   if (res.ok) {
                       const data = await res.json();
+                      ifLog('API response keys:', data ? Object.keys(data) : null);
                       if (data?.data) {
+                          ifLog('data.data keys:', Object.keys(data.data).slice(0, 20));
+                          ifLog('data.data.album_id =', data.data.album_id, '| albumid =', data.data.albumid, '| entity_info present =', Array.isArray(data.data.entity_info));
                           await setCache(`gaana_info_${trackId}`, data);
                           return data.data;
                       }
                       await setCache(`gaana_info_${trackId}`, { notFound: true });
                   }
-              } catch(e) {}
+              } catch(e) { ifLog('API threw:', e); }
               return null;
           })();
-          
+
           infoFetchPromisesRef.current.set(trackId, promise);
           try { return await promise; } finally { infoFetchPromisesRef.current.delete(trackId); }
       } catch(e) {
@@ -1132,6 +1269,7 @@ export default function MiniPlayer() {
       let hlsErrorHandled = false;
       const setupAudio = async () => {
           if (!audioRef.current || !audioUrl) return;
+          sdLog('setupAudio: audioUrl =', audioUrl.slice(0, 120) + (audioUrl.length > 120 ? '…' : ''));
           if (audioUrl.includes('.m3u8')) {
               try {
                   const Hls = await loadHlsJS();
@@ -1148,13 +1286,14 @@ export default function MiniPlayer() {
                           if (!tid) return;
                           if (hlsApiRetryAttemptedRef.current.has(tid)) return;
                           hlsApiRetryAttemptedRef.current.add(tid);
+                          sdLog('⚠ HLS FATAL error on track', tid, '— type:', data.type, 'details:', data.details, '→ falling back to stream API');
                           try {
-                              console.warn('[HLS] Fatal error on track', tid, 'type:', data.type, 'details:', data.details, '— falling back to stream API');
                               await deleteCache(`gaana_stream_${tid}`);
                               const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
                               if (streamRes.ok && isCurrent) {
                                   const streamJson = await streamRes.json();
                                   if (streamJson?.data?.hlsUrl) {
+                                      sdLog('HLS-fallback: got API stream, recaching');
                                       await setCache(`gaana_stream_${tid}`, streamJson);
                                       await extractAndCacheHdntl(streamJson.data.hlsUrl);
                                       restoreTimeRef.current = audioRef.current?.currentTime || 0;
@@ -1171,7 +1310,7 @@ export default function MiniPlayer() {
                       audioRef.current.src = audioUrl;
                       if (isPlaying && !isVideoMode) { audioRef.current.play().catch(()=>setJamPlayBlocked(true)); }
                   }
-              } catch(e) {}
+              } catch(e) { sdLog('setupAudio threw:', e); }
           } else {
               if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
               audioRef.current.src = audioUrl;
@@ -1318,7 +1457,7 @@ export default function MiniPlayer() {
     return null;
   };
 
-  // --- QUALITY CHANGE ENGINE (supports old .mp4.master.m3u8 AND new /{q}/hdntl=... format) ---
+  // --- QUALITY CHANGE ---
   useEffect(() => {
     if (streamBaseUrl) {
         const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
@@ -1328,10 +1467,7 @@ export default function MiniPlayer() {
     }
   },[streamBaseUrl, selectedQuality]);
 
-  // --- PRELOAD NEXT TRACK — retries until HDNTL is cached ---
-  // The prefetch fires on song change but HDNTL might still be empty (race with fetchStreamTask).
-  // It retries every 500ms up to ~20 attempts (~10s) until the token is available, then caches the
-  // constructed URL so the next song is a pure cache hit.
+  // --- PREFETCH NEXT TRACK ---
   useEffect(() => {
       if (!upcomingQueue || upcomingQueue.length === 0) return;
       let cancelled = false;
@@ -1341,43 +1477,54 @@ export default function MiniPlayer() {
       const tryPrefetch = async () => {
           if (cancelled) return;
           attempts++;
-          
+
           const nextTrack = upcomingQueue[0];
-          if (!nextTrack) return;
+          if (!nextTrack) { pfLog('no nextTrack'); return; }
           const nextTrackId = nextTrack.track_id || nextTrack.id || nextTrack.entity_id;
-          if (!nextTrackId) return;
+          if (!nextTrackId) { pfLog('no nextTrackId (track keys:', Object.keys(nextTrack).slice(0, 10), ')'); return; }
           const nextTrackIdStr = String(nextTrackId);
 
-          // Already cached? Done.
+          pfLog(`attempt ${attempts}/${MAX_ATTEMPTS} for next track ${nextTrackIdStr}`);
+
           const streamCached = await getCache(`gaana_stream_${nextTrackIdStr}`);
           if (streamCached?.data?.hlsUrl || streamCached?.data?.url) {
-              console.log(`[Prefetch] ✓ Next track ${nextTrackIdStr} already cached`);
+              pfLog(`✓ track ${nextTrackIdStr} ALREADY cached in gaana_stream_`);
               return;
           }
           if (cancelled) return;
 
-          // Resolve albumId — first from track object, then from info cache / API
+          // Resolve albumId
           let albumId = getAlbumIdFromSong(nextTrack);
+          let albumIdSource = 'track';
+          pfLog(`albumId from track = ${albumId}`);
           if (!albumId) {
               const info = await ensureInfoForTrack(nextTrackIdStr);
               if (cancelled) return;
-              if (info) albumId = info.album_id || info.albumid || info.albumId || null;
+              if (info) {
+                  // Use getAlbumIdFromSong — handles entity_info, deep search, etc.
+                  albumId = getAlbumIdFromSong(info);
+                  albumIdSource = 'infoAPI';
+                  pfLog(`albumId from info = ${albumId} (top-level keys:`, Object.keys(info).slice(0, 15), ')');
+              } else {
+                  pfLog(`info fetch returned null for ${nextTrackIdStr}`);
+              }
           }
           if (cancelled) return;
 
           if (!albumId) {
-              if (attempts < MAX_ATTEMPTS) { setTimeout(tryPrefetch, 500); }
-              else { console.warn(`[Prefetch] ✗ Gave up after ${MAX_ATTEMPTS} attempts: no albumId for ${nextTrackIdStr}`); }
+              if (attempts < MAX_ATTEMPTS) { pfLog(`no albumId yet — retry in 500ms (${attempts}/${MAX_ATTEMPTS})`); setTimeout(tryPrefetch, 500); }
+              else pfLog(`✗ GAVE UP: no albumId after ${MAX_ATTEMPTS} attempts for ${nextTrackIdStr}`);
               return;
           }
 
-          // Wait for HDNTL to be populated by song 1's fetchStreamTask
+          // Need HDNTL to be ready
           const hdntlNow = await getHdntlCache();
           if (!hdntlNow?.hdntl) {
-              if (attempts < MAX_ATTEMPTS) { setTimeout(tryPrefetch, 500); return; }
-              console.warn(`[Prefetch] ✗ Gave up after ${MAX_ATTEMPTS} attempts: HDNTL never populated`);
+              if (attempts < MAX_ATTEMPTS) { pfLog(`HDNTL not yet cached — retry in 500ms (attempt ${attempts})`); setTimeout(tryPrefetch, 500); return; }
+              pfLog(`✗ GAVE UP: HDNTL never got cached after ${MAX_ATTEMPTS} attempts`);
               return;
           }
+          pfLog(`✓ HDNTL ready. exp in ${((hdntlNow.exp * 1000 - Date.now())/3600000).toFixed(2)}h`);
 
           const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
           const constructedUrl = await getCachedHdntlUrl(String(albumId), nextTrackIdStr, targetQ);
@@ -1385,11 +1532,12 @@ export default function MiniPlayer() {
 
           if (constructedUrl) {
               await setCache(`gaana_stream_${nextTrackIdStr}`, { data: { hlsUrl: constructedUrl } });
-              console.log(`[Prefetch] ✓ Cached constructed stream URL for next track ${nextTrackIdStr} (albumId=${albumId})`);
+              pfLog(`✓✓ CACHED constructed stream URL for ${nextTrackIdStr} (albumId=${albumId}, source=${albumIdSource})`);
           } else if (attempts < MAX_ATTEMPTS) {
+              pfLog(`construction returned null — retry in 500ms`);
               setTimeout(tryPrefetch, 500);
           } else {
-              console.warn(`[Prefetch] ✗ Gave up after ${MAX_ATTEMPTS} attempts for ${nextTrackIdStr}`);
+              pfLog(`✗ GAVE UP after ${MAX_ATTEMPTS} attempts (construction null)`);
           }
       };
 
@@ -1397,11 +1545,15 @@ export default function MiniPlayer() {
       return () => { cancelled = true; };
   }, [upcomingQueue, selectedQuality, ensureInfoForTrack]);
 
+  // --- MAIN SONG EFFECT ---
   useEffect(() => {
     if (!currentSong) return;
     songStartTrackingRef.current = Date.now();
-    
+    sdLog('=== SONG EFFECT START ===');
+    sdLog('currentSong:', { id: currentSong.track_id || currentSong.id, title: currentSong.track_title || currentSong.title, album_id: currentSong.album_id, hasEntityInfo: Array.isArray(currentSong.entity_info) });
+
     if (isSystemSongChangeRef.current) {
+        sdLog('system song change (from jam sync) — skipping local fetch');
         isSystemSongChangeRef.current = false;
         currentTrackRef.current = currentSong;
         setIsCanvasLoaded(false); setIsUiHidden(false);     
@@ -1415,10 +1567,10 @@ export default function MiniPlayer() {
 
     let isCurrent = true;
     const trackId = currentSong.track_id || currentSong.id || currentSong.entity_id;
-    
-    // FIX: only skip if stream has actually been resolved. Old check skipped on React 18 strict-mode
-    // double-invoke (first effect aborts → second effect sees same trackId → returns → nothing runs).
+    sdLog('trackId =', trackId);
+
     if (lastFetchedTrackIdRef.current === trackId && streamBaseUrlRef.current) {
+        sdLog('⏭ same track, streamBaseUrl already set — skipping (cached)');
         currentTrackRef.current = currentSong;
         return;
     }
@@ -1454,18 +1606,19 @@ export default function MiniPlayer() {
 
     let skipSpotifyLyrics = false;
 
-    // --- STREAM TASK (HDNTL-aware, 3-tier resolution) ---
     const fetchStreamTask = async () => {
         setIsStreamLoading(true);
         try {
             const trackIdStr = String(trackId);
             const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
+            sdLog('--- fetchStreamTask START for', trackIdStr, 'quality', targetQ);
 
-            // TIER 1 — per-track stream cache (fastest)
+            // TIER 1: per-track stream cache
             let streamJson = await getCache(`gaana_stream_${trackId}`);
+            sdLog('TIER 1 getCache(gaana_stream_' + trackIdStr + ') =', streamJson ? Object.keys(streamJson) : null);
             if (streamJson?.data?.hlsUrl) {
-                console.log('[Stream] TIER 1 ✓ per-track stream cache hit for', trackIdStr);
-                if (!isCurrent || signal.aborted) return;
+                sdLog('✓ TIER 1 HIT (hlsUrl) for', trackIdStr);
+                if (!isCurrent || signal.aborted) { sdLog('  but effect aborted — bailing'); return; }
                 await extractAndCacheHdntl(streamJson.data.hlsUrl);
                 if (!isCurrent || signal.aborted) return;
                 setStreamBaseUrl(streamJson.data.hlsUrl);
@@ -1473,33 +1626,38 @@ export default function MiniPlayer() {
                 return;
             }
             if (streamJson?.data?.url) {
-                console.log('[Stream] TIER 1 ✓ per-track direct-url cache hit for', trackIdStr);
+                sdLog('✓ TIER 1 HIT (direct url) for', trackIdStr);
                 if (!isCurrent || signal.aborted) return;
                 setAudioUrl(streamJson.data.url);
                 setIsStreamLoading(false);
                 return;
             }
             if (streamJson?.notFound) {
-                console.log('[Stream] TIER 1 ✗ known not-found for', trackIdStr);
-                setIsStreamLoading(false);
-                return;
+                sdLog('✗ TIER 1 says NOTFOUND for', trackIdStr, '— still trying TIER 2/3');
             }
 
-            // TIER 2 — construct from cached HDNTL token (needs albumId)
+            // TIER 2: construct from cached HDNTL
             let albumId = getAlbumIdFromSong(currentSong);
             let albumIdSource = 'currentSong';
+            sdLog('TIER 2: albumId from currentSong =', albumId);
             if (!albumId) {
-                // Await info (dedup'd with fetchInfoTask) instead of racing
+                sdLog('TIER 2: currentSong had no albumId — awaiting info fetch');
                 const info = await ensureInfoForTrack(trackIdStr);
                 if (!isCurrent || signal.aborted) return;
-                if (info) { albumId = info.album_id || info.albumid || info.albumId || null; albumIdSource = 'infoAPI'; }
+                if (info) {
+                    albumId = getAlbumIdFromSong(info);  // FIX: was `info.album_id || info.albumid || info.albumId`
+                    albumIdSource = 'infoAPI';
+                    sdLog('TIER 2: albumId from infoAPI =', albumId);
+                } else {
+                    sdLog('TIER 2: info fetch returned null');
+                }
             }
-            console.log('[Stream] albumId resolved:', albumId || 'null', 'via', albumId ? albumIdSource : 'NONE', 'for track', trackIdStr);
+            sdLog('TIER 2 final albumId =', albumId, '(source:', albumIdSource + ')');
 
             if (albumId) {
                 const constructedUrl = await getCachedHdntlUrl(String(albumId), trackIdStr, targetQ);
                 if (constructedUrl) {
-                    console.log('[Stream] TIER 2 ✓ constructed URL from HDNTL token');
+                    sdLog('✓ TIER 2 HIT — using constructed URL');
                     if (!isCurrent || signal.aborted) return;
                     await setCache(`gaana_stream_${trackId}`, { data: { hlsUrl: constructedUrl } });
                     if (!isCurrent || signal.aborted) return;
@@ -1507,22 +1665,24 @@ export default function MiniPlayer() {
                     setIsStreamLoading(false);
                     return;
                 } else {
-                    console.log('[Stream] TIER 2 ✗ HDNTL cache empty/expired');
+                    sdLog('✗ TIER 2 construction failed (see [HDNTL] log above)');
                 }
             } else {
-                console.log('[Stream] TIER 2 ✗ no albumId available');
+                sdLog('✗ TIER 2 skipped: no albumId');
             }
 
-            // TIER 3 — API fallback
-            console.log('[Stream] TIER 3 → calling stream API for', trackIdStr);
+            // TIER 3: API
+            sdLog('→ TIER 3: calling stream API for', trackIdStr);
             const streamRes = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${trackId}`, { referrerPolicy: "no-referrer", signal });
+            sdLog('TIER 3 API response status:', streamRes.status);
             if (streamRes.ok) {
                 streamJson = await streamRes.json();
+                sdLog('TIER 3 API body keys:', streamJson ? Object.keys(streamJson) : null, '| data keys:', streamJson?.data ? Object.keys(streamJson.data) : null);
                 if (streamJson?.data) {
                     await setCache(`gaana_stream_${trackId}`, streamJson);
                     if (streamJson.data.hlsUrl) {
                         await extractAndCacheHdntl(streamJson.data.hlsUrl);
-                        console.log('[Stream] TIER 3 ✓ stream API + HDNTL cached for future tracks');
+                        sdLog('✓ TIER 3 saved to cache + extracted hdntl for future tracks');
                     }
                 } else {
                     await setCache(`gaana_stream_${trackId}`, { notFound: true });
@@ -1531,7 +1691,7 @@ export default function MiniPlayer() {
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
-        } catch (e: any) { } finally {
+        } catch (e: any) { sdLog('fetchStreamTask threw:', e); } finally {
             setIsStreamLoading(false);
         }
     };
@@ -3115,4 +3275,4 @@ export default function MiniPlayer() {
       </div>
     </>
   );
-                              }
+  }
