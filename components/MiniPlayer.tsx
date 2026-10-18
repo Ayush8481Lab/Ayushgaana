@@ -493,8 +493,9 @@ export default function MiniPlayer() {
   } = useAppContext();
   
   const[audioUrl, setAudioUrl] = useState("");
-  const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
-  
+const[streamBaseUrl, setStreamBaseUrl] = useState<string | null>(null);
+const[hdntlBasePath, setHdntlBasePath] = useState<string | null>(null);
+const[hdntlToken, setHdntlToken] = useState<string | null>(null);
   // Buffering States
   const[isStreamLoading, setIsStreamLoading] = useState(false);
   const[isAudioBuffering, setIsAudioBuffering] = useState(false);
@@ -598,6 +599,7 @@ export default function MiniPlayer() {
   const hasCachedCurrentSongRef = useRef(false);
   
   const rapidKeyIdxRef = useRef(0);
+const lastAppliedQualityRef = useRef<string | null>(null);
   const[spotifyId, setSpotifyId] = useState<string | null>(null);
   const[spotifyUrl, setSpotifyUrl] = useState<string | null>(null);
   const[lyrics, setLyrics] = useState<any[]>([]);
@@ -947,6 +949,9 @@ export default function MiniPlayer() {
                   setSongDetails(p.songDetails);
                   setAudioUrl(p.audioUrl);
                   setStreamBaseUrl(p.streamBaseUrl);
+                  setHdntlBasePath(null);
+                  setHdntlToken(null);
+                  lastAppliedQualityRef.current = null;
                   setLyrics(p.lyrics);
                   setSyncType(p.syncType);
                   setCanvasData(p.canvasData);
@@ -1416,13 +1421,24 @@ export default function MiniPlayer() {
   };
 
   useEffect(() => {
-    if (streamBaseUrl) {
-        const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
-        const finalUrl = streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`);
-        setAudioUrl(finalUrl);
-    }
-  },[streamBaseUrl, selectedQuality]);
+    if (!streamBaseUrl && !hdntlBasePath) return;
+    const targetQ = selectedQuality === "16" ? "16" : selectedQuality === "64" ? "64" : selectedQuality === "320" ? "320" : "128";
 
+    const lastQ = lastAppliedQualityRef.current;
+    const isQualityChange = lastQ !== null && lastQ !== targetQ;
+    lastAppliedQualityRef.current = targetQ;
+
+    // On a REAL quality change (or if no hlsUrl at all), prefer the long-lived hdntl URL format:
+    // {base}/{quality}/{hdntl=...}/index.m3u8
+    if ((isQualityChange || !streamBaseUrl) && hdntlBasePath && hdntlToken) {
+        setAudioUrl(`${hdntlBasePath}/${targetQ}/${hdntlToken}/index.m3u8`);
+    } else if (streamBaseUrl) {
+        // First play / fallback: original hlsUrl behavior
+        setAudioUrl(streamBaseUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${targetQ}.mp4.master.m3u8`));
+    } else if (hdntlBasePath && hdntlToken) {
+        setAudioUrl(`${hdntlBasePath}/${targetQ}/${hdntlToken}/index.m3u8`);
+    }
+}, [streamBaseUrl, hdntlBasePath, hdntlToken, selectedQuality]);
   useEffect(() => {
     if (!currentSong) return;
     songStartTrackingRef.current = Date.now();
@@ -1476,9 +1492,12 @@ export default function MiniPlayer() {
     setYtVideoId(currentSong.ytVideoId || null);
     setSpotifyId(null); setSpotifyUrl(null); setLyrics([]); setSyncType(null); setCanvasData(null);
     setIsCanvasLoaded(false); setActiveLyricIndex(-1); setIsScrolledPastMain(false); setIsUiHidden(false);
-    setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
+        setSongDetails(null); prefetchedYtIdRef.current = currentSong.ytVideoId || null; setIsLyricsFullScreen(false);
     iframeInitialTimeRef.current = 0;
     setStreamBaseUrl(null);
+    setHdntlBasePath(null);
+    setHdntlToken(null);
+    lastAppliedQualityRef.current = null;
     setBuffered(0);
 
     let sDetails: any = null;
@@ -1496,9 +1515,26 @@ export default function MiniPlayer() {
                     else await setCache(`gaana_stream_${trackId}`, { notFound: true });
                 }
             }
-            if (!isCurrent || signal.aborted || streamJson?.notFound) return;
+                        if (!isCurrent || signal.aborted || streamJson?.notFound) return;
             if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
             else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
+
+            // Extract the long-lived hdntl token from the direct segment URL:
+            // https://vodhlsgaana-ebw.akamaized.net/hls/{shard}/{albumId}/{trackId}/{quality}/hdntl=.../segment-N.ts
+            if (streamJson?.data?.url) {
+                try {
+                    const urlParts: string[] = streamJson.data.url.split('/');
+                    const hdntlIdx = urlParts.findIndex((p: string) => p.startsWith('hdntl='));
+                    if (hdntlIdx >= 2) {
+                        const token = urlParts[hdntlIdx];
+                        const basePath = urlParts.slice(0, hdntlIdx - 1).join('/');
+                        if (basePath && token) {
+                            setHdntlBasePath(basePath);
+                            setHdntlToken(token);
+                        }
+                    }
+                } catch (e) {}
+            }
         } catch (e: any) { } finally {
             setIsStreamLoading(false);
         }
