@@ -21,7 +21,7 @@ const bypassHeaders = { "x-vercel-protection-bypass": AUTOMATION_SECRET };
 const GAANA_CDN_HOST = "https://vodhlsgaana-ebw.akamaized.net";
 const HDNTL_GLOBAL_KEY = "gaana_hdntl_global";
 const TRACK_META_PREFIX = "gaana_track_meta_";
-const HDNTL_SAFETY_MS = 60 * 60 * 1000;
+const HDNTL_SAFETY_MS = 60 * 60 * 1000; // refresh 1h before expiry
 
 const fetchProtected = async (url: string, options: any = {}) => {
   return fetch(url, { ...options, headers: { ...options.headers, ...bypassHeaders } });
@@ -53,7 +53,7 @@ const saveGlobalHdntl = (token: string, shard: string, host: string, force = fal
   if (!exp) return;
   if (!force) {
     const existing = getValidGlobalHdntl();
-    if (existing && existing.expiresAt > exp) return;
+    if (existing && existing.expiresAt > exp) return; // don't downgrade
   }
   try {
     localStorage.setItem(HDNTL_GLOBAL_KEY, JSON.stringify({
@@ -98,6 +98,57 @@ const buildHdntlUrl = (basePath: string, quality: string, token: string): string
 
 const qualityFromSelection = (q: string): string =>
   q === "16" ? "16" : q === "64" ? "64" : q === "320" ? "320" : "128";
+
+// --- NEW: Extract hdntl from hlsUrl via Set-Cookie ---
+const extractHdntlFromHlsUrl = async (hlsUrl: string, signal?: AbortSignal): Promise<{ token: string; basePath: string; host: string } | null> => {
+  try {
+    const urlObj = new URL(hlsUrl);
+    const parts = urlObj.pathname.split("/");
+    // Example path: /hls/23/17620223/80524747/128.mp4.master.m3u8
+    // We need the base path up to the trackId: /hls/23/17620223/80524747
+    // The quality part is the last segment before the filename
+    const masterFileIndex = parts.findIndex(p => p.includes(".mp4.master.m3u8"));
+    if (masterFileIndex < 4) return null;
+
+    const shard = parts[masterFileIndex - 3]; // 23
+    const albumId = parts[masterFileIndex - 2]; // 17620223
+    const trackId = parts[masterFileIndex - 1]; // 80524747
+    const basePath = `${urlObj.origin}/hls/${shard}/${albumId}/${trackId}`;
+
+    // Fetch the hlsUrl to capture the Set-Cookie header
+    const res = await fetch(hlsUrl, {
+      method: "GET",
+      referrerPolicy: "no-referrer",
+      signal,
+      // Credentials are not needed for cookie extraction; we just read headers
+    });
+
+    // Try to get hdntl from Set-Cookie header
+    const setCookie = res.headers.get("set-cookie");
+    let token: string | null = null;
+    if (setCookie) {
+      const match = setCookie.match(/hdntl=([^;]+)/);
+      if (match) token = match[1];
+    }
+
+    // Fallback: if Set-Cookie not present, try to parse from location header (redirect)
+    if (!token) {
+      const location = res.headers.get("location");
+      if (location) {
+        const locMatch = location.match(/hdntl=([^\/]+)/);
+        if (locMatch) token = locMatch[1];
+      }
+    }
+
+    // If still no token, we cannot proceed
+    if (!token) return null;
+
+    return { token, basePath, host: urlObj.origin };
+  } catch (e) {
+    console.warn("extractHdntlFromHlsUrl failed", e);
+    return null;
+  }
+};
 
 // Advanced Parser for r.jina.ai
 const fetchJina = async (targetUrl: string, options: any = {}) => {
@@ -1637,18 +1688,29 @@ export default function MiniPlayer() {
             }
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
 
-            // Parse & cache the long-lived hdntl token + this track's base path
-            if (streamJson?.data?.url) {
-                const parsed = parseStreamUrl(streamJson.data.url);
-                if (parsed) {
-                    saveGlobalHdntl(parsed.token, parsed.shard, parsed.host);
-                    saveTrackMeta(trackId, { basePath: parsed.basePath, shard: parsed.shard, albumId: parsed.albumId });
-                    setHdntlBasePath(parsed.basePath);
-                    setHdntlToken(parsed.token);
+            // --- NEW: Extract hdntl from hlsUrl (not from the 'url' field) ---
+            if (streamJson?.data?.hlsUrl) {
+                const hlsUrl = streamJson.data.hlsUrl;
+                setStreamBaseUrl(hlsUrl); // keep for fallback
+
+                const extracted = await extractHdntlFromHlsUrl(hlsUrl, signal);
+                if (extracted) {
+                    saveGlobalHdntl(extracted.token, extracted.basePath.split('/')[3], extracted.host); // shard is index 3 of basePath (after /hls/)
+                    saveTrackMeta(trackId, { 
+                        basePath: extracted.basePath, 
+                        shard: extracted.basePath.split('/')[3], 
+                        albumId: extracted.basePath.split('/')[4] 
+                    });
+                    setHdntlBasePath(extracted.basePath);
+                    setHdntlToken(extracted.token);
+                } else {
+                    // Fallback: if extraction fails, use the hlsUrl directly
+                    setAudioUrl(hlsUrl.replace(/\/(\d+)\.mp4\.master\.m3u8/, `/${qualityFromSelection(selectedQuality)}.mp4.master.m3u8`));
                 }
+            } else if (streamJson?.data?.url) {
+                // Fallback to old method if hlsUrl missing
+                setAudioUrl(streamJson.data.url);
             }
-            if (streamJson?.data?.hlsUrl) setStreamBaseUrl(streamJson.data.hlsUrl);
-            else if (streamJson?.data?.url) setAudioUrl(streamJson.data.url);
         } catch (e: any) { } finally {
             setIsStreamLoading(false);
         }
@@ -2772,16 +2834,21 @@ export default function MiniPlayer() {
           lastHdntlErrorRef.current = tid;
           (async () => {
             try {
+              // Re-fetch the stream URL and extract hdntl from hlsUrl
               const res = await fetchProtected(`https://gaanaayush.vercel.app/api/stream/${tid}`, { referrerPolicy: "no-referrer" });
               if (!res.ok) return;
               const json = await res.json();
-              if (!json?.data?.url) return;
-              const parsed = parseStreamUrl(json.data.url);
-              if (!parsed) return;
-              saveGlobalHdntl(parsed.token, parsed.shard, parsed.host, true);
-              saveTrackMeta(tid, { basePath: parsed.basePath, shard: parsed.shard, albumId: parsed.albumId });
-              setHdntlBasePath(parsed.basePath);
-              setHdntlToken(parsed.token);
+              if (!json?.data?.hlsUrl) return;
+              const extracted = await extractHdntlFromHlsUrl(json.data.hlsUrl);
+              if (!extracted) return;
+              saveGlobalHdntl(extracted.token, extracted.basePath.split('/')[3], extracted.host, true);
+              saveTrackMeta(tid, { 
+                  basePath: extracted.basePath, 
+                  shard: extracted.basePath.split('/')[3], 
+                  albumId: extracted.basePath.split('/')[4] 
+              });
+              setHdntlBasePath(extracted.basePath);
+              setHdntlToken(extracted.token);
               if (json.data.hlsUrl) setStreamBaseUrl(json.data.hlsUrl);
             } catch {}
           })();
@@ -3473,4 +3540,4 @@ export default function MiniPlayer() {
       </div>
     </>
   );
-  }
+}
