@@ -99,51 +99,41 @@ const buildHdntlUrl = (basePath: string, quality: string, token: string): string
 const qualityFromSelection = (q: string): string =>
   q === "16" ? "16" : q === "64" ? "64" : q === "320" ? "320" : "128";
 
-// --- NEW: Extract hdntl from hlsUrl via Set-Cookie ---
+// --- CORRECTED: Obtain hdntl by following the redirect from hlsUrl ---
 const extractHdntlFromHlsUrl = async (hlsUrl: string, signal?: AbortSignal): Promise<{ token: string; basePath: string; host: string } | null> => {
   try {
-    const urlObj = new URL(hlsUrl);
-    const parts = urlObj.pathname.split("/");
-    // Example path: /hls/23/17620223/80524747/128.mp4.master.m3u8
-    // We need the base path up to the trackId: /hls/23/17620223/80524747
-    // The quality part is the last segment before the filename
-    const masterFileIndex = parts.findIndex(p => p.includes(".mp4.master.m3u8"));
-    if (masterFileIndex < 4) return null;
-
-    const shard = parts[masterFileIndex - 3]; // 23
-    const albumId = parts[masterFileIndex - 2]; // 17620223
-    const trackId = parts[masterFileIndex - 1]; // 80524747
-    const basePath = `${urlObj.origin}/hls/${shard}/${albumId}/${trackId}`;
-
-    // Fetch the hlsUrl to capture the Set-Cookie header
+    // Fetch the hlsUrl with redirect set to 'manual' to capture the Location header
     const res = await fetch(hlsUrl, {
       method: "GET",
       referrerPolicy: "no-referrer",
       signal,
-      // Credentials are not needed for cookie extraction; we just read headers
+      redirect: "manual",
+      // credentials are not needed for redirect capture
     });
 
-    // Try to get hdntl from Set-Cookie header
-    const setCookie = res.headers.get("set-cookie");
-    let token: string | null = null;
-    if (setCookie) {
-      const match = setCookie.match(/hdntl=([^;]+)/);
-      if (match) token = match[1];
+    // The CDN returns a 302 with a Location header that contains the hdntl token
+    const location = res.headers.get("location");
+    if (!location) return null;
+
+    // The Location header looks like:
+    // .../128/hdntl=exp=...~acl=%2f*~data=hdntl~hmac=.../index.m3u8
+    // Parse it to extract the token and the base path
+    const parsed = parseStreamUrl(location);
+    if (parsed) {
+      return { token: parsed.token, basePath: parsed.basePath, host: parsed.host };
     }
 
-    // Fallback: if Set-Cookie not present, try to parse from location header (redirect)
-    if (!token) {
-      const location = res.headers.get("location");
-      if (location) {
-        const locMatch = location.match(/hdntl=([^\/]+)/);
-        if (locMatch) token = locMatch[1];
-      }
+    // If parseStreamUrl fails, try a simpler regex fallback
+    const match = location.match(/\/(hdntl=[^\/]+)\/index\.m3u8/);
+    if (match) {
+      const token = match[1];
+      // Build basePath by removing the token and index.m3u8 from the location
+      const basePath = location.replace(/\/hdntl=[^\/]+\/index\.m3u8$/, "");
+      const host = new URL(location).origin;
+      return { token, basePath, host };
     }
 
-    // If still no token, we cannot proceed
-    if (!token) return null;
-
-    return { token, basePath, host: urlObj.origin };
+    return null;
   } catch (e) {
     console.warn("extractHdntlFromHlsUrl failed", e);
     return null;
@@ -1688,7 +1678,7 @@ export default function MiniPlayer() {
             }
             if (!isCurrent || signal.aborted || streamJson?.notFound) return;
 
-            // --- NEW: Extract hdntl from hlsUrl (not from the 'url' field) ---
+            // --- CORRECTED: Extract hdntl by following the redirect from hlsUrl ---
             if (streamJson?.data?.hlsUrl) {
                 const hlsUrl = streamJson.data.hlsUrl;
                 setStreamBaseUrl(hlsUrl); // keep for fallback
