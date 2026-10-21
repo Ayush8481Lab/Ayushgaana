@@ -22,7 +22,7 @@ export default async function handler(req, res) {
   // Equivalent to PHP's http_build_query(...)
   const payload = new URLSearchParams({
     quality: 'high',
-    track_id: 'x',
+    track_id: '8481',
     stream_format: 'mp4',
   }).toString();
 
@@ -32,6 +32,7 @@ export default async function handler(req, res) {
     'Referer': 'https://gaana.com/',
     'Accept': 'application/json, text/plain, */*',
     'Accept-Language': 'en-US,en;q=0.9',
+    'Origin: 'https://gaana.com/',
   };
 
   try {
