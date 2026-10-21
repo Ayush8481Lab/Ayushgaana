@@ -22,6 +22,7 @@ export default async function handler(req, res) {
   // Equivalent to PHP's http_build_query(...)
   const payload = new URLSearchParams({
     quality: 'high',
+    track_id: 'x',
     stream_format: 'mp4',
   }).toString();
 
