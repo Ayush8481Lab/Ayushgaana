@@ -1482,10 +1482,24 @@ export default function MiniPlayer() {
     let sDetails: any = null;
     let skipSpotifyLyrics = false;
 
-    // --- UPDATED STREAM FETCH TASK USING NEW FASTEST API ---
+        // --- UPDATED STREAM FETCH TASK: PREFETCHED URL FIRST FOR INSTANT PLAYBACK ---
     const fetchStreamTask = async () => {
         setIsStreamLoading(true);
         try {
+            // 🚀 INSTANT PATH: Use prefetched HLS URL from playlist (zero network latency)
+            if (currentSong.prefetchedStreamBaseUrl) {
+                const url = currentSong.prefetchedStreamBaseUrl;
+                // hdnts URLs carry ~4h expiry in `exp=...` param — validate before use
+                const expMatch = url.match(/[~&]exp=(\d+)/);
+                const isExpired = expMatch ? Math.floor(Date.now() / 1000) >= parseInt(expMatch[1], 10) - 60 : false;
+                if (!isExpired) {
+                    setStreamBaseUrl(url);
+                    setIsStreamLoading(false);
+                    return;
+                }
+                // Expired → fall through to API fallback below
+            }
+
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (!streamJson) {
                 const streamRes = await fetchProtected(`https://ayushgaana.vercel.app/api/stream?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
