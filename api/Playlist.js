@@ -1,5 +1,5 @@
 // api/playlist.js — Vercel Edge Function
-// GET /api/playlist?seo=<seokey>[&strip=1][&cookie=<full_cookie>]
+// GET /api/playlist?seo=<seokey>[&strip=1]
 // (alias: ?id=... also works)
 
 export const config = { runtime: 'edge' };
@@ -87,8 +87,6 @@ async function decryptMessage(msg, key) {
     return HLS_BASE_URL + path;
 }
 
-// Walk entire JSON tree — every object with message + bitRate or expiryTime gets hls_url
-// (also catches preview_url which has message + expiryTime but no bitRate)
 async function decryptAllUrls(root, key, strip) {
     const jobs = [];
     const visit = (o) => {
@@ -129,7 +127,10 @@ export default async function handler(req) {
 
     if (!seo) return fail(400, { success: false, error: 'missing seo' });
 
-    // Minimal header set (same pattern that made stream.js work on Edge)
+    // The exact working endpoint you provided
+    const apiUrl = `https://gaana.com/apiv2?type=playlistDetail&seokey=${encodeURIComponent(seo)}`;
+
+    // Minimal headers — same pattern that made stream.js work
     const headers = {
         'accept': 'application/json, text/plain, */*',
         'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
@@ -139,58 +140,44 @@ export default async function handler(req) {
         'cookie': cookie,
     };
 
-    // Endpoint waterfall — first one that returns valid JSON with tracks wins
-    const enc = encodeURIComponent(seo);
-    const endpoints = [
-        `https://gaana.com/apiv2?type=playlistDetail&seokey=${enc}`,
-        `https://gaana.com/apiv2?type=playlistDetail&id=${enc}`,
-        `https://gaana.com/apiv2?type=playlistDetail&playlist_id=${enc}`,
-        `https://gaana.com/apiv2?type=playlist&seokey=${enc}`,
-    ];
-
-    let data = null;
-    const attempts = [];
-
-    for (const url of endpoints) {
-        try {
-            const res = await fetch(url, { headers, cache: 'no-store', redirect: 'follow' });
-            const text = await res.text();
-            const trimmed = text.trimStart();
-
-            if (trimmed.startsWith('<')) {
-                attempts.push({ url, http: res.status, note: 'html' });
-                continue;
-            }
-
-            let json;
-            try { json = JSON.parse(text); }
-            catch {
-                attempts.push({ url, http: res.status, note: 'bad json', preview: trimmed.slice(0, 120) });
-                continue;
-            }
-
-            // Valid playlist response has tracks array or playlist object
-            if (json && (Array.isArray(json.tracks) || json.playlist)) {
-                data = json;
-                break;
-            }
-            attempts.push({ url, http: res.status, note: 'no tracks field' });
-        } catch (e) {
-            attempts.push({ url, error: String(e?.message || e) });
-        }
+    let text, status;
+    try {
+        const res = await fetch(apiUrl, {
+            headers,
+            cache: 'no-store',
+            redirect: 'follow',
+        });
+        status = res.status;
+        text = await res.text();
+    } catch (e) {
+        return fail(502, { success: false, error: 'fetch failed: ' + (e?.message || 'unknown') });
     }
 
-    if (!data) {
+    const trimmed = text.trimStart();
+    if (trimmed.startsWith('<')) {
         return fail(502, {
             success: false,
-            error: 'all endpoints failed',
-            seo,
-            attempts,
+            error: 'HTML response (WAF or wrong endpoint)',
+            http_status: status,
+            url_called: apiUrl,
+            preview: trimmed.slice(0, 300),
         });
     }
 
-    // Decrypt in parallel (all urls.*.message, preview_url.message, etc.)
+    let data;
+    try {
+        data = JSON.parse(text);
+    } catch (e) {
+        return fail(502, {
+            success: false,
+            error: 'invalid JSON: ' + (e?.message || 'parse error'),
+            http_status: status,
+            preview: text.slice(0, 300),
+        });
+    }
+
+    // Decrypt every urls.*.message in the tree
     await decryptAllUrls(data, await getKey(), strip);
 
     return new Response(JSON.stringify(data), { status: 200, headers: RESP_HEADERS });
-    }
+        }
