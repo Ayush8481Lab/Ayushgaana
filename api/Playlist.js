@@ -8,7 +8,6 @@ const IV_STR       = 'xC4dmVJAq14BfntX';
 const HLS_BASE_URL = 'https://vodhlsgaana-ebw.akamaized.net/';
 const USER_AGENT   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
 
-// minimal cookie — same identity stream.js uses implicitly
 const DEFAULT_COOKIE =
     'tc=dark; deviceId=aeeb9d85-0c9d-4bd6-8870-a9a2306dc2e8; ' +
     'deviceType=GaanaWebsiteApp; ver=v0.0.46; playerloaded=1';
@@ -127,7 +126,6 @@ export default async function handler(req) {
 
     if (!seo) return fail(400, { success: false, error: 'missing seo' });
 
-    // -- minimal headers = the set that works on Edge (same as stream.js) --
     const headers = {
         'accept': 'application/json, text/plain, */*',
         'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
@@ -137,27 +135,37 @@ export default async function handler(req) {
         'cookie': cookie,
     };
 
-    // playlist endpoint is GET — never POST
-    const apiUrl =
-        'https://gaana.com/apiv2?type=playlistDetail&seokey=' + encodeURIComponent(seo);
-
+    // --- Attempt 1: /apiv2 with type=playlist (corrected parameter) ---
+    let apiUrl = `https://gaana.com/apiv2?type=playlist&seokey=${encodeURIComponent(seo)}`;
     let text, status;
+    let usedUrl = apiUrl;
+
     try {
-        const res = await fetch(apiUrl, { headers, cache: 'no-store', redirect: 'follow' });
+        let res = await fetch(apiUrl, { headers, cache: 'no-store', redirect: 'follow' });
         status = res.status;
         text = await res.text();
+
+        // If we get a 404 or HTML, try the fallback endpoint
+        const trimmed = text.trimStart();
+        if (status === 404 || trimmed.startsWith('<')) {
+            // --- Attempt 2: Fallback to /playlists/info?seokey= (GaanaPy style) ---
+            apiUrl = `https://gaana.com/playlists/info?seokey=${encodeURIComponent(seo)}`;
+            usedUrl = apiUrl;
+            res = await fetch(apiUrl, { headers, cache: 'no-store', redirect: 'follow' });
+            status = res.status;
+            text = await res.text();
+        }
     } catch (e) {
         return fail(502, { success: false, error: 'fetch: ' + (e?.message || 'fail') });
     }
 
-    // HTML detection: surface what Gaana actually sent back
     const trimmed = text.trimStart();
     if (trimmed.startsWith('<')) {
         return fail(502, {
             success: false,
             error: 'HTML response (blocked or wrong endpoint)',
             http_status: status,
-            url_called: apiUrl,
+            url_called: usedUrl,
             preview: trimmed.slice(0, 400),
         });
     }
@@ -174,8 +182,16 @@ export default async function handler(req) {
         });
     }
 
-    // some playlists come wrapped in { tracks: [...] } or { playlist: {...} } —
-    // walk the whole tree so we don't miss anything
+    // If the response is empty or lacks tracks, report it clearly
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+        return fail(502, {
+            success: false,
+            error: 'empty response',
+            http_status: status,
+            url_called: usedUrl,
+        });
+    }
+
     await decryptAllUrls(data, await getKey(), strip);
 
     return new Response(JSON.stringify(data), { status: 200, headers: RESP_HEADERS });
