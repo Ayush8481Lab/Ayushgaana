@@ -1,17 +1,17 @@
 // api/playlist.js — Vercel Edge Function
-// GET /api/playlist?seo=<seokey>[&strip=1]
+// GET /api/playlist?seo=<seokey>[&strip=1][&cookie=<full_cookie>]
 
 export const config = { runtime: 'edge' };
 
 const KEY_STR      = 'gy1t#b@jl(b$wtme';
 const IV_STR       = 'xC4dmVJAq14BfntX';
 const HLS_BASE_URL = 'https://vodhlsgaana-ebw.akamaized.net/';
+const USER_AGENT   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36';
 
-// --- same device/session identity as the working browser capture ---
-const DEVICE_ID   = 'aeeb9d85-0c9d-4bd6-8870-a9a2306dc2e8';
-const DEVICE_TYPE = 'GaanaWebsiteApp';
-const COOKIE      = 'tc=dark; deviceId=' + DEVICE_ID + '; deviceType=GaanaWebsiteApp; ver=v0.0.46; playerloaded=1';
-const USER_AGENT  = 'Mozilla/5.0 (Linux; Android 14; SM-A556B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36';
+// minimal cookie — same identity stream.js uses implicitly
+const DEFAULT_COOKIE =
+    'tc=dark; deviceId=aeeb9d85-0c9d-4bd6-8870-a9a2306dc2e8; ' +
+    'deviceType=GaanaWebsiteApp; ver=v0.0.46; playerloaded=1';
 
 const TE      = new TextEncoder();
 const IV      = TE.encode(IV_STR);
@@ -23,28 +23,7 @@ const RESP_HEADERS = {
     'cache-control': 'no-store, max-age=0',
 };
 
-// full header set copied from the working capture
-const API_HEADERS = {
-    'accept': 'application/json, text/plain, */*',
-    'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
-    'appversion': 'V6',
-    'country': 'IN',
-    'deviceid': DEVICE_ID,
-    'devicetype': DEVICE_TYPE,
-    'gaanaappversion': 'gaanaAndroid-8.60.2',
-    'origin': 'https://gaana.com',
-    'referer': 'https://gaana.com/',
-    'sec-ch-ua': '"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"',
-    'sec-ch-ua-mobile': '?1',
-    'sec-ch-ua-platform': '"Android"',
-    'sec-fetch-dest': 'empty',
-    'sec-fetch-mode': 'cors',
-    'sec-fetch-site': 'same-origin',
-    'user-agent': USER_AGENT,
-    'cookie': COOKIE,
-};
-
-// -- crypto ---------------------------------------------------------------
+// -- crypto (identical to stream.js) --------------------------------------
 let _keyPromise = null;
 function getKey() {
     if (!_keyPromise) {
@@ -108,7 +87,6 @@ async function decryptMessage(msg, key) {
     return HLS_BASE_URL + path;
 }
 
-// -- walk JSON, decrypt every urls.*.message in parallel ------------------
 async function decryptAllUrls(root, key, strip) {
     const jobs = [];
     const visit = (o) => {
@@ -136,36 +114,69 @@ async function decryptAllUrls(root, key, strip) {
     }));
 }
 
+const fail = (status, obj) => new Response(
+    JSON.stringify(obj), { status, headers: RESP_HEADERS }
+);
+
 // -- handler --------------------------------------------------------------
 export default async function handler(req) {
     const u = new URL(req.url);
-    const seo   = u.searchParams.get('seo');
-    const strip = u.searchParams.get('strip') === '1';
+    const seo    = u.searchParams.get('seo');
+    const strip  = u.searchParams.get('strip') === '1';
+    const cookie = u.searchParams.get('cookie') || DEFAULT_COOKIE;
 
-    if (!seo) {
-        return new Response(
-            JSON.stringify({ success: false, error: 'missing seo' }),
-            { status: 400, headers: RESP_HEADERS }
-        );
+    if (!seo) return fail(400, { success: false, error: 'missing seo' });
+
+    // -- minimal headers = the set that works on Edge (same as stream.js) --
+    const headers = {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+        'referer': 'https://gaana.com/',
+        'origin': 'https://gaana.com',
+        'user-agent': USER_AGENT,
+        'cookie': cookie,
+    };
+
+    // playlist endpoint is GET — never POST
+    const apiUrl =
+        'https://gaana.com/apiv2?type=playlistDetail&seokey=' + encodeURIComponent(seo);
+
+    let text, status;
+    try {
+        const res = await fetch(apiUrl, { headers, cache: 'no-store', redirect: 'follow' });
+        status = res.status;
+        text = await res.text();
+    } catch (e) {
+        return fail(502, { success: false, error: 'fetch: ' + (e?.message || 'fail') });
     }
 
-    const key = await getKey();
+    // HTML detection: surface what Gaana actually sent back
+    const trimmed = text.trimStart();
+    if (trimmed.startsWith('<')) {
+        return fail(502, {
+            success: false,
+            error: 'HTML response (blocked or wrong endpoint)',
+            http_status: status,
+            url_called: apiUrl,
+            preview: trimmed.slice(0, 400),
+        });
+    }
 
     let data;
     try {
-        const res = await fetch(
-            'https://gaana.com/apiv2?type=playlistDetail&seokey=' + encodeURIComponent(seo),
-            { headers: API_HEADERS, cache: 'no-store' }
-        );
-        data = await res.json();
+        data = JSON.parse(text);
     } catch (e) {
-        return new Response(
-            JSON.stringify({ success: false, error: 'upstream: ' + (e?.message || 'fail') }),
-            { status: 502, headers: RESP_HEADERS }
-        );
+        return fail(502, {
+            success: false,
+            error: 'invalid JSON: ' + (e?.message || 'fail'),
+            http_status: status,
+            preview: text.slice(0, 400),
+        });
     }
 
-    await decryptAllUrls(data, key, strip);
+    // some playlists come wrapped in { tracks: [...] } or { playlist: {...} } —
+    // walk the whole tree so we don't miss anything
+    await decryptAllUrls(data, await getKey(), strip);
 
     return new Response(JSON.stringify(data), { status: 200, headers: RESP_HEADERS });
 }
