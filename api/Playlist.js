@@ -19,45 +19,51 @@ export default async function handler(req, res) {
 
   const gaanaUrl = `https://gaana.com/apiv2?type=playlistDetail&seokey=${encodeURIComponent(seo)}`;
 
+  // Equivalent to PHP's http_build_query(...)
+  const payload = new URLSearchParams({
+    quality: 'high',
+    stream_format: 'mp4',
+  }).toString();
+
+  const commonHeaders = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://gaana.com/',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9',
+  };
+
   try {
-    // The user requested a POST request. Gaana's apiv2 endpoint
-    // often works with GET, but we follow the POST instruction here.
-    const response = await fetch(gaanaUrl, {
+    // POST request with form-encoded payload (matches http_build_query)
+    const postResponse = await fetch(gaanaUrl, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        // These headers help mimic a browser and avoid simple bot blocks
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://gaana.com/',
-        'Accept': 'application/json, text/plain, */*',
+        ...commonHeaders,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(payload).toString(),
       },
-      // The apiv2 endpoint usually does not require a body for playlistDetail,
-      // but you can send an empty JSON object to be safe.
-      body: JSON.stringify({}),
+      body: payload,
     });
 
-    if (!response.ok) {
-      // If POST fails, try a GET fallback (the endpoint often accepts GET)
-      const getResponse = await fetch(gaanaUrl, {
-        method: 'GET',
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Referer': 'https://gaana.com/',
-          'Accept': 'application/json, text/plain, */*',
-        },
-      });
-
-      if (!getResponse.ok) {
-        throw new Error(`Gaana API responded with status ${getResponse.status}`);
-      }
-
-      const data = await getResponse.json();
+    if (postResponse.ok) {
+      const data = await postResponse.json();
       return res.status(200).json(data);
     }
 
-    const data = await response.json();
+    // Fallback: some Gaana endpoints only accept GET; send payload as query params
+    const getUrl = `${gaanaUrl}&${payload}`;
+    const getResponse = await fetch(getUrl, {
+      method: 'GET',
+      headers: commonHeaders,
+    });
+
+    if (!getResponse.ok) {
+      throw new Error(
+        `Gaana API failed — POST ${postResponse.status}, GET ${getResponse.status}`
+      );
+    }
+
+    const data = await getResponse.json();
     return res.status(200).json(data);
   } catch (error) {
     console.error('Gaana API error:', error.message);
@@ -66,4 +72,4 @@ export default async function handler(req, res) {
       details: error.message,
     });
   }
-    }
+        }
