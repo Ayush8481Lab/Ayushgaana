@@ -183,30 +183,20 @@ function PlaylistContent() {
 
     const fetchPlaylist = async () => {
       setLoading(true);
-      const url = `https://gaanaayush.vercel.app/api/playlists/${seokey}`;
+      const url = `https://ayushgaana.vercel.app/api/Playlist?seo=${seokey}`;
       
       const json = await fetchStrictly(url);
-      const pData = json?.data?.data?.playlist || json?.data?.playlist || json?.playlist;
+      // New API response shape: { tracks: [...], playlist: {...}, top_artists: [...] }
+      const tracks = json?.tracks || json?.data?.tracks || [];
+      const pData = json?.playlist || json?.data?.playlist || json?.data?.data?.playlist;
       
-      if (pData && pData.tracks) {
-        const tracks = pData.tracks ||[];
-        
-        // 1. Process Artists Analytics
+      if (pData && tracks.length > 0) {
+        // 1. Process Artists Analytics from track.artist array
         const artistFreq: Record<string, number> = {};
         const artistMap: Record<string, any> = {};
         
         tracks.forEach((t: any) => {
-          if (t.artist_ids && typeof t.artist_ids === 'string') {
-            const ids = t.artist_ids.split(',').map((s: string) => s.trim());
-            const names = (t.artists || "").split(',').map((s: string) => s.trim());
-            const seokeys = (t.artist_seokeys || "").split(',').map((s: string) => s.trim());
-            
-            ids.forEach((id: string, i: number) => {
-              if(!id) return;
-              artistFreq[id] = (artistFreq[id] || 0) + 1;
-              if(!artistMap[id]) artistMap[id] = { id, name: names[i] || "Unknown", seokey: seokeys[i] || id };
-            });
-          } else if (t.artist && Array.isArray(t.artist)) {
+          if (t.artist && Array.isArray(t.artist)) {
             t.artist.forEach((a: any) => {
               const id = a.artist_id || a.id;
               if(!id) return;
@@ -218,9 +208,9 @@ function PlaylistContent() {
 
         const sortedArtists = Object.values(artistMap).sort((a: any, b: any) => artistFreq[b.id] - artistFreq[a.id]);
         
-        // 2. Resolve Banner URL replacing 80x80 to 480x480
-        let bannerImage = pData.artworkUrl || (tracks[0] ? (tracks[0].artworkUrl || tracks[0].artwork) : "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg");
-        bannerImage = bannerImage.replace(/crop_80x80/g, "crop_480x480").replace(/150x150|50x50/g, "500x500").replace(/size_[ms]/g, "size_l");
+        // 2. Resolve Banner URL - use playlist artwork with higher size fallbacks
+        let bannerImage = pData.artwork_175 || pData.artwork_110 || pData.artwork || (tracks[0]?.artwork_large) || "https://a10.gaanacdn.com/gn_img/default/Song/size_l.jpg";
+        bannerImage = bannerImage.replace(/crop_\d+x\d+/g, "crop_480x480").replace(/size_[ms]/g, "size_l").replace(/150x150|50x50/g, "500x500");
 
         // 3. Calculate Total Duration Manually
         const totalSeconds = tracks.reduce((acc: number, t: any) => acc + (parseInt(t.duration) || 0), 0);
@@ -231,16 +221,37 @@ function PlaylistContent() {
           durationText = h > 0 ? `${h} hr ${m} min` : `${m} min`;
         }
 
+        // 4. Map songs + attach prefetched HLS stream URLs for INSTANT playback
+        const songs = tracks.map((t: any) => {
+          const artistName = t.artists || (t.artist && Array.isArray(t.artist) ? t.artist.map((a: any) => a.name).join(", ") : "");
+          
+          // Prefer 128kbps (high), then 64kbps (medium), then adaptive (auto)
+          const streamBaseUrl = t.urls?.high?.url || t.urls?.medium?.url || t.urls?.auto?.url || null;
+          const prefetchedQuality = t.urls?.high ? "128" : t.urls?.medium ? "64" : null;
+          
+          return {
+            ...t,
+            id: t.track_id,
+            name: t.track_title,
+            image: t.artwork_large || t.artwork,
+            artist_name: artistName,
+            artists: artistName,
+            // 🚀 Prefetched stream data for zero-latency playback
+            prefetchedStreamBaseUrl: streamBaseUrl,
+            prefetchedQuality: prefetchedQuality,
+          };
+        });
+
         setPlaylist({
           id: pData.playlist_id || seokey,
           seokey: pData.seokey || seokey,
           title: pData.title || seokey.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-          songs: tracks.map((t: any) => ({ ...t, id: t.track_id, name: t.title, image: t.artworkUrl || t.artwork, artist_name: t.artists })),
+          songs: songs,
           image: bannerImage,
           top3Artists: sortedArtists.slice(0, 3).map((a: any) => a.name).join(", "),
           top5ArtistsObj: sortedArtists.slice(0, 5),
           trackCount: tracks.length,
-          totalDurationStr: durationText, // Added Duration
+          totalDurationStr: durationText,
           type: "playlist"
         });
       }
@@ -304,7 +315,6 @@ function PlaylistContent() {
           className={`flex items-center justify-between gap-4 p-2.5 rounded-2xl cursor-pointer group transition-all duration-200 border border-transparent ${isCurrentPlaying ? "bg-[#131D30] border-[#1e293b]" : "hover:bg-[#131D30] hover:border-[#1e293b]"}`}
         >
           <div className="flex items-center gap-4 overflow-hidden flex-1 min-w-0">
-            {/* Song banner size 1.5x */}
             <div className="relative w-[72px] h-[72px] md:w-[84px] md:h-[84px] flex-shrink-0 bg-[#0B1320] rounded-xl border border-[#1e293b] shadow-sm overflow-hidden pointer-events-none">
               <img src={getImageUrl(song)} alt="track" className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110" draggable={false} />
               {isCurrentPlaying && (
@@ -355,7 +365,6 @@ function PlaylistContent() {
       <style dangerouslySetInnerHTML={{__html: `
         @keyframes ping-pong { 0%, 15% { transform: translateX(0); } 85%, 100% { transform: translateX(var(--overflow-dist)); } }
         .animate-ping-pong { animation: ping-pong 10s ease-in-out infinite alternate; }
-        /* FIXED MASK IMAGE: Prevents left side text clipping! */
         .mask-linear-fade { mask-image: linear-gradient(to right, black 0%, black 95%, transparent 100%); -webkit-mask-image: linear-gradient(to right, black 0%, black 95%, transparent 100%); }
         .hide-scrollbar::-webkit-scrollbar { display: none; }
         .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -390,7 +399,7 @@ function PlaylistContent() {
         </div>
       </nav>
 
-      {/* Playlist Hero Info - Banner size increased 1.4x */}
+      {/* Playlist Hero Info */}
       <div className="relative z-10 flex flex-col md:flex-row items-center md:items-end gap-6 md:gap-8 px-5 md:px-8 pt-24 md:pt-32 pb-6">
         <div className="w-[224px] h-[224px] sm:w-[268px] sm:h-[268px] md:w-[313px] md:h-[313px] lg:w-[336px] lg:h-[336px] flex-shrink-0 shadow-[0_20px_50px_rgba(0,0,0,0.6)] bg-[#131D30] border border-[#1e293b] rounded-3xl overflow-hidden pointer-events-none">
           <img src={playlist.image} alt="cover" className="w-full h-full object-cover" draggable={false} />
@@ -410,7 +419,6 @@ function PlaylistContent() {
             )}
             <div className="flex items-center flex-wrap justify-center md:justify-start gap-1.5 text-blue-200/50">
               <span>{playlist.trackCount} tracks</span>
-              {/* DISPLAYING ADDED DURATION HERE */}
               {playlist.totalDurationStr && <span className="hidden sm:inline">•</span>}
               {playlist.totalDurationStr && <span>{playlist.totalDurationStr}</span>}
             </div>
@@ -480,4 +488,4 @@ export default function PlaylistPage() {
       <PlaylistContent />
     </Suspense>
   );
-}
+  }
