@@ -1,13 +1,17 @@
 // api/playlist.js — Vercel Edge Function
 // GET /api/playlist?seo=<seokey>[&strip=1]
-//   strip=1  → remove the encrypted `message` field after decryption (smaller response)
 
 export const config = { runtime: 'edge' };
 
 const KEY_STR      = 'gy1t#b@jl(b$wtme';
 const IV_STR       = 'xC4dmVJAq14BfntX';
 const HLS_BASE_URL = 'https://vodhlsgaana-ebw.akamaized.net/';
-const USER_AGENT   = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
+
+// --- same device/session identity as the working browser capture ---
+const DEVICE_ID   = 'aeeb9d85-0c9d-4bd6-8870-a9a2306dc2e8';
+const DEVICE_TYPE = 'GaanaWebsiteApp';
+const COOKIE      = 'tc=dark; deviceId=' + DEVICE_ID + '; deviceType=GaanaWebsiteApp; ver=v0.0.46; playerloaded=1';
+const USER_AGENT  = 'Mozilla/5.0 (Linux; Android 14; SM-A556B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Mobile Safari/537.36';
 
 const TE      = new TextEncoder();
 const IV      = TE.encode(IV_STR);
@@ -19,11 +23,25 @@ const RESP_HEADERS = {
     'cache-control': 'no-store, max-age=0',
 };
 
+// full header set copied from the working capture
 const API_HEADERS = {
-    'user-agent': USER_AGENT,
     'accept': 'application/json, text/plain, */*',
+    'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
+    'appversion': 'V6',
+    'country': 'IN',
+    'deviceid': DEVICE_ID,
+    'devicetype': DEVICE_TYPE,
+    'gaanaappversion': 'gaanaAndroid-8.60.2',
     'origin': 'https://gaana.com',
     'referer': 'https://gaana.com/',
+    'sec-ch-ua': '"Google Chrome";v="155", "Chromium";v="155", "Not(A:Brand";v="24"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
+    'user-agent': USER_AGENT,
+    'cookie': COOKIE,
 };
 
 // -- crypto ---------------------------------------------------------------
@@ -90,7 +108,7 @@ async function decryptMessage(msg, key) {
     return HLS_BASE_URL + path;
 }
 
-// -- walk the JSON tree, decrypt every urls.*.message in parallel ----------
+// -- walk JSON, decrypt every urls.*.message in parallel ------------------
 async function decryptAllUrls(root, key, strip) {
     const jobs = [];
     const visit = (o) => {
