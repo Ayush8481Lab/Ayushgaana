@@ -2020,21 +2020,19 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
        }
     }
   }, [displayTitle, displayArtists, displayImage, playContext]);
-// --- 4. SYNC NOTIFICATION WITH TRUE BUFFERING STATE ---
+// --- 4. SYNC NOTIFICATION STATE WITHOUT DESTROYING IT ---
   useEffect(() => { 
-    // Only tell Android the song is "playing" if it's NOT loading/buffering
-    const isActuallyPlaying = isPlaying && !isStreamLoading && !isAudioBuffering;
-    
-    // Passing 'none' to Capacitor when buffering forces the OS to wait/show loading
-    const nativeState = isActuallyPlaying ? 'playing' : (isPlaying ? 'none' : 'paused');
+    // We NEVER pass 'none'. Passing 'none' destroys the Android notification and causes the 1-8 sec flicker.
+    // We just pass 'playing' or 'paused'. Android natively handles internal buffering without breaking the UI.
+    const state = isPlaying ? 'playing' : 'paused';
     
     if ('mediaSession' in navigator) {
-        navigator.mediaSession.playbackState = isActuallyPlaying ? 'playing' : 'paused';
+        navigator.mediaSession.playbackState = state;
     } 
     if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: nativeState });
+        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: state });
     }
-  }, [isPlaying, isStreamLoading, isAudioBuffering]);
+  }, [isPlaying]); // Strictly watch isPlaying only to prevent spamming the bridge!
 
   const handleTimeUpdate = () => {
     if (audioRef.current && !isVideoMode) {
@@ -3402,4 +3400,4 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       </div>
     </>
   );
-}
+                                                       }
