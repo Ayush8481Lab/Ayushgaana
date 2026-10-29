@@ -1931,18 +1931,14 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
   }
 },[]);
 
+// --- 1. SET UP MEDIA ACTIONS ONCE (FIXES 2-8 SECOND LAG/DELAY) ---
   useEffect(() => {
-  if (displayTitle) {
-     // --- 1. GOOGLE CHROME / WEB LOGIC ---
+     // Google Chrome / Web
      if ('mediaSession' in navigator) {
-         try {
-             navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: displayImage ?[{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] :[] });
-         } catch (e) {}
-         
          navigator.mediaSession.setActionHandler('play', () => {
             setIsPlaying(true); navigator.mediaSession.playbackState = 'playing';
             if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
-            else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
+            else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
          });
          navigator.mediaSession.setActionHandler('pause', () => {
             setIsPlaying(false); navigator.mediaSession.playbackState = 'paused';
@@ -1952,28 +1948,28 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
          navigator.mediaSession.setActionHandler('previoustrack', () => playPrevRef.current());
          navigator.mediaSession.setActionHandler('nexttrack', () => playNextRef.current());
          navigator.mediaSession.setActionHandler('seekto', (details) => {
-            if (details.seekTime !== undefined && audioRef.current) { audioRef.current.currentTime = details.seekTime; setCurrentTime(details.seekTime); syncPosition(); }
+            if (details.seekTime !== undefined && audioRef.current) { 
+                audioRef.current.currentTime = details.seekTime; 
+                setCurrentTime(details.seekTime);
+                if ('mediaSession' in navigator) {
+                   try { navigator.mediaSession.setPositionState({ duration: audioRef.current.duration, playbackRate: 1, position: details.seekTime }); } catch(e) {}
+                }
+                if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+                   (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: details.seekTime, duration: audioRef.current.duration, playbackRate: 1 });
+                }
+            }
          });
      }
 
-     // --- 2. NATIVE ANDROID APK LOGIC (FIXED) ---
+     // Native Android APK
      if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
          const NativeSession = (window as any).Capacitor.Plugins.MediaSession;
          
-         // Push Track Info to Android OS Lock Screen
-         NativeSession.setMetadata({
-             title: displayTitle,
-             artist: displayArtists,
-             album: playContext?.name || 'App',
-             artwork: displayImage || 'https://via.placeholder.com/512'
-         });
-
-         // FIX: Use setActionHandler exactly as Capgo dictates
          NativeSession.setActionHandler({ action: 'play' }, () => {
             setIsPlaying(true); 
             NativeSession.setPlaybackState({ playbackState: 'playing' });
             if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
-            else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
+            else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
          });
 
          NativeSession.setActionHandler({ action: 'pause' }, () => {
@@ -1989,13 +1985,41 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
          NativeSession.setActionHandler({ action: 'seekto' }, (details: any) => {
             if (details && details.seekTime !== undefined && audioRef.current) { 
                 audioRef.current.currentTime = details.seekTime; 
-                setCurrentTime(details.seekTime); 
-                syncPosition(); 
+                setCurrentTime(details.seekTime);
+                NativeSession.setPositionState({ position: details.seekTime, duration: audioRef.current.duration, playbackRate: 1 });
             }
          });
      }
-  }
-},[displayTitle, displayArtists, displayImage, playContext, currentSong]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // <-- Empty array ensures this only runs ONCE! Eliminates all Bridge Lag!
+
+  // --- 2. UPDATE METADATA ONLY WHEN IT CHANGES (FIXES MISSING IMAGE) ---
+  useEffect(() => {
+    if (displayTitle) {
+       // FIX: We now correctly wrap the image in an Array format for both Web and Android
+       const artworkArray = displayImage ? [{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] : [];
+       
+       if ('mediaSession' in navigator) {
+           try {
+               navigator.mediaSession.metadata = new MediaMetadata({ 
+                   title: displayTitle, 
+                   artist: displayArtists, 
+                   album: playContext?.name || 'App', 
+                   artwork: artworkArray 
+               });
+           } catch (e) {}
+       }
+  
+       if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+           (window as any).Capacitor.Plugins.MediaSession.setMetadata({
+               title: displayTitle,
+               artist: displayArtists,
+               album: playContext?.name || 'App',
+               artwork: artworkArray
+           });
+       }
+    }
+  }, [displayTitle, displayArtists, displayImage, playContext]);
   useEffect(() => { 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'; 
     // FIX: Corrected parameter 'playbackState'
@@ -3370,4 +3394,4 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       </div>
     </>
   );
-                                                        }
+            }
