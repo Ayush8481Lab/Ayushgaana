@@ -1779,6 +1779,10 @@ export default function MiniPlayer() {
     }
 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = newState ? 'playing' : 'paused';
+// NEW: Native APK Play/Pause state update
+if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
+    window.Capacitor.Plugins.MediaSession.setPlaybackState({ state: newState ? 'playing' : 'paused' });
+}
     
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
       videoIframeRef.current.contentWindow.postMessage({ type: newState ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
@@ -1914,39 +1918,96 @@ export default function MiniPlayer() {
   useEffect(() => { playNextRef.current = playNext; playPrevRef.current = playPrev; isVideoModeRef.current = isVideoMode; },[playNext, playPrev, isVideoMode]);
 
   const syncPosition = useCallback(() => {
-    if ('mediaSession' in navigator && audioRef.current) {
-      const d = audioRef.current.duration; const c = audioRef.current.currentTime;
-      if (d > 0 && c >= 0 && c <= d && !isNaN(d) && !isNaN(c)) {
-        try { navigator.mediaSession.setPositionState({ duration: d, playbackRate: audioRef.current.playbackRate || 1, position: c }); } catch(e) {}
+  if (audioRef.current) {
+    const d = audioRef.current.duration; const c = audioRef.current.currentTime;
+    if (d > 0 && c >= 0 && c <= d && !isNaN(d) && !isNaN(c)) {
+      // Chrome / Web
+      if ('mediaSession' in navigator) {
+         try { navigator.mediaSession.setPositionState({ duration: d, playbackRate: audioRef.current.playbackRate || 1, position: c }); } catch(e) {}
+      }
+      // NEW: Native APK Seek Bar update
+      if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
+         window.Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: d, playbackRate: 1 });
       }
     }
-  },[]);
+  }
+},[]);
 
-  useEffect(() => {
-    if ('mediaSession' in navigator && displayTitle) {
-       try {
-           navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: displayImage ?[{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] :[] });
-       } catch (e) {}
-       
-       navigator.mediaSession.setActionHandler('play', () => {
-          setIsPlaying(true); navigator.mediaSession.playbackState = 'playing';
-          if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
-          else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
-       });
-       navigator.mediaSession.setActionHandler('pause', () => {
-          setIsPlaying(false); navigator.mediaSession.playbackState = 'paused';
-          if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
-          else if (audioRef.current) audioRef.current.pause();
-       });
-       navigator.mediaSession.setActionHandler('previoustrack', () => playPrevRef.current());
-       navigator.mediaSession.setActionHandler('nexttrack', () => playNextRef.current());
-       navigator.mediaSession.setActionHandler('seekto', (details) => {
-          if (details.seekTime !== undefined && audioRef.current) { audioRef.current.currentTime = details.seekTime; setCurrentTime(details.seekTime); syncPosition(); }
-       });
+ useEffect(() => {
+  if (displayTitle) {
+     // --- 1. GOOGLE CHROME / WEB LOGIC ---
+     if ('mediaSession' in navigator) {
+         try {
+             navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: displayImage ?[{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] :[] });
+         } catch (e) {}
+         
+         navigator.mediaSession.setActionHandler('play', () => {
+            setIsPlaying(true); navigator.mediaSession.playbackState = 'playing';
+            if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
+            else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
+         });
+         navigator.mediaSession.setActionHandler('pause', () => {
+            setIsPlaying(false); navigator.mediaSession.playbackState = 'paused';
+            if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
+            else if (audioRef.current) audioRef.current.pause();
+         });
+         navigator.mediaSession.setActionHandler('previoustrack', () => playPrevRef.current());
+         navigator.mediaSession.setActionHandler('nexttrack', () => playNextRef.current());
+         navigator.mediaSession.setActionHandler('seekto', (details) => {
+            if (details.seekTime !== undefined && audioRef.current) { audioRef.current.currentTime = details.seekTime; setCurrentTime(details.seekTime); syncPosition(); }
+         });
+     }
+
+     // --- 2. NEW: NATIVE ANDROID APK LOGIC ---
+     if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
+         const NativeSession = window.Capacitor.Plugins.MediaSession;
+         
+         // Push Track Info to Android OS Lock Screen
+         NativeSession.setMetadata({
+             title: displayTitle,
+             artist: displayArtists,
+             album: playContext?.name || 'App',
+             artwork: displayImage || 'https://via.placeholder.com/512'
+         });
+
+         // Clear old event listeners, then add new ones to prevent duplicate clicks
+         NativeSession.removeAllListeners().then(() => {
+             NativeSession.addListener('play', () => {
+                setIsPlaying(true); 
+                NativeSession.setPlaybackState({ state: 'playing' });
+                if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
+                else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
+             });
+
+             NativeSession.addListener('pause', () => {
+                setIsPlaying(false);
+                NativeSession.setPlaybackState({ state: 'paused' });
+                if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
+                else if (audioRef.current) audioRef.current.pause();
+             });
+
+             NativeSession.addListener('previoustrack', () => playPrevRef.current());
+             NativeSession.addListener('nexttrack', () => playNextRef.current());
+             
+             NativeSession.addListener('seekto', (details: any) => {
+                if (details && details.seekTime !== undefined && audioRef.current) { 
+                    audioRef.current.currentTime = details.seekTime; 
+                    setCurrentTime(details.seekTime); 
+                    syncPosition(); 
+                }
+             });
+         });
+     }
+  }
+},[displayTitle, displayArtists, displayImage, playContext, currentSong]); 
+
+useEffect(() => { 
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'; 
+    // NEW: Native APK state
+    if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
+        window.Capacitor.Plugins.MediaSession.setPlaybackState({ state: isPlaying ? 'playing' : 'paused' });
     }
-  },[displayTitle, displayArtists, displayImage, playContext, currentSong]);
-
-  useEffect(() => { if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'; },[isPlaying]);
+},[isPlaying]);
 
   const handleTimeUpdate = () => {
     if (audioRef.current && !isVideoMode) {
@@ -3314,4 +3375,4 @@ export default function MiniPlayer() {
       </div>
     </>
   );
-}
+  }
