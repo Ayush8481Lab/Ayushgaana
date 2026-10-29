@@ -2020,13 +2020,21 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
        }
     }
   }, [displayTitle, displayArtists, displayImage, playContext]);
+// --- 4. SYNC NOTIFICATION WITH TRUE BUFFERING STATE ---
   useEffect(() => { 
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'; 
-    // FIX: Corrected parameter 'playbackState'
+    // Only tell Android the song is "playing" if it's NOT loading/buffering
+    const isActuallyPlaying = isPlaying && !isStreamLoading && !isAudioBuffering;
+    
+    // Passing 'none' to Capacitor when buffering forces the OS to wait/show loading
+    const nativeState = isActuallyPlaying ? 'playing' : (isPlaying ? 'none' : 'paused');
+    
+    if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = isActuallyPlaying ? 'playing' : 'paused';
+    } 
     if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: isPlaying ? 'playing' : 'paused' });
+        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: nativeState });
     }
-},[isPlaying]);
+  }, [isPlaying, isStreamLoading, isAudioBuffering]);
 
   const handleTimeUpdate = () => {
     if (audioRef.current && !isVideoMode) {
@@ -3394,4 +3402,4 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       </div>
     </>
   );
-            }
+}
