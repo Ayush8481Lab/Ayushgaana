@@ -1780,10 +1780,9 @@ export default function MiniPlayer() {
 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = newState ? 'playing' : 'paused';
 // NEW: Native APK Play/Pause state update
-if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
-    window.Capacitor.Plugins.MediaSession.setPlaybackState({ state: newState ? 'playing' : 'paused' });
+if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+    (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ state: newState ? 'playing' : 'paused' });
 }
-    
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
       videoIframeRef.current.contentWindow.postMessage({ type: newState ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
     } else {
@@ -1926,14 +1925,13 @@ if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugin
          try { navigator.mediaSession.setPositionState({ duration: d, playbackRate: audioRef.current.playbackRate || 1, position: c }); } catch(e) {}
       }
       // NEW: Native APK Seek Bar update
-      if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
-         window.Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: d, playbackRate: 1 });
+      if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+         (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: d, playbackRate: 1 });
       }
     }
   }
 },[]);
-
- useEffect(() => {
+useEffect(() => {
   if (displayTitle) {
      // --- 1. GOOGLE CHROME / WEB LOGIC ---
      if ('mediaSession' in navigator) {
@@ -1959,8 +1957,8 @@ if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugin
      }
 
      // --- 2. NEW: NATIVE ANDROID APK LOGIC ---
-     if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
-         const NativeSession = window.Capacitor.Plugins.MediaSession;
+     if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+         const NativeSession = (window as any).Capacitor.Plugins.MediaSession;
          
          // Push Track Info to Android OS Lock Screen
          NativeSession.setMetadata({
@@ -1999,13 +1997,14 @@ if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugin
          });
      }
   }
-},[displayTitle, displayArtists, displayImage, playContext, currentSong]); 
+},[displayTitle, displayArtists, displayImage, playContext, currentSong]);
+  
 
 useEffect(() => { 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'; 
     // NEW: Native APK state
-    if (typeof window !== 'undefined' && window.Capacitor && window.Capacitor.Plugins.MediaSession) {
-        window.Capacitor.Plugins.MediaSession.setPlaybackState({ state: isPlaying ? 'playing' : 'paused' });
+    if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ state: isPlaying ? 'playing' : 'paused' });
     }
 },[isPlaying]);
 
@@ -3375,4 +3374,4 @@ useEffect(() => {
       </div>
     </>
   );
-  }
+                                                        }
