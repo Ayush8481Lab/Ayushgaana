@@ -1779,10 +1779,11 @@ export default function MiniPlayer() {
     }
 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = newState ? 'playing' : 'paused';
-// NEW: Native APK Play/Pause state update
+// FIX: Corrected parameter 'playbackState' for Native Android
 if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-    (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ state: newState ? 'playing' : 'paused' });
+    (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: newState ? 'playing' : 'paused' });
 }
+    
     if (isVideoMode && videoIframeRef.current?.contentWindow) {
       videoIframeRef.current.contentWindow.postMessage({ type: newState ? 'MUSIC_PLAY' : 'MUSIC_PAUSE' }, '*');
     } else {
@@ -1920,18 +1921,17 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
   if (audioRef.current) {
     const d = audioRef.current.duration; const c = audioRef.current.currentTime;
     if (d > 0 && c >= 0 && c <= d && !isNaN(d) && !isNaN(c)) {
-      // Chrome / Web
       if ('mediaSession' in navigator) {
          try { navigator.mediaSession.setPositionState({ duration: d, playbackRate: audioRef.current.playbackRate || 1, position: c }); } catch(e) {}
       }
-      // NEW: Native APK Seek Bar update
       if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
          (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: d, playbackRate: 1 });
       }
     }
   }
 },[]);
-useEffect(() => {
+
+  useEffect(() => {
   if (displayTitle) {
      // --- 1. GOOGLE CHROME / WEB LOGIC ---
      if ('mediaSession' in navigator) {
@@ -1956,7 +1956,7 @@ useEffect(() => {
          });
      }
 
-     // --- 2. NEW: NATIVE ANDROID APK LOGIC ---
+     // --- 2. NATIVE ANDROID APK LOGIC (FIXED) ---
      if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
          const NativeSession = (window as any).Capacitor.Plugins.MediaSession;
          
@@ -1968,43 +1968,39 @@ useEffect(() => {
              artwork: displayImage || 'https://via.placeholder.com/512'
          });
 
-         // Clear old event listeners, then add new ones to prevent duplicate clicks
-         NativeSession.removeAllListeners().then(() => {
-             NativeSession.addListener('play', () => {
-                setIsPlaying(true); 
-                NativeSession.setPlaybackState({ state: 'playing' });
-                if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
-                else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
-             });
+         // FIX: Use setActionHandler exactly as Capgo dictates
+         NativeSession.setActionHandler({ action: 'play' }, () => {
+            setIsPlaying(true); 
+            NativeSession.setPlaybackState({ playbackState: 'playing' });
+            if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
+            else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>setJamPlayBlocked(true)); }
+         });
 
-             NativeSession.addListener('pause', () => {
-                setIsPlaying(false);
-                NativeSession.setPlaybackState({ state: 'paused' });
-                if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
-                else if (audioRef.current) audioRef.current.pause();
-             });
+         NativeSession.setActionHandler({ action: 'pause' }, () => {
+            setIsPlaying(false);
+            NativeSession.setPlaybackState({ playbackState: 'paused' });
+            if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
+            else if (audioRef.current) audioRef.current.pause();
+         });
 
-             NativeSession.addListener('previoustrack', () => playPrevRef.current());
-             NativeSession.addListener('nexttrack', () => playNextRef.current());
-             
-             NativeSession.addListener('seekto', (details: any) => {
-                if (details && details.seekTime !== undefined && audioRef.current) { 
-                    audioRef.current.currentTime = details.seekTime; 
-                    setCurrentTime(details.seekTime); 
-                    syncPosition(); 
-                }
-             });
+         NativeSession.setActionHandler({ action: 'previoustrack' }, () => playPrevRef.current());
+         NativeSession.setActionHandler({ action: 'nexttrack' }, () => playNextRef.current());
+         
+         NativeSession.setActionHandler({ action: 'seekto' }, (details: any) => {
+            if (details && details.seekTime !== undefined && audioRef.current) { 
+                audioRef.current.currentTime = details.seekTime; 
+                setCurrentTime(details.seekTime); 
+                syncPosition(); 
+            }
          });
      }
   }
 },[displayTitle, displayArtists, displayImage, playContext, currentSong]);
-  
-
-useEffect(() => { 
+  useEffect(() => { 
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'; 
-    // NEW: Native APK state
+    // FIX: Corrected parameter 'playbackState'
     if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ state: isPlaying ? 'playing' : 'paused' });
+        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: isPlaying ? 'playing' : 'paused' });
     }
 },[isPlaying]);
 
