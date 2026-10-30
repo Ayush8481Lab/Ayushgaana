@@ -1917,27 +1917,40 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
 
   useEffect(() => { playNextRef.current = playNext; playPrevRef.current = playPrev; isVideoModeRef.current = isVideoMode; },[playNext, playPrev, isVideoMode]);
 
-// --- NATIVE MEDIA SESSION ENGINE (STRICT ASYNC SYNCHRONIZATION) ---
+// --- ULTIMATE NATIVE MEDIA SESSION ENGINE ---
   const activeTrackIdRef = useRef<string | null>(null);
 
+  // 1. Force Native State based on hardware, NOT React state
+  const forceNativeState = useCallback((state: 'playing' | 'paused') => {
+      if ('mediaSession' in navigator) {
+          try { navigator.mediaSession.playbackState = state; } catch(e) {}
+      }
+      if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+          try { (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: state }); } catch(e) {}
+      }
+  }, []);
+
+  // 2. Safely Sync Position (Prevents NaN crashes in Android)
   const syncPosition = useCallback(async () => {
     if (audioRef.current) {
-      const d = audioRef.current.duration || 0; 
-      const c = audioRef.current.currentTime || 0;
-      const safeDuration = d > 0 ? d : 100; 
+      const d = audioRef.current.duration; 
+      const c = audioRef.current.currentTime;
+      // CRITICAL: NaN crashes Android Lock Screen. Use safe numbers!
+      const safeDuration = (!d || isNaN(d) || d <= 0) ? 100 : d; 
+      const safePosition = (!c || isNaN(c) || c < 0) ? 0 : c;
       
       if ('mediaSession' in navigator) {
-         try { navigator.mediaSession.setPositionState({ duration: safeDuration, playbackRate: 1, position: c }); } catch(e) {}
+         try { navigator.mediaSession.setPositionState({ duration: safeDuration, playbackRate: 1, position: safePosition }); } catch(e) {}
       }
       if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
          try {
-             await (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: safeDuration, playbackRate: 1 });
+             await (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: safePosition, duration: safeDuration, playbackRate: 1 });
          } catch(e) {}
       }
     }
   }, []);
 
-  // 1. SETUP ACTION HANDLERS ONCE
+  // 3. Setup Action Handlers ONCE
   useEffect(() => {
      const handlePlay = () => {
         setIsPlaying(true);
@@ -1978,49 +1991,41 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); 
 
-  // 2. SEQUENCED METADATA & STATE SYNC (Fixes the 15-Second Jump & Play/Pause Desync)
+  // 4. METADATA & HARD WIPE SYNC (Fixes 15-Second Jump)
   useEffect(() => {
     const trackId = currentSong?.id || currentSong?.track_id || displayTitle;
-    const state = isPlaying ? 'playing' : 'paused';
     const artworkArray = displayImage ? [{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] : [];
     const isNewTrack = displayTitle && activeTrackIdRef.current !== trackId;
-    
-    // Web Update (Synchronous for Chrome)
-    if ('mediaSession' in navigator) {
-        try {
-            navigator.mediaSession.playbackState = state;
-            if (isNewTrack) {
-                navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
-                navigator.mediaSession.setPositionState({ duration: 100, playbackRate: 1, position: 0 });
-            }
-        } catch (e) {}
-    }
 
-    // Native Update (Asynchronous Sequenced for Android APK)
-    const updateNative = async () => {
-        if (typeof window === 'undefined' || !(window as any).Capacitor || !(window as any).Capacitor.Plugins.MediaSession) return;
-        const NativeSession = (window as any).Capacitor.Plugins.MediaSession;
+    const updateNativeMetadata = async () => {
+        if (!isNewTrack) return;
+        activeTrackIdRef.current = trackId;
+
+        // Force internal audio to 0 immediately so old time doesn't bleed through
+        if (audioRef.current) audioRef.current.currentTime = 0;
+
+        if ('mediaSession' in navigator) {
+            try {
+                navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
+                navigator.mediaSession.setPositionState({ duration: 100, playbackRate: 1, position: 0 }); 
+            } catch (e) {}
+        }
         
-        try {
-            if (isNewTrack) {
-                activeTrackIdRef.current = trackId;
-                if (audioRef.current) audioRef.current.currentTime = 0; // Wipe DOM audio time
-                
-                // CRITICAL: We MUST await setMetadata before setting position to 0!
-                // Otherwise Android processes them out of order and keeps the old 15-second time!
+        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+            const NativeSession = (window as any).Capacitor.Plugins.MediaSession;
+            try {
                 await NativeSession.setMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
                 
-                // Now that Android confirms Metadata is set, it's safe to reset the clock to 0
-                await NativeSession.setPositionState({ position: 0, duration: 100, playbackRate: 1 });
-            }
-            
-            // ALWAYS apply Play/Pause state AFTER metadata is fully loaded to prevent Desyncs
-            await NativeSession.setPlaybackState({ playbackState: state });
-        } catch(e) {}
+                // CRITICAL: We wait for metadata to load, then force state, then force position 0 to crush the bug!
+                await NativeSession.setPlaybackState({ playbackState: isPlaying ? 'playing' : 'paused' });
+                await NativeSession.setPositionState({ position: 0, duration: 100, playbackRate: 1 }); 
+            } catch(e) {}
+        }
     };
 
-    updateNative();
-  }, [displayTitle, displayArtists, displayImage, playContext, currentSong, isPlaying]);
+    updateNativeMetadata();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [displayTitle, displayArtists, displayImage, playContext]);
 
 // --- 1. SET UP MEDIA ACTIONS ONCE (Fixes Play/Pause Desync) ---
   useEffect(() => {
@@ -2802,11 +2807,22 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       `}} />
 
       <audio 
-        ref={audioRef} autoPlay={isPlaying && !isVideoMode} 
+        ref={audioRef} 
+        autoPlay={isPlaying && !isVideoMode} 
         onEnded={() => playNext(true)} 
         onTimeUpdate={handleTimeUpdate}
         onWaiting={() => setIsAudioBuffering(true)}
-        onPlaying={() => setIsAudioBuffering(false)}
+        onPlaying={() => {
+           setIsAudioBuffering(false);
+           // NATIVE FIX: The exact millisecond the phone produces sound, the notification switches to playing!
+           forceNativeState('playing');
+           syncPosition();
+        }}
+        onPause={() => {
+           // NATIVE FIX: The exact millisecond the phone stops sound, the notification pauses!
+           forceNativeState('paused');
+           syncPosition();
+        }}
         onCanPlay={() => setIsAudioBuffering(false)}
         crossOrigin="anonymous" 
         onLoadedMetadata={() => { 
@@ -3495,4 +3511,4 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       </div>
     </>
   );
-            }
+                                                       }
