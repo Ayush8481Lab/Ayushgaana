@@ -1917,43 +1917,36 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
 
   useEffect(() => { playNextRef.current = playNext; playPrevRef.current = playPrev; isVideoModeRef.current = isVideoMode; },[playNext, playPrev, isVideoMode]);
 
-  // --- UNIFIED NATIVE MEDIA SESSION ENGINE ---
+// --- NATIVE MEDIA SESSION ENGINE (STRICT ASYNC SYNCHRONIZATION) ---
   const activeTrackIdRef = useRef<string | null>(null);
 
-  const syncPosition = useCallback(() => {
+  const syncPosition = useCallback(async () => {
     if (audioRef.current) {
       const d = audioRef.current.duration || 0; 
       const c = audioRef.current.currentTime || 0;
-      // FIX: Ensure Android never rejects the slider sync by passing a safe fallback duration (100) if buffering
       const safeDuration = d > 0 ? d : 100; 
       
       if ('mediaSession' in navigator) {
          try { navigator.mediaSession.setPositionState({ duration: safeDuration, playbackRate: 1, position: c }); } catch(e) {}
       }
       if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-         (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: safeDuration, playbackRate: 1 });
+         try {
+             await (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: safeDuration, playbackRate: 1 });
+         } catch(e) {}
       }
     }
   }, []);
 
-  // 1. SETUP ACTION HANDLERS ONCE (Fixes Play/Pause Desync)
+  // 1. SETUP ACTION HANDLERS ONCE
   useEffect(() => {
      const handlePlay = () => {
         setIsPlaying(true);
-        if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
-        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-            (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: 'playing' });
-        }
         if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
         else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
      };
 
      const handlePause = () => {
         setIsPlaying(false);
-        if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
-        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-            (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: 'paused' });
-        }
         if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
         else if (audioRef.current) audioRef.current.pause();
      };
@@ -1985,38 +1978,48 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); 
 
-  // 2. SYNC METADATA & HARD WIPE SLIDER (Fixes 15-Second Jump)
+  // 2. SEQUENCED METADATA & STATE SYNC (Fixes the 15-Second Jump & Play/Pause Desync)
   useEffect(() => {
     const trackId = currentSong?.id || currentSong?.track_id || displayTitle;
     const state = isPlaying ? 'playing' : 'paused';
     const artworkArray = displayImage ? [{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] : [];
-
-    // ALWAYS enforce correct Play/Pause state when React state changes
-    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = state;
-    if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: state });
-    }
-
-    // ONLY update text and WIPE SLIDER if the actual song changed!
-    if (displayTitle && activeTrackIdRef.current !== trackId) {
-        activeTrackIdRef.current = trackId;
-
-        // Force internal audio to 0 immediately so old time doesn't bleed through
-        if (audioRef.current) audioRef.current.currentTime = 0;
-
-        if ('mediaSession' in navigator) {
-            try {
+    const isNewTrack = displayTitle && activeTrackIdRef.current !== trackId;
+    
+    // Web Update (Synchronous for Chrome)
+    if ('mediaSession' in navigator) {
+        try {
+            navigator.mediaSession.playbackState = state;
+            if (isNewTrack) {
                 navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
-                // Hard Wipe Slider to 0:00
-                navigator.mediaSession.setPositionState({ duration: 100, playbackRate: 1, position: 0 }); 
-            } catch (e) {}
-        }
-        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-            (window as any).Capacitor.Plugins.MediaSession.setMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
-            // Hard Wipe Native Slider to 0:00
-            (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: 0, duration: 100, playbackRate: 1 }); 
-        }
+                navigator.mediaSession.setPositionState({ duration: 100, playbackRate: 1, position: 0 });
+            }
+        } catch (e) {}
     }
+
+    // Native Update (Asynchronous Sequenced for Android APK)
+    const updateNative = async () => {
+        if (typeof window === 'undefined' || !(window as any).Capacitor || !(window as any).Capacitor.Plugins.MediaSession) return;
+        const NativeSession = (window as any).Capacitor.Plugins.MediaSession;
+        
+        try {
+            if (isNewTrack) {
+                activeTrackIdRef.current = trackId;
+                if (audioRef.current) audioRef.current.currentTime = 0; // Wipe DOM audio time
+                
+                // CRITICAL: We MUST await setMetadata before setting position to 0!
+                // Otherwise Android processes them out of order and keeps the old 15-second time!
+                await NativeSession.setMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
+                
+                // Now that Android confirms Metadata is set, it's safe to reset the clock to 0
+                await NativeSession.setPositionState({ position: 0, duration: 100, playbackRate: 1 });
+            }
+            
+            // ALWAYS apply Play/Pause state AFTER metadata is fully loaded to prevent Desyncs
+            await NativeSession.setPlaybackState({ playbackState: state });
+        } catch(e) {}
+    };
+
+    updateNative();
   }, [displayTitle, displayArtists, displayImage, playContext, currentSong, isPlaying]);
 
 // --- 1. SET UP MEDIA ACTIONS ONCE (Fixes Play/Pause Desync) ---
@@ -3492,4 +3495,4 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       </div>
     </>
   );
-                                                       }
+            }
