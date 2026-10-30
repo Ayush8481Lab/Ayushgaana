@@ -1917,19 +1917,107 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
 
   useEffect(() => { playNextRef.current = playNext; playPrevRef.current = playPrev; isVideoModeRef.current = isVideoMode; },[playNext, playPrev, isVideoMode]);
 
+  // --- UNIFIED NATIVE MEDIA SESSION ENGINE ---
+  const activeTrackIdRef = useRef<string | null>(null);
+
   const syncPosition = useCallback(() => {
-  if (audioRef.current) {
-    const d = audioRef.current.duration; const c = audioRef.current.currentTime;
-    if (d > 0 && c >= 0 && c <= d && !isNaN(d) && !isNaN(c)) {
+    if (audioRef.current) {
+      const d = audioRef.current.duration || 0; 
+      const c = audioRef.current.currentTime || 0;
+      // FIX: Ensure Android never rejects the slider sync by passing a safe fallback duration (100) if buffering
+      const safeDuration = d > 0 ? d : 100; 
+      
       if ('mediaSession' in navigator) {
-         try { navigator.mediaSession.setPositionState({ duration: d, playbackRate: audioRef.current.playbackRate || 1, position: c }); } catch(e) {}
+         try { navigator.mediaSession.setPositionState({ duration: safeDuration, playbackRate: 1, position: c }); } catch(e) {}
       }
       if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
-         (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: d, playbackRate: 1 });
+         (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: c, duration: safeDuration, playbackRate: 1 });
       }
     }
-  }
-},[]);
+  }, []);
+
+  // 1. SETUP ACTION HANDLERS ONCE (Fixes Play/Pause Desync)
+  useEffect(() => {
+     const handlePlay = () => {
+        setIsPlaying(true);
+        if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+            (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: 'playing' });
+        }
+        if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
+        else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
+     };
+
+     const handlePause = () => {
+        setIsPlaying(false);
+        if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+            (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: 'paused' });
+        }
+        if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
+        else if (audioRef.current) audioRef.current.pause();
+     };
+
+     const handleSeek = (details: any) => {
+        if (details && details.seekTime !== undefined && audioRef.current) { 
+            audioRef.current.currentTime = details.seekTime; 
+            setCurrentTime(details.seekTime);
+            syncPosition();
+        }
+     };
+
+     if ('mediaSession' in navigator) {
+         navigator.mediaSession.setActionHandler('play', handlePlay);
+         navigator.mediaSession.setActionHandler('pause', handlePause);
+         navigator.mediaSession.setActionHandler('previoustrack', () => playPrevRef.current());
+         navigator.mediaSession.setActionHandler('nexttrack', () => playNextRef.current());
+         navigator.mediaSession.setActionHandler('seekto', handleSeek);
+     }
+
+     if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+         const NativeSession = (window as any).Capacitor.Plugins.MediaSession;
+         NativeSession.setActionHandler({ action: 'play' }, handlePlay);
+         NativeSession.setActionHandler({ action: 'pause' }, handlePause);
+         NativeSession.setActionHandler({ action: 'previoustrack' }, () => playPrevRef.current());
+         NativeSession.setActionHandler({ action: 'nexttrack' }, () => playNextRef.current());
+         NativeSession.setActionHandler({ action: 'seekto' }, handleSeek);
+     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); 
+
+  // 2. SYNC METADATA & HARD WIPE SLIDER (Fixes 15-Second Jump)
+  useEffect(() => {
+    const trackId = currentSong?.id || currentSong?.track_id || displayTitle;
+    const state = isPlaying ? 'playing' : 'paused';
+    const artworkArray = displayImage ? [{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] : [];
+
+    // ALWAYS enforce correct Play/Pause state when React state changes
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = state;
+    if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+        (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: state });
+    }
+
+    // ONLY update text and WIPE SLIDER if the actual song changed!
+    if (displayTitle && activeTrackIdRef.current !== trackId) {
+        activeTrackIdRef.current = trackId;
+
+        // Force internal audio to 0 immediately so old time doesn't bleed through
+        if (audioRef.current) audioRef.current.currentTime = 0;
+
+        if ('mediaSession' in navigator) {
+            try {
+                navigator.mediaSession.metadata = new MediaMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
+                // Hard Wipe Slider to 0:00
+                navigator.mediaSession.setPositionState({ duration: 100, playbackRate: 1, position: 0 }); 
+            } catch (e) {}
+        }
+        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
+            (window as any).Capacitor.Plugins.MediaSession.setMetadata({ title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray });
+            // Hard Wipe Native Slider to 0:00
+            (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: 0, duration: 100, playbackRate: 1 }); 
+        }
+    }
+  }, [displayTitle, displayArtists, displayImage, playContext, currentSong, isPlaying]);
 
 // --- 1. SET UP MEDIA ACTIONS ONCE (Fixes Play/Pause Desync) ---
   useEffect(() => {
@@ -3404,4 +3492,4 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       </div>
     </>
   );
-  }
+                                                       }
