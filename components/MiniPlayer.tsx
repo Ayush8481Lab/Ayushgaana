@@ -1992,8 +1992,18 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
   }, []); // <-- Empty array ensures we don't DDoS the bridge
 
   // --- 2. UPDATE METADATA (Fixes 15-Second Jump & Missing Artwork) ---
+  // --- 2. UPDATE METADATA (LOCKED TO PREVENT NOTIFICATION FLICKER/DISAPPEARANCE) ---
+  const lastMetadataId = useRef("");
+
   useEffect(() => {
     if (displayTitle) {
+       // We create a unique signature for this exact track and image state
+       const currentSignature = `${displayTitle}-${displayImage}`;
+       
+       // If it hasn't changed, DO NOT update. This stops Android from destroying and rebuilding the notification!
+       if (lastMetadataId.current === currentSignature) return;
+       lastMetadataId.current = currentSignature;
+
        const artworkArray = displayImage ? [{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] : [];
        
        if ('mediaSession' in navigator) {
@@ -2001,7 +2011,7 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
                navigator.mediaSession.metadata = new MediaMetadata({ 
                    title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray 
                });
-               // Force reset slider to 0 for new song
+               // Force slider to 0 for new song
                navigator.mediaSession.setPositionState({ duration: 0, playbackRate: 1, position: 0 });
            } catch (e) {}
        }
@@ -2010,7 +2020,6 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
            (window as any).Capacitor.Plugins.MediaSession.setMetadata({
                title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray
            });
-           // Force reset slider to 0 for new song in Native Android
            (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: 0, duration: 0, playbackRate: 1 });
        }
     }
@@ -3395,4 +3404,4 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
       </div>
     </>
   );
-                                                       }
+  }
