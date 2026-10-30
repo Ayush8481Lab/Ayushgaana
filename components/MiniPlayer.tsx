@@ -1931,17 +1931,17 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
   }
 },[]);
 
-// --- 1. SET UP MEDIA ACTIONS ONCE (FIXES 2-8 SECOND LAG/DELAY) ---
+// --- 1. SET UP MEDIA ACTIONS ONCE (Fixes Play/Pause Desync) ---
   useEffect(() => {
      // Google Chrome / Web
      if ('mediaSession' in navigator) {
          navigator.mediaSession.setActionHandler('play', () => {
-            setIsPlaying(true); navigator.mediaSession.playbackState = 'playing';
+            setIsPlaying(true); // ONLY update React state. Let Block 3 handle the notification!
             if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
             else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
          });
          navigator.mediaSession.setActionHandler('pause', () => {
-            setIsPlaying(false); navigator.mediaSession.playbackState = 'paused';
+            setIsPlaying(false);
             if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
             else if (audioRef.current) audioRef.current.pause();
          });
@@ -1967,14 +1967,12 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
          
          NativeSession.setActionHandler({ action: 'play' }, () => {
             setIsPlaying(true); 
-            NativeSession.setPlaybackState({ playbackState: 'playing' });
             if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PLAY' }, '*');
             else if (audioRef.current) { const p = audioRef.current.play(); if (p !== undefined) p.catch(()=>{}); }
          });
 
          NativeSession.setActionHandler({ action: 'pause' }, () => {
             setIsPlaying(false);
-            NativeSession.setPlaybackState({ playbackState: 'paused' });
             if (isVideoModeRef.current && videoIframeRef.current?.contentWindow) videoIframeRef.current.contentWindow.postMessage({ type: 'MUSIC_PAUSE' }, '*');
             else if (audioRef.current) audioRef.current.pause();
          });
@@ -1991,39 +1989,36 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
          });
      }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // <-- Empty array ensures this only runs ONCE! Eliminates all Bridge Lag!
+  }, []); // <-- Empty array ensures we don't DDoS the bridge
 
-  // --- 2. UPDATE METADATA ONLY WHEN IT CHANGES (FIXES MISSING IMAGE) ---
+  // --- 2. UPDATE METADATA (Fixes 15-Second Jump & Missing Artwork) ---
   useEffect(() => {
     if (displayTitle) {
-       // FIX: We now correctly wrap the image in an Array format for both Web and Android
        const artworkArray = displayImage ? [{ src: displayImage, sizes: '512x512', type: 'image/jpeg' }] : [];
        
        if ('mediaSession' in navigator) {
            try {
                navigator.mediaSession.metadata = new MediaMetadata({ 
-                   title: displayTitle, 
-                   artist: displayArtists, 
-                   album: playContext?.name || 'App', 
-                   artwork: artworkArray 
+                   title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray 
                });
+               // Force reset slider to 0 for new song
+               navigator.mediaSession.setPositionState({ duration: 0, playbackRate: 1, position: 0 });
            } catch (e) {}
        }
   
        if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
            (window as any).Capacitor.Plugins.MediaSession.setMetadata({
-               title: displayTitle,
-               artist: displayArtists,
-               album: playContext?.name || 'App',
-               artwork: artworkArray
+               title: displayTitle, artist: displayArtists, album: playContext?.name || 'App', artwork: artworkArray
            });
+           // Force reset slider to 0 for new song in Native Android
+           (window as any).Capacitor.Plugins.MediaSession.setPositionState({ position: 0, duration: 0, playbackRate: 1 });
        }
     }
   }, [displayTitle, displayArtists, displayImage, playContext]);
-// --- 4. SYNC NOTIFICATION STATE WITHOUT DESTROYING IT ---
+
+  // --- 3. SINGLE SOURCE OF TRUTH FOR PLAY/PAUSE (Fixes OriginOS Blending & State Bugs) ---
   useEffect(() => { 
-    // We NEVER pass 'none'. Passing 'none' destroys the Android notification and causes the 1-8 sec flicker.
-    // We just pass 'playing' or 'paused'. Android natively handles internal buffering without breaking the UI.
+    // We NEVER pass 'none'. This ensures the Notification stays alive 100% of the time.
     const state = isPlaying ? 'playing' : 'paused';
     
     if ('mediaSession' in navigator) {
@@ -2032,7 +2027,7 @@ if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any
     if (typeof window !== 'undefined' && (window as any).Capacitor && (window as any).Capacitor.Plugins.MediaSession) {
         (window as any).Capacitor.Plugins.MediaSession.setPlaybackState({ playbackState: state });
     }
-  }, [isPlaying]); // Strictly watch isPlaying only to prevent spamming the bridge!
+  }, [isPlaying]);
 
   const handleTimeUpdate = () => {
     if (audioRef.current && !isVideoMode) {
