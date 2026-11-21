@@ -365,7 +365,7 @@ function PlaylistContent() {
 
     const fetchPlaylist = async () => {
       setLoading(true);
-      const url = `https://ayushmobileappmusicgaaana.vercel.app/api/Playlist?seo=${seokey}`;
+      const url = `https://ayushgaana.vercel.app/api/Playlist?seo=${seokey}`;
 
       const json = await fetchStrictly(url);
       const tracks = json?.tracks || json?.data?.tracks || [];
