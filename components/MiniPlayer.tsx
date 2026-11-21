@@ -2813,7 +2813,7 @@ export default function MiniPlayer() {
         try { const im = new Image(); im.src = getImageUrl(nextTrack); } catch (e) {}
         let sj = await getCache(`gaana_stream_${nextTrackId}`);
         if (!sj && !nextTrack.prefetchedStreamBaseUrl) {
-          const r = await fetchProtected(`https://ayushmobileappmusicgaaana.vercel.app/api/stream?id=${nextTrackId}`, { referrerPolicy: "no-referrer" });
+          const r = await fetchProtected(`https://ayushgaana.vercel.app/api/stream?id=${nextTrackId}`, { referrerPolicy: "no-referrer" });
           if (r.ok) {
             sj = await r.json();
             await setCache(`gaana_stream_${nextTrackId}`, (sj?.success && sj?.hls_url) ? sj : { notFound: true });
@@ -2937,7 +2937,7 @@ export default function MiniPlayer() {
 
             let streamJson = await getCache(`gaana_stream_${trackId}`);
             if (!streamJson) {
-                const streamRes = await fetchProtected(`https://ayushmobileappmusicgaaana.vercel.app/api/stream?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
+                const streamRes = await fetchProtected(`https://ayushgaana.vercel.app/api/stream?id=${trackId}`, { referrerPolicy: "no-referrer", signal });
                 if (streamRes.ok) {
                     streamJson = await streamRes.json();
                     if (streamJson?.success && streamJson?.hls_url) await setCache(`gaana_stream_${trackId}`, streamJson);
